@@ -1,0 +1,5 @@
+flask
+websocket-client
+libsql-client
+pandas
+gunicorn
