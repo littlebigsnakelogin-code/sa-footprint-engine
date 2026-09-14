@@ -8,15 +8,22 @@ import websocket
 
 app = Flask(__name__)
 
-TURSO_DB_URL = os.environ.get("TURSO_DB_URL", "")
-TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "")
+TURSO_DB_URL = os.environ.get("TURSO_DB_URL", "").strip()
+TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
 
 SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'avaxusdt', 'linkusdt', 'ltcusdt']
 
 def get_db():
     if not TURSO_DB_URL or not TURSO_AUTH_TOKEN:
         return None
-    return libsql_client.create_client_sync(url=TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
+    try:
+        # Clean up any accidental quotes or spaces in environment variables
+        url = TURSO_DB_URL.strip(" '\"")
+        token = TURSO_AUTH_TOKEN.strip(" '\"")
+        return libsql_client.create_client_sync(url=url, auth_token=token)
+    except Exception as e:
+        print("Connection Helper Error:", e)
+        return None
 
 def init_db():
     client = get_db()
@@ -29,8 +36,11 @@ def init_db():
                                 PRIMARY KEY (symbol, tf, time)
                             )''')
             client.close()
+            print("Database Table Initialized Successfully.")
         except Exception as e:
             print("DB Init Error:", e)
+    else:
+        print("Failed to connect to Turso DB during init.")
 
 init_db()
 
@@ -113,7 +123,7 @@ HTML_UI = """
             const alertBox = document.getElementById('spoof-alert');
             if(alertData.spoof_detected) {
                 alertBox.style.display = 'block';
-                alertBox.innerText = `⚠️ Spoofing Alert: Large wall pulled (${alertData.size} BTC/Token) near ${alertData.price}`;
+                alertBox.innerText = `⚠️ Spoofing Alert: Large wall pulled (${alertData.size} Token) near ${alertData.price}`;
             } else {
                 alertBox.style.display = 'none';
             }
@@ -139,7 +149,6 @@ def get_candles():
         return jsonify([])
     
     try:
-        # Fetching base 1m candles from Turso DB
         res = client.execute("SELECT time, open, high, low, close FROM candles WHERE symbol=? AND tf='1m' ORDER BY time ASC LIMIT 500", [symbol])
         rows = res.rows
         client.close()
@@ -148,7 +157,6 @@ def get_candles():
         for r in rows:
             raw_data.append({"time": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4]})
         
-        # If higher timeframe requested, aggregate dynamically
         if tf != '1m':
             multiplier = 1
             if tf == '3m': multiplier = 3
@@ -159,8 +167,7 @@ def get_candles():
             elif tf == '1d': multiplier = 1440
             
             aggregated = []
-            chunk_size = multiplier * 60 # seconds
-            # Simple grouping logic for timeframe aggregation
+            chunk_size = multiplier * 60
             grouped = {}
             for c in raw_data:
                 bucket = (c['time'] // chunk_size) * chunk_size
@@ -180,13 +187,9 @@ def get_candles():
 
 @app.route('/api/spoofing')
 def get_spoofing():
-    # Dynamic Mock/Real check interface for orderbook spoofing trigger
     symbol = request.args.get('symbol', 'btcusdt')
-    # In live background stream, we track rapid order cancellation metrics
     return jsonify({"spoof_detected": False, "price": 0, "size": 0})
 
-
-# Background Binance WebSocket Streamer for Multi-Coin Live Ingestion
 def run_binance_stream():
     def on_message(ws, message):
         try:
@@ -200,7 +203,6 @@ def run_binance_stream():
                 
                 client = get_db()
                 if client:
-                    # Upsert 1m candle into Turso DB
                     client.execute("""
                         INSERT INTO candles (symbol, tf, time, open, high, low, close, delta, totalVol)
                         VALUES (?, '1m', ?, ?, ?, ?, ?, 0.0, ?)
@@ -217,7 +219,6 @@ def run_binance_stream():
     ws = websocket.WebSocketApp(socket_url, on_message=on_message)
     ws.run_forever()
 
-# Start background thread for continuous live ingestion
 threading.Thread(target=run_binance_stream, daemon=True).start()
 
 if __name__ == '__main__':
