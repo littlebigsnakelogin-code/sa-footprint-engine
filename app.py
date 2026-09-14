@@ -2,6 +2,7 @@ import os
 import json
 import time
 import threading
+import requests
 import websocket
 from flask import Flask, render_template_string, jsonify, request
 
@@ -9,12 +10,38 @@ app = Flask(__name__)
 
 # Binance Live Memory Store
 BINANCE_CACHE = {}
+SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'AVAXUSDT', 'LINKUSDT', 'LTCUSDT']
 
-SYMBOLS = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'avaxusdt', 'linkusdt', 'ltcusdt']
+def fetch_initial_history(symbol):
+    """Initial Boot-up par historical candles load karne ke liye"""
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=300"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            raw_candles = res.json()
+            formatted = []
+            for c in raw_candles:
+                formatted.append({
+                    "time": int(c[0]) // 1000,
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4])
+                })
+            BINANCE_CACHE[symbol] = formatted
+            print(f"[HIST SUCCESS] Loaded {len(formatted)} candles for {symbol}")
+    except Exception as e:
+        print(f"[HIST ERROR] Failed to fetch for {symbol}: {e}")
+
+# App startup per-symbol load
+for s in SYMBOLS:
+    fetch_initial_history(s)
 
 def on_message(ws, message):
     try:
-        data = json.loads(message)
+        raw = json.loads(message)
+        data = raw.get('data', raw)
+        
         if 'k' in data:
             k = data['k']
             symbol = data['s']
@@ -30,7 +57,6 @@ def on_message(ws, message):
             if symbol not in BINANCE_CACHE:
                 BINANCE_CACHE[symbol] = []
                 
-            # Keep last 300 candles in memory
             cache = BINANCE_CACHE[symbol]
             if len(cache) > 0 and cache[-1]['time'] == candle['time']:
                 cache[-1] = candle
@@ -42,23 +68,23 @@ def on_message(ws, message):
         print("WS Processing Error:", e)
 
 def start_ws():
-    streams = "/".join([f"{s}@kline_1m" for s in SYMBOLS])
-    ws_url = f"wss://stream.binance.com:9443/ws/{streams}"
+    streams = "/".join([f"{s.lower()}@kline_1m" for s in SYMBOLS])
+    ws_url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     
     while True:
         try:
+            print("[WS] Connecting to Binance Combined Stream...")
             ws = websocket.WebSocketApp(
                 ws_url,
                 on_message=on_message,
                 on_error=lambda ws, e: print("WS Error:", e),
-                on_close=lambda ws, c, m: print("WS Closed")
+                on_close=lambda ws, c, m: print("WS Closed. Reconnecting...")
             )
-            ws.run_forever()
+            ws.run_forever(ping_interval=30, ping_timeout=10)
         except Exception as e:
             print("WS Thread Exception:", e)
         time.sleep(3)
 
-# Start Binance Direct WS Ingestion Thread
 threading.Thread(target=start_ws, daemon=True).start()
 
 HTML_UI = """
@@ -66,19 +92,20 @@ HTML_UI = """
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SA Institutional Footprint Engine</title>
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body { background-color: #121212; color: #fff; font-family: Arial, sans-serif; margin: 0; padding: 10px; }
         #header { display: flex; gap: 15px; align-items: center; margin-bottom: 10px; background: #1e1e1e; padding: 10px; border-radius: 5px; }
         select, button { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
-        #chart-container { width: 100%; height: 650px; background: #181818; border-radius: 5px; }
+        #chart-container { width: 100%; height: 600px; background: #181818; border-radius: 5px; position: relative; }
         #status-bar { color: #ffeb3b; font-size: 13px; font-weight: bold; }
     </style>
 </head>
 <body>
     <div id="header">
-        <h2>SA Footprint Dashboard (Binance Stream)</h2>
+        <h2>SA Footprint Dashboard</h2>
         <select id="symbolSelect" onchange="loadChart()">
             <option value="BTCUSDT">BTCUSDT</option>
             <option value="ETHUSDT">ETHUSDT</option>
@@ -88,29 +115,48 @@ HTML_UI = """
             <option value="LINKUSDT">LINKUSDT</option>
             <option value="LTCUSDT">LTCUSDT</option>
         </select>
-        <button onclick="loadChart()">Refresh</button>
-        <span id="status-bar">Connecting Binance Stream...</span>
+        <button onclick="loadChart()">Force Refresh</button>
+        <span id="status-bar">Initializing Engine...</span>
     </div>
     <div id="chart-container"></div>
 
     <script>
-        const chartContainer = document.getElementById('chart-container');
-        const chart = LightweightCharts.createChart(chartContainer, {
-            layout: { background: { color: '#181818' }, textColor: '#d1d4dc' },
-            grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
-            timeScale: { timeVisible: true, secondsVisible: true }
-        });
-        const candleSeries = chart.addCandlestickSeries({
-            upColor: '#26a69a', downColor: '#ef5350',
-            borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
-        });
+        let chart = null;
+        let candleSeries = null;
+
+        function initChart() {
+            const chartContainer = document.getElementById('chart-container');
+            chartContainer.innerHTML = '';
+            
+            chart = LightweightCharts.createChart(chartContainer, {
+                width: chartContainer.clientWidth,
+                height: 600,
+                layout: { backgroundColor: '#181818', textColor: '#d1d4dc' },
+                grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
+                timeScale: { timeVisible: true, secondsVisible: true }
+            });
+
+            candleSeries = chart.addCandlestickSeries({
+                upColor: '#26a69a', downColor: '#ef5350',
+                borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350'
+            });
+
+            window.addEventListener('resize', () => {
+                if (chart) chart.applyOptions({ width: chartContainer.clientWidth });
+            });
+        }
 
         async function loadChart() {
+            if (!chart) initChart();
+            
             const symbol = document.getElementById('symbolSelect').value;
             const statusEl = document.getElementById('status-bar');
             
             try {
-                const response = await fetch(`/api/candles?symbol=${symbol}`);
+                // Window origin se absolute URL match karega
+                const response = await fetch(window.location.origin + '/api/candles?symbol=' + symbol);
+                if (!response.ok) throw new Error("Network response was not OK");
+                
                 const data = await response.json();
                 
                 if (Array.isArray(data) && data.length > 0) {
@@ -118,17 +164,21 @@ HTML_UI = """
                     statusEl.innerText = `Binance Live 🟢 (${data.length} Bars Ingested)`;
                     statusEl.style.color = "#00ff00";
                 } else {
-                    statusEl.innerText = "Building Live Stream Buffer... Wait 5-10 Sec ⏳";
+                    statusEl.innerText = "Waiting for Backend Buffer... ⏳";
                     statusEl.style.color = "#ff9800";
                 }
             } catch(e) {
                 console.error("UI Fetch Error:", e);
-                statusEl.innerText = "Stream Disconnected 🔴";
+                statusEl.innerText = "API Connection Error 🔴";
                 statusEl.style.color = "#f44336";
             }
         }
-        setInterval(loadChart, 3000);
-        loadChart();
+
+        document.addEventListener("DOMContentLoaded", () => {
+            initChart();
+            loadChart();
+            setInterval(loadChart, 2000);
+        });
     </script>
 </body>
 </html>
@@ -145,4 +195,5 @@ def get_candles():
     return jsonify(data)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
