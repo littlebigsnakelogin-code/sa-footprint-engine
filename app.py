@@ -1,123 +1,79 @@
 import os
 import json
-import time
-import threading
 import requests
-import websocket
 from flask import Flask, render_template_string, jsonify, request
 
 app = Flask(__name__)
 
-# Binance Live Memory Store
-BINANCE_CACHE = {}
-SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'AVAXUSDT', 'LINKUSDT', 'LTCUSDT']
+# Binance Futures Public Endpoint (Backend Only Proxy)
+BINANCE_FUTURES_URL = "https://fapi.binance.com/fapi/v1/klines"
 
-def fetch_initial_history(symbol):
-    """Initial Boot-up par historical candles load karne ke liye"""
+def fetch_binance_candles(symbol):
+    """
+    Backend Only Data Fetcher:
+    Browser Binance se bilkul connect nahi hoga.
+    Python Server khud Binance se data layega.
+    """
+    params = {
+        "symbol": symbol.upper(),
+        "interval": "1m",
+        "limit": 300
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=300"
-        res = requests.get(url, timeout=5)
-        if res.status_code == 200:
-            raw_candles = res.json()
-            formatted = []
-            for c in raw_candles:
-                formatted.append({
-                    "time": int(c[0]) // 1000,
+        response = requests.get(BINANCE_FUTURES_URL, params=params, headers=headers, timeout=5)
+        if response.status_code == 200:
+            raw_data = response.json()
+            candles = []
+            for c in raw_data:
+                candles.append({
+                    "time": int(c[0]) // 1000,  # UNIX Timestamp in seconds
                     "open": float(c[1]),
                     "high": float(c[2]),
                     "low": float(c[3]),
                     "close": float(c[4])
                 })
-            BINANCE_CACHE[symbol] = formatted
-            print(f"[HIST SUCCESS] Loaded {len(formatted)} candles for {symbol}")
+            return candles
     except Exception as e:
-        print(f"[HIST ERROR] Failed to fetch for {symbol}: {e}")
-
-# App startup per-symbol load
-for s in SYMBOLS:
-    fetch_initial_history(s)
-
-def on_message(ws, message):
-    try:
-        raw = json.loads(message)
-        data = raw.get('data', raw)
-        
-        if 'k' in data:
-            k = data['k']
-            symbol = data['s']
-            
-            candle = {
-                "time": int(k['t']) // 1000,
-                "open": float(k['o']),
-                "high": float(k['h']),
-                "low": float(k['l']),
-                "close": float(k['c'])
-            }
-            
-            if symbol not in BINANCE_CACHE:
-                BINANCE_CACHE[symbol] = []
-                
-            cache = BINANCE_CACHE[symbol]
-            if len(cache) > 0 and cache[-1]['time'] == candle['time']:
-                cache[-1] = candle
-            else:
-                cache.append(candle)
-                if len(cache) > 300:
-                    cache.pop(0)
-    except Exception as e:
-        print("WS Processing Error:", e)
-
-def start_ws():
-    streams = "/".join([f"{s.lower()}@kline_1m" for s in SYMBOLS])
-    ws_url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+        print(f"[Backend Error] Data fetch failed for {symbol}: {e}")
     
-    while True:
-        try:
-            print("[WS] Connecting to Binance Combined Stream...")
-            ws = websocket.WebSocketApp(
-                ws_url,
-                on_message=on_message,
-                on_error=lambda ws, e: print("WS Error:", e),
-                on_close=lambda ws, c, m: print("WS Closed. Reconnecting...")
-            )
-            ws.run_forever(ping_interval=30, ping_timeout=10)
-        except Exception as e:
-            print("WS Thread Exception:", e)
-        time.sleep(3)
+    return []
 
-threading.Thread(target=start_ws, daemon=True).start()
-
+# Light-weight UI (Pure HTML/JS - Binance se ZERO connection)
 HTML_UI = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SA Institutional Footprint Engine</title>
+    <title>SA Footprint Engine</title>
     <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
-        body { background-color: #121212; color: #fff; font-family: Arial, sans-serif; margin: 0; padding: 10px; }
-        #header { display: flex; gap: 15px; align-items: center; margin-bottom: 10px; background: #1e1e1e; padding: 10px; border-radius: 5px; }
-        select, button { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
-        #chart-container { width: 100%; height: 600px; background: #181818; border-radius: 5px; position: relative; }
-        #status-bar { color: #ffeb3b; font-size: 13px; font-weight: bold; }
+        body { background-color: #121212; color: #fff; font-family: Arial, sans-serif; margin: 0; padding: 12px; }
+        #header { display: flex; gap: 15px; align-items: center; margin-bottom: 12px; background: #1e1e1e; padding: 12px; border-radius: 6px; }
+        select, button { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        #chart-container { width: 100%; height: 600px; background: #181818; border-radius: 6px; }
+        #status-bar { color: #ffeb3b; font-size: 14px; font-weight: bold; }
     </style>
 </head>
 <body>
     <div id="header">
-        <h2>SA Footprint Dashboard</h2>
-        <select id="symbolSelect" onchange="loadChart()">
+        <h3 style="margin:0;">SA Footprint Dashboard</h3>
+        <select id="symbolSelect" onchange="loadChartData()">
             <option value="BTCUSDT">BTCUSDT</option>
             <option value="ETHUSDT">ETHUSDT</option>
             <option value="SOLUSDT">SOLUSDT</option>
             <option value="XRPUSDT">XRPUSDT</option>
             <option value="AVAXUSDT">AVAXUSDT</option>
             <option value="LINKUSDT">LINKUSDT</option>
-            <option value="LTCUSDT">LTCUSDT</option>
         </select>
-        <button onclick="loadChart()">Force Refresh</button>
-        <span id="status-bar">Initializing Engine...</span>
+        <button onclick="loadChartData()">Force Reload</button>
+        <span id="status-bar">Connecting to Python Backend...</span>
     </div>
+    
     <div id="chart-container"></div>
 
     <script>
@@ -125,11 +81,11 @@ HTML_UI = """
         let candleSeries = null;
 
         function initChart() {
-            const chartContainer = document.getElementById('chart-container');
-            chartContainer.innerHTML = '';
+            const container = document.getElementById('chart-container');
+            container.innerHTML = '';
             
-            chart = LightweightCharts.createChart(chartContainer, {
-                width: chartContainer.clientWidth,
+            chart = LightweightCharts.createChart(container, {
+                width: container.clientWidth,
                 height: 600,
                 layout: { backgroundColor: '#181818', textColor: '#d1d4dc' },
                 grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
@@ -142,42 +98,44 @@ HTML_UI = """
             });
 
             window.addEventListener('resize', () => {
-                if (chart) chart.applyOptions({ width: chartContainer.clientWidth });
+                if (chart) chart.applyOptions({ width: container.clientWidth });
             });
         }
 
-        async function loadChart() {
+        async function loadChartData() {
             if (!chart) initChart();
             
             const symbol = document.getElementById('symbolSelect').value;
             const statusEl = document.getElementById('status-bar');
             
+            statusEl.innerText = `Fetching via Python Backend... ⏳`;
+            statusEl.style.color = "#ff9800";
+
             try {
-                // Window origin se absolute URL match karega
-                const response = await fetch(window.location.origin + '/api/candles?symbol=' + symbol);
-                if (!response.ok) throw new Error("Network response was not OK");
-                
-                const data = await response.json();
+                // IMPORTANT: Browser calls ONLY local Flask Server API
+                const res = await fetch(`/api/candles?symbol=${symbol}`);
+                const data = await res.json();
                 
                 if (Array.isArray(data) && data.length > 0) {
                     candleSeries.setData(data);
-                    statusEl.innerText = `Binance Live 🟢 (${data.length} Bars Ingested)`;
+                    statusEl.innerText = `Backend Live 🟢 (${data.length} Candles Loaded)`;
                     statusEl.style.color = "#00ff00";
                 } else {
-                    statusEl.innerText = "Waiting for Backend Buffer... ⏳";
-                    statusEl.style.color = "#ff9800";
+                    statusEl.innerText = "Data Empty / Python Backend Connection Failed 🔴";
+                    statusEl.style.color = "#f44336";
                 }
-            } catch(e) {
-                console.error("UI Fetch Error:", e);
-                statusEl.innerText = "API Connection Error 🔴";
+            } catch (err) {
+                console.error("Fetch Error:", err);
+                statusEl.innerText = "Server Unreachable 🔴";
                 statusEl.style.color = "#f44336";
             }
         }
 
         document.addEventListener("DOMContentLoaded", () => {
             initChart();
-            loadChart();
-            setInterval(loadChart, 2000);
+            loadChartData();
+            // Polling interval: Auto update every 3 seconds from Python Server
+            setInterval(loadChartData, 3000);
         });
     </script>
 </body>
@@ -191,7 +149,7 @@ def index():
 @app.route('/api/candles')
 def get_candles():
     symbol = request.args.get('symbol', 'BTCUSDT').upper()
-    data = BINANCE_CACHE.get(symbol, [])
+    data = fetch_binance_candles(symbol)
     return jsonify(data)
 
 if __name__ == '__main__':
