@@ -132,14 +132,13 @@ def get_candles():
     symbol = request.args.get('symbol', 'btcusdt').upper()
     tf = request.args.get('tf', '1m')
     
-    # Direct Binance REST fallback for instant graph loading
     try:
         url = f"https://api.binance.com/api/3/klines?symbol={symbol}&interval={tf}&limit=300"
-        res = requests.get(url, timeout=3).json()
+        res = requests.get(url, timeout=5).json()
         data = []
         for c in res:
             data.append({
-                "time": int(c[0] // 1000),
+                "time": int(int(c[0]) // 1000),
                 "open": float(c[1]),
                 "high": float(c[2]),
                 "low": float(c[3]),
