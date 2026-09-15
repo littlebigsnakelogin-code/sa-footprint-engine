@@ -1,519 +1,267 @@
-import json
-import websocket
-import requests
-
 from flask import Flask, jsonify, request
-
+import websocket
+import json
+import time
 
 app = Flask(__name__)
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-SPOT_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
-
-FUTURES_WS_BASE = "wss://fstream.binance.com/stream"
+BINANCE_WS = "wss://fstream.binance.com/stream"
 
 
-# ============================================================
-# HOME
-# ============================================================
+def get_symbol():
+    return request.args.get("symbol", "BTCUSDT").upper()
+
+
+def test_trade_stream(symbol):
+    stream = f"{symbol.lower()}@trade"
+    url = f"{BINANCE_WS}?streams={stream}"
+
+    messages = []
+    error = None
+    error_type = None
+
+    ws = None
+
+    try:
+        ws = websocket.create_connection(
+            url,
+            timeout=15,
+            enable_multithread=True
+        )
+
+        start = time.time()
+
+        while time.time() - start < 12 and len(messages) < 50:
+            try:
+                raw = ws.recv()
+
+                if not raw:
+                    continue
+
+                data = json.loads(raw)
+
+                payload = data.get("data", data)
+
+                messages.append({
+                    "event": payload.get("e"),
+                    "event_time": payload.get("E"),
+                    "symbol": payload.get("s"),
+                    "trade_id": payload.get("t"),
+                    "price": payload.get("p"),
+                    "quantity": payload.get("q"),
+                    "trade_time": payload.get("T"),
+                    "buyer_is_maker": payload.get("m")
+                })
+
+            except websocket.WebSocketTimeoutException:
+                break
+
+    except Exception as e:
+        error = str(e)
+        error_type = type(e).__name__
+
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    return {
+        "ok": len(messages) > 0,
+        "symbol": symbol,
+        "stream": url,
+        "trade_messages": len(messages),
+        "samples": messages[:10],
+        "error": error,
+        "error_type": error_type
+    }
+
 
 @app.route("/")
 def home():
+    return jsonify({
+        "service": "SA Footprint Engine",
+        "status": "running",
+        "endpoints": [
+            "/api/test",
+            "/api/trade-test?symbol=BTCUSDT",
+            "/api/aggtrade-test?symbol=BTCUSDT",
+            "/api/depth-test?symbol=BTCUSDT",
+            "/api/futures-ws-test?symbol=BTCUSDT"
+        ]
+    })
 
-    return """
-    <!DOCTYPE html>
-    <html>
-
-    <head>
-        <title>SA Footprint Engine</title>
-
-        <style>
-
-            body {
-                background: #111;
-                color: #eee;
-                font-family: Arial, sans-serif;
-                padding: 30px;
-            }
-
-            a {
-                color: #4da6ff;
-            }
-
-            .box {
-                background: #1b1b1b;
-                padding: 15px;
-                margin: 15px 0;
-                border-radius: 8px;
-            }
-
-        </style>
-    </head>
-
-    <body>
-
-        <h1>SA Footprint Engine</h1>
-
-        <div class="box">
-            Server: ONLINE
-        </div>
-
-        <div class="box">
-            <a href="/api/test" target="_blank">
-                Binance Spot Test
-            </a>
-        </div>
-
-        <div class="box">
-            <a href="/api/aggtrade-test?symbol=BTCUSDT"
-               target="_blank">
-                Futures aggTrade Test
-            </a>
-        </div>
-
-        <div class="box">
-            <a href="/api/depth-test?symbol=BTCUSDT"
-               target="_blank">
-                Futures Depth Test
-            </a>
-        </div>
-
-        <div class="box">
-            <a href="/api/futures-ws-test?symbol=BTCUSDT"
-               target="_blank">
-                Futures Both Test
-            </a>
-        </div>
-
-    </body>
-
-    </html>
-    """
-
-
-# ============================================================
-# SPOT TEST
-# ============================================================
 
 @app.route("/api/test")
 def api_test():
-
-    try:
-
-        response = requests.get(
-            SPOT_KLINES_URL,
-            params={
-                "symbol": "BTCUSDT",
-                "interval": "1m",
-                "limit": 2
-            },
-            timeout=10
-        )
-
-        return jsonify({
-            "ok": True,
-            "status_code": response.status_code,
-            "url": response.url,
-            "body": response.text
-        })
-
-    except Exception as e:
-
-        return jsonify({
-            "ok": False,
-            "error_type": type(e).__name__,
-            "error": str(e)
-        }), 500
+    return jsonify({
+        "ok": True,
+        "message": "SA Footprint Engine is running"
+    })
 
 
-# ============================================================
-# FUTURES AGGTRADE ONLY
-# ============================================================
+@app.route("/api/trade-test")
+def trade_test():
+    symbol = get_symbol()
+    return jsonify(test_trade_stream(symbol))
+
 
 @app.route("/api/aggtrade-test")
 def aggtrade_test():
+    symbol = get_symbol()
 
-    symbol = request.args.get(
-        "symbol",
-        "BTCUSDT"
-    ).lower()
+    stream = f"{symbol.lower()}@aggTrade"
+    url = f"{BINANCE_WS}?streams={stream}"
 
-    stream_url = (
-        FUTURES_WS_BASE
-        + "?streams="
-        + symbol
-        + "@aggTrade"
-    )
+    messages = []
+    error = None
+    error_type = None
 
     ws = None
 
-    trade_count = 0
-
-    samples = []
-
     try:
-
-        print("=" * 60)
-        print("FUTURES AGGTRADE TEST")
-        print("URL:", stream_url)
-        print("=" * 60)
-
         ws = websocket.create_connection(
-            stream_url,
-            timeout=15
+            url,
+            timeout=15,
+            enable_multithread=True
         )
 
-        ws.settimeout(15)
+        start = time.time()
 
-        for _ in range(100):
+        while time.time() - start < 12 and len(messages) < 30:
+            try:
+                raw = ws.recv()
 
-            raw = ws.recv()
+                if not raw:
+                    continue
 
-            if not raw:
-                continue
+                data = json.loads(raw)
+                payload = data.get("data", data)
 
-            message = json.loads(raw)
-
-            stream = message.get(
-                "stream",
-                ""
-            )
-
-            data = message.get(
-                "data",
-                {}
-            )
-
-            if "@aggTrade" not in stream:
-                continue
-
-            trade_count += 1
-
-            if len(samples) < 10:
-
-                samples.append({
-                    "event_time": data.get("E"),
-                    "trade_time": data.get("T"),
-                    "price": data.get("p"),
-                    "quantity": data.get("q"),
-                    "first_trade_id": data.get("f"),
-                    "last_trade_id": data.get("l"),
-                    "buyer_is_maker": data.get("m")
+                messages.append({
+                    "event": payload.get("e"),
+                    "event_time": payload.get("E"),
+                    "symbol": payload.get("s"),
+                    "agg_trade_id": payload.get("a"),
+                    "price": payload.get("p"),
+                    "quantity": payload.get("q"),
+                    "first_trade_id": payload.get("f"),
+                    "last_trade_id": payload.get("l"),
+                    "trade_time": payload.get("T"),
+                    "buyer_is_maker": payload.get("m")
                 })
 
-        result = {
-            "ok": True,
-            "symbol": symbol.upper(),
-            "stream": stream_url,
-            "aggTrade_messages": trade_count,
-            "samples": samples
-        }
-
-        print(
-            json.dumps(
-                result,
-                indent=2
-            )
-        )
-
-        return jsonify(result)
+            except websocket.WebSocketTimeoutException:
+                break
 
     except Exception as e:
-
-        result = {
-            "ok": False,
-            "symbol": symbol.upper(),
-            "stream": stream_url,
-            "aggTrade_messages": trade_count,
-            "error_type": type(e).__name__,
-            "error": str(e)
-        }
-
-        print(
-            json.dumps(
-                result,
-                indent=2
-            )
-        )
-
-        return jsonify(result), 500
+        error = str(e)
+        error_type = type(e).__name__
 
     finally:
-
         if ws is not None:
-
             try:
                 ws.close()
-
             except Exception:
                 pass
 
+    return jsonify({
+        "ok": len(messages) > 0,
+        "symbol": symbol,
+        "stream": url,
+        "aggTrade_messages": len(messages),
+        "samples": messages[:10],
+        "error": error,
+        "error_type": error_type
+    })
 
-# ============================================================
-# FUTURES DEPTH ONLY
-# ============================================================
 
 @app.route("/api/depth-test")
 def depth_test():
+    symbol = get_symbol()
 
-    symbol = request.args.get(
-        "symbol",
-        "BTCUSDT"
-    ).lower()
+    stream = f"{symbol.lower()}@depth"
+    url = f"{BINANCE_WS}?streams={stream}"
 
-    stream_url = (
-        FUTURES_WS_BASE
-        + "?streams="
-        + symbol
-        + "@depth"
-    )
+    messages = []
+    error = None
+    error_type = None
 
     ws = None
 
-    depth_count = 0
-
-    samples = []
-
     try:
-
-        print("=" * 60)
-        print("FUTURES DEPTH TEST")
-        print("URL:", stream_url)
-        print("=" * 60)
-
         ws = websocket.create_connection(
-            stream_url,
-            timeout=15
+            url,
+            timeout=15,
+            enable_multithread=True
         )
 
-        ws.settimeout(15)
+        start = time.time()
 
-        for _ in range(30):
+        while time.time() - start < 10 and len(messages) < 10:
+            try:
+                raw = ws.recv()
 
-            raw = ws.recv()
+                if not raw:
+                    continue
 
-            if not raw:
-                continue
+                data = json.loads(raw)
+                payload = data.get("data", data)
 
-            message = json.loads(raw)
+                messages.append({
+                    "event": payload.get("e"),
+                    "event_time": payload.get("E"),
+                    "symbol": payload.get("s"),
+                    "first_update_id": payload.get("U"),
+                    "final_update_id": payload.get("u"),
+                    "previous_update_id": payload.get("pu"),
+                    "bids": len(payload.get("b", [])),
+                    "asks": len(payload.get("a", []))
+                })
 
-            stream = message.get(
-                "stream",
-                ""
-            )
-
-            data = message.get(
-                "data",
-                {}
-            )
-
-            if "@depth" not in stream:
-                continue
-
-            depth_count += 1
-
-            if len(samples) < 3:
-
-                samples.append(data)
-
-        result = {
-            "ok": True,
-            "symbol": symbol.upper(),
-            "stream": stream_url,
-            "depth_messages": depth_count,
-            "samples": samples
-        }
-
-        print(
-            json.dumps(
-                result,
-                indent=2
-            )
-        )
-
-        return jsonify(result)
+            except websocket.WebSocketTimeoutException:
+                break
 
     except Exception as e:
-
-        result = {
-            "ok": False,
-            "symbol": symbol.upper(),
-            "stream": stream_url,
-            "depth_messages": depth_count,
-            "error_type": type(e).__name__,
-            "error": str(e)
-        }
-
-        print(
-            json.dumps(
-                result,
-                indent=2
-            )
-        )
-
-        return jsonify(result), 500
+        error = str(e)
+        error_type = type(e).__name__
 
     finally:
-
         if ws is not None:
-
             try:
                 ws.close()
-
             except Exception:
                 pass
 
+    return jsonify({
+        "ok": len(messages) > 0,
+        "symbol": symbol,
+        "stream": url,
+        "depth_messages": len(messages),
+        "samples": messages[:10],
+        "error": error,
+        "error_type": error_type
+    })
 
-# ============================================================
-# FUTURES AGGTRADE + DEPTH
-# ============================================================
 
 @app.route("/api/futures-ws-test")
 def futures_ws_test():
+    symbol = get_symbol()
 
-    symbol = request.args.get(
-        "symbol",
-        "BTCUSDT"
-    ).lower()
+    streams = [
+        f"{symbol.lower()}@trade",
+        f"{symbol.lower()}@depth"
+    ]
 
-    stream_url = (
-        FUTURES_WS_BASE
-        + "?streams="
-        + symbol
-        + "@aggTrade/"
-        + symbol
-        + "@depth"
-    )
+    stream_text = "/".join(streams)
+    url = f"{BINANCE_WS}?streams={stream_text}"
 
-    ws = None
+    messages = []
+    counts = {
+        "trade": 0,
+        "depth": 0,
+        "other": 0
+    }
 
-    depth_count = 0
-
-    trade_count = 0
-
-    depth_samples = []
-
-    trade_samples = []
-
-    try:
-
-        print("=" * 60)
-        print("FUTURES BOTH STREAM TEST")
-        print("URL:", stream_url)
-        print("=" * 60)
-
-        ws = websocket.create_connection(
-            stream_url,
-            timeout=15
-        )
-
-        ws.settimeout(15)
-
-        for _ in range(100):
-
-            raw = ws.recv()
-
-            if not raw:
-                continue
-
-            message = json.loads(raw)
-
-            stream = message.get(
-                "stream",
-                ""
-            )
-
-            data = message.get(
-                "data",
-                {}
-            )
-
-            if "@depth" in stream:
-
-                depth_count += 1
-
-                if len(depth_samples) < 2:
-
-                    depth_samples.append(data)
-
-            elif "@aggTrade" in stream:
-
-                trade_count += 1
-
-                if len(trade_samples) < 5:
-
-                    trade_samples.append({
-                        "event_time": data.get("E"),
-                        "trade_time": data.get("T"),
-                        "price": data.get("p"),
-                        "quantity": data.get("q"),
-                        "first_trade_id": data.get("f"),
-                        "last_trade_id": data.get("l"),
-                        "buyer_is_maker": data.get("m")
-                    })
-
-        result = {
-            "ok": True,
-            "symbol": symbol.upper(),
-            "stream": stream_url,
-            "depth_messages": depth_count,
-            "aggTrade_messages": trade_count,
-            "depth_samples": depth_samples,
-            "aggTrade_samples": trade_samples
-        }
-
-        print(
-            json.dumps(
-                result,
-                indent=2
-            )
-        )
-
-        return jsonify(result)
-
-    except Exception as e:
-
-        result = {
-            "ok": False,
-            "symbol": symbol.upper(),
-            "stream": stream_url,
-            "depth_messages": depth_count,
-            "aggTrade_messages": trade_count,
-            "error_type": type(e).__name__,
-            "error": str(e)
-        }
-
-        print(
-            json.dumps(
-                result,
-                indent=2
-            )
-        )
-
-        return jsonify(result), 500
-
-    finally:
-
-        if ws is not None:
-
-            try:
-                ws.close()
-
-            except Exception:
-                pass
-
-
-# ============================================================
-# SERVER
-# ============================================================
-
-if __name__ == "__main__":
-
-    app.run(
-        host="0.0.0.0",
-        port=10000
-    )
+    error
