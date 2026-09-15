@@ -1,35 +1,41 @@
-import os
 import json
-import requests
 import websocket
 
 from flask import Flask, jsonify, request
+import requests
+
 
 app = Flask(__name__)
 
-# ============================================================
-# BINANCE URLS
-# ============================================================
-
-# Public Binance Spot market-data endpoint
-SPOT_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
-
-# Binance USD-M Futures WebSocket
-FUTURES_WS_BASE = "wss://fstream.binance.com/stream"
-
 
 # ============================================================
-# HEALTH CHECK
+# CONFIG
+# ============================================================
+
+SPOT_KLINES_URL = (
+    "https://data-api.binance.vision/api/v3/klines"
+)
+
+FUTURES_WS_BASE = (
+    "wss://fstream.binance.com/stream"
+)
+
+
+# ============================================================
+# HOME
 # ============================================================
 
 @app.route("/")
 def home():
+
     return """
     <!DOCTYPE html>
     <html>
     <head>
         <title>SA Footprint Engine</title>
+
         <style>
+
             body {
                 background: #111;
                 color: #eee;
@@ -37,18 +43,25 @@ def home():
                 padding: 30px;
             }
 
-            button {
-                padding: 12px 20px;
-                margin: 5px;
-                cursor: pointer;
+            h1 {
+                margin-bottom: 10px;
             }
 
-            pre {
-                background: #222;
-                padding: 15px;
-                overflow-x: auto;
-                white-space: pre-wrap;
+            a {
+                color: #4da6ff;
             }
+
+            .box {
+                background: #1b1b1b;
+                padding: 15px;
+                margin-top: 15px;
+                border-radius: 8px;
+            }
+
+            code {
+                color: #7cff9b;
+            }
+
         </style>
     </head>
 
@@ -56,62 +69,41 @@ def home():
 
         <h1>SA Footprint Engine</h1>
 
-        <p>Backend is running.</p>
+        <div class="box">
+            <b>Server:</b> ONLINE
+        </div>
 
-        <button onclick="testSpot()">Test Binance Spot</button>
+        <div class="box">
+            <p>
+                Binance Spot diagnostic:
+            </p>
 
-        <button onclick="testFuturesWS()">Test Binance Futures WebSocket</button>
+            <a href="/api/test" target="_blank">
+                /api/test
+            </a>
+        </div>
 
-        <h3>Result</h3>
+        <div class="box">
+            <p>
+                Spot candles:
+            </p>
 
-        <pre id="result">Waiting...</pre>
+            <a href="/api/candles?symbol=BTCUSDT&interval=1m&limit=5"
+               target="_blank">
+                /api/candles
+            </a>
+        </div>
 
-        <script>
+        <div class="box">
+            <p>
+                Binance Futures WebSocket:
+            </p>
 
-        async function testSpot() {
-            document.getElementById("result").textContent =
-                "Testing Binance Spot...";
-
-            try {
-                const response =
-                    await fetch("/api/test?symbol=BTCUSDT");
-
-                const data = await response.json();
-
-                document.getElementById("result").textContent =
-                    JSON.stringify(data, null, 2);
-
-            } catch (error) {
-
-                document.getElementById("result").textContent =
-                    "Browser error: " + error;
-
-            }
-        }
-
-
-        async function testFuturesWS() {
-            document.getElementById("result").textContent =
-                "Testing Binance Futures WebSocket...";
-
-            try {
-                const response =
-                    await fetch("/api/futures-ws-test?symbol=BTCUSDT");
-
-                const data = await response.json();
-
-                document.getElementById("result").textContent =
-                    JSON.stringify(data, null, 2);
-
-            } catch (error) {
-
-                document.getElementById("result").textContent =
-                    "Browser error: " + error;
-
-            }
-        }
-
-        </script>
+            <a href="/api/futures-ws-test?symbol=BTCUSDT"
+               target="_blank">
+                /api/futures-ws-test
+            </a>
+        </div>
 
     </body>
     </html>
@@ -119,90 +111,16 @@ def home():
 
 
 # ============================================================
-# BINANCE SPOT TEST
+# BASIC BINANCE SPOT TEST
 # ============================================================
 
 @app.route("/api/test")
-def test_binance_spot():
-
-    symbol = request.args.get(
-        "symbol",
-        "BTCUSDT"
-    ).upper()
+def api_test():
 
     params = {
-        "symbol": symbol,
+        "symbol": "BTCUSDT",
         "interval": "1m",
         "limit": 2
-    }
-
-    headers = {
-        "User-Agent": "SA-Footprint-Engine/1.0"
-    }
-
-    url = SPOT_KLINES_URL
-
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=10
-        )
-
-        result = {
-            "ok": response.status_code == 200,
-            "status_code": response.status_code,
-            "url": response.url,
-            "headers": {
-                "content_type": response.headers.get(
-                    "content-type"
-                ),
-                "server": response.headers.get(
-                    "server"
-                ),
-                "retry_after": response.headers.get(
-                    "retry-after"
-                )
-            },
-            "body": response.text[:5000]
-        }
-
-        return jsonify(result)
-
-    except Exception as e:
-
-        result = {
-            "ok": False,
-            "error_type": type(e).__name__,
-            "error": str(e),
-            "url": url
-        }
-
-        return jsonify(result), 500
-
-
-# ============================================================
-# SPOT CANDLES
-# ============================================================
-
-@app.route("/api/candles")
-def get_candles():
-
-    symbol = request.args.get(
-        "symbol",
-        "BTCUSDT"
-    ).upper()
-
-    params = {
-        "symbol": symbol,
-        "interval": "1m",
-        "limit": 300
-    }
-
-    headers = {
-        "User-Agent": "SA-Footprint-Engine/1.0"
     }
 
     try:
@@ -210,34 +128,23 @@ def get_candles():
         response = requests.get(
             SPOT_KLINES_URL,
             params=params,
-            headers=headers,
             timeout=10
         )
 
-        if response.status_code != 200:
-
-            return jsonify({
-                "ok": False,
-                "status_code": response.status_code,
-                "body": response.text[:5000]
-            }), response.status_code
-
-        raw_data = response.json()
-
-        candles = []
-
-        for c in raw_data:
-
-            candles.append({
-                "time": int(c[0]) // 1000,
-                "open": float(c[1]),
-                "high": float(c[2]),
-                "low": float(c[3]),
-                "close": float(c[4]),
-                "volume": float(c[5])
-            })
-
-        return jsonify(candles)
+        return jsonify({
+            "ok": True,
+            "status_code": response.status_code,
+            "url": response.url,
+            "headers": {
+                "content_type":
+                    response.headers.get("content-type"),
+                "server":
+                    response.headers.get("server"),
+                "retry_after":
+                    response.headers.get("retry-after")
+            },
+            "body": response.text
+        })
 
     except Exception as e:
 
@@ -249,7 +156,129 @@ def get_candles():
 
 
 # ============================================================
-# BINANCE FUTURES WEBSOCKET TEST
+# SPOT CANDLES
+# ============================================================
+
+@app.route("/api/candles")
+def candles():
+
+    symbol = request.args.get(
+        "symbol",
+        "BTCUSDT"
+    ).upper()
+
+    interval = request.args.get(
+        "interval",
+        "1m"
+    )
+
+    try:
+
+        limit = int(
+            request.args.get(
+                "limit",
+                "100"
+            )
+        )
+
+    except ValueError:
+
+        limit = 100
+
+
+    # Binance limit safety
+
+    if limit < 1:
+        limit = 1
+
+    if limit > 1000:
+        limit = 1000
+
+
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit
+    }
+
+
+    try:
+
+        response = requests.get(
+            SPOT_KLINES_URL,
+            params=params,
+            timeout=10
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+
+        candles_data = []
+
+
+        for row in data:
+
+            candles_data.append({
+
+                "time": int(row[0] / 1000),
+
+                "open": float(row[1]),
+
+                "high": float(row[2]),
+
+                "low": float(row[3]),
+
+                "close": float(row[4]),
+
+                "volume": float(row[5])
+
+            })
+
+
+        return jsonify({
+
+            "ok": True,
+
+            "symbol": symbol,
+
+            "interval": interval,
+
+            "count": len(candles_data),
+
+            "candles": candles_data
+
+        })
+
+
+    except Exception as e:
+
+        return jsonify({
+
+            "ok": False,
+
+            "symbol": symbol,
+
+            "interval": interval,
+
+            "error_type": type(e).__name__,
+
+            "error": str(e)
+
+        }), 500
+
+
+# ============================================================
+# FUTURES WEBSOCKET TEST
+#
+# Receives:
+#
+#   1. aggTrade
+#   2. depth
+#
+# This endpoint is ONLY a diagnostic test.
+#
 # ============================================================
 
 @app.route("/api/futures-ws-test")
@@ -260,12 +289,6 @@ def futures_ws_test():
         "BTCUSDT"
     ).lower()
 
-    # --------------------------------------------------------
-    # Combined stream:
-    #
-    # aggTrade = actual futures trades
-    # depth    = orderbook updates
-    # --------------------------------------------------------
 
     ws_url = (
         f"{FUTURES_WS_BASE}"
@@ -274,42 +297,134 @@ def futures_ws_test():
         f"{symbol}@depth"
     )
 
-    messages = []
+
+    depth_count = 0
+
+    trade_count = 0
+
+
+    samples = {
+
+        "depth": [],
+
+        "aggTrade": []
+
+    }
+
 
     ws = None
+
 
     try:
 
         print("=" * 60)
-        print("FUTURES WEBSOCKET TEST")
-        print("Connecting to:")
+
+        print("FUTURES DATA TEST")
+
         print(ws_url)
+
         print("=" * 60)
 
+
         ws = websocket.create_connection(
+
             ws_url,
+
             timeout=10
+
         )
 
-        # Receive a few messages
-        for i in range(5):
 
-            message = ws.recv()
+        # ----------------------------------------------------
+        # Receive up to 30 messages
+        # ----------------------------------------------------
 
-            if not message:
+        for _ in range(30):
+
+            raw = ws.recv()
+
+
+            if not raw:
+
                 continue
 
-            # Keep response reasonably small
-            messages.append(message[:5000])
+
+            message = json.loads(raw)
+
+
+            stream = message.get(
+                "stream",
+                ""
+            )
+
+
+            data = message.get(
+                "data",
+                {}
+            )
+
+
+            # ------------------------------------------------
+            # DEPTH
+            # ------------------------------------------------
+
+            if "@depth" in stream:
+
+                depth_count += 1
+
+
+                if len(samples["depth"]) < 2:
+
+                    samples["depth"].append(
+                        data
+                    )
+
+
+            # ------------------------------------------------
+            # AGG TRADE
+            # ------------------------------------------------
+
+            elif "@aggTrade" in stream:
+
+                trade_count += 1
+
+
+                if len(samples["aggTrade"]) < 3:
+
+                    samples["aggTrade"].append(
+                        data
+                    )
+
+
+        # ----------------------------------------------------
+        # RESULT
+        # ----------------------------------------------------
 
         result = {
+
             "ok": True,
-            "websocket": ws_url,
-            "messages_received": len(messages),
-            "messages": messages
+
+            "symbol":
+                symbol.upper(),
+
+            "websocket":
+                ws_url,
+
+            "depth_messages":
+                depth_count,
+
+            "aggTrade_messages":
+                trade_count,
+
+            "depth_samples":
+                samples["depth"],
+
+            "aggTrade_samples":
+                samples["aggTrade"]
+
         }
 
-        print("FUTURES WS SUCCESS")
+
         print(
             json.dumps(
                 result,
@@ -317,20 +432,37 @@ def futures_ws_test():
             )
         )
 
+
         return jsonify(result)
+
 
     except Exception as e:
 
         result = {
+
             "ok": False,
-            "websocket": ws_url,
-            "error_type": type(e).__name__,
-            "error": str(e),
-            "messages_received": len(messages),
-            "messages": messages
+
+            "symbol":
+                symbol.upper(),
+
+            "websocket":
+                ws_url,
+
+            "depth_messages":
+                depth_count,
+
+            "aggTrade_messages":
+                trade_count,
+
+            "error_type":
+                type(e).__name__,
+
+            "error":
+                str(e)
+
         }
 
-        print("FUTURES WS ERROR")
+
         print(
             json.dumps(
                 result,
@@ -338,32 +470,33 @@ def futures_ws_test():
             )
         )
 
+
         return jsonify(result), 500
+
 
     finally:
 
         if ws is not None:
 
             try:
+
                 ws.close()
+
             except Exception:
+
                 pass
 
 
 # ============================================================
-# SERVER START
+# START SERVER
 # ============================================================
 
 if __name__ == "__main__":
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            5000
-        )
-    )
-
     app.run(
+
         host="0.0.0.0",
-        port=port
+
+        port=10000
+
     )
