@@ -225,3 +225,19 @@ def process_trade(symbol, trade):
 
             # ------------------------------------------------
             # New candle
+@app.route("/")
+def home():
+    return "SA ENGINE IS RUNNING"
+
+
+@app.route("/hello")
+def hello():
+    return "SA ENGINE IS RUNNING"
+
+
+@app.route("/api/test")
+def api_test():
+    return jsonify({
+        "status": "ok",
+        "message": "SA Engine API is working"
+    })
