@@ -1,177 +1,193 @@
-from flask import Flask, jsonify, request
-import websocket
+import os
 import json
 import time
+import math
+import threading
+from collections import defaultdict, deque
+
+import websocket
+from flask import Flask, jsonify, request
+
 
 app = Flask(__name__)
 
-BINANCE_WS = "wss://fstream.binance.com/stream"
 
-DEFAULT_SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "AVAXUSDT",
-    "LINKUSDT",
-    "LTCUSDT"
+# ============================================================
+# CONFIG
+# ============================================================
+
+SYMBOLS = [
+    "btcusdt",
+    "ethusdt",
+    "solusdt",
+    "xrpusdt",
+    "avaxusdt",
+    "linkusdt",
+    "ltcusdt",
 ]
 
+TIMEFRAMES = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+}
 
-def get_symbols():
-    raw = request.args.get("symbols")
+ROLLING_SECONDS = 24 * 60 * 60
 
-    if not raw:
-        return DEFAULT_SYMBOLS
-
-    symbols = []
-
-    for item in raw.split(","):
-        symbol = item.strip().upper()
-
-        if symbol and symbol not in symbols:
-            symbols.append(symbol)
-
-    return symbols[:20]
-
-
-@app.route("/")
-def home():
-    return jsonify({
-        "service": "SA Footprint Engine",
-        "status": "running",
-        "endpoints": [
-            "/api/test",
-            "/api/multi-trade-test"
-        ]
-    })
+WS_URL = "wss://fstream.binance.com/stream?streams=" + "/".join(
+    symbol + "@trade" for symbol in SYMBOLS
+)
 
 
-@app.route("/api/test")
-def api_test():
-    return jsonify({
-        "ok": True,
-        "message": "SA Footprint Engine is running"
-    })
+# ============================================================
+# MEMORY
+# ============================================================
+
+lock = threading.RLock()
+
+candles = defaultdict(lambda: defaultdict(deque))
+current_candles = defaultdict(dict)
+
+last_trade_time = {}
+last_price = {}
+trade_count = defaultdict(int)
+
+seen_trade_ids = defaultdict(lambda: deque(maxlen=5000))
+seen_trade_id_sets = defaultdict(set)
+
+collector_connected = False
+collector_status = "starting"
+collector_error = None
 
 
-@app.route("/api/multi-trade-test")
-def multi_trade_test():
+# ============================================================
+# HELPERS
+# ============================================================
 
-    symbols = get_symbols()
+def now_ms():
+    return int(time.time() * 1000)
 
-    streams = [
-        f"{symbol.lower()}@trade"
-        for symbol in symbols
-    ]
 
-    stream_text = "/".join(streams)
-    url = f"{BINANCE_WS}?streams={stream_text}"
+def clean_number(value):
+    try:
+        number = float(value)
+        if not math.isfinite(number):
+            return None
+        return number
+    except (TypeError, ValueError):
+        return None
 
-    counts = {
-        symbol: 0
-        for symbol in symbols
+
+def bucket_start(timestamp_ms, timeframe_seconds):
+    timestamp_sec = timestamp_ms // 1000
+    return (timestamp_sec // timeframe_seconds) * timeframe_seconds
+
+
+def make_empty_candle(start, timeframe_seconds):
+    return {
+        "start": start,
+        "end": start + timeframe_seconds,
+        "open": None,
+        "high": None,
+        "low": None,
+        "close": None,
+        "volume": 0.0,
+        "buy_volume": 0.0,
+        "sell_volume": 0.0,
+        "delta": 0.0,
+        "trades": 0,
     }
 
-    samples = []
 
-    error = None
-    error_type = None
+def candle_to_json(candle):
+    if candle is None:
+        return None
 
-    ws = None
-
-    try:
-
-        ws = websocket.create_connection(
-            url,
-            timeout=15,
-            enable_multithread=True
-        )
-
-        start = time.time()
-
-        while time.time() - start < 15:
-
-            if len(samples) >= 50:
-                break
-
-            try:
-
-                raw = ws.recv()
-
-                if not raw:
-                    continue
-
-                data = json.loads(raw)
-
-                payload = data.get("data", data)
-
-                event_type = payload.get("e")
-
-                if event_type != "trade":
-                    continue
-
-                symbol = payload.get("s")
-
-                if symbol in counts:
-                    counts[symbol] += 1
-
-                if len(samples) < 50:
-
-                    samples.append({
-                        "symbol": symbol,
-                        "price": payload.get("p"),
-                        "quantity": payload.get("q"),
-                        "trade_id": payload.get("t"),
-                        "trade_time": payload.get("T"),
-                        "buyer_is_maker": payload.get("m")
-                    })
-
-            except websocket.WebSocketTimeoutException:
-                break
-
-    except Exception as e:
-
-        error = str(e)
-        error_type = type(e).__name__
-
-    finally:
-
-        if ws is not None:
-
-            try:
-                ws.close()
-            except Exception:
-                pass
-
-    total_messages = sum(counts.values())
-
-    return jsonify({
-        "ok": total_messages > 0,
-        "symbols_requested": symbols,
-        "symbols_received": [
-            symbol
-            for symbol in symbols
-            if counts[symbol] > 0
-        ],
-        "symbols_missing": [
-            symbol
-            for symbol in symbols
-            if counts[symbol] == 0
-        ],
-        "trade_counts": counts,
-        "total_trade_messages": total_messages,
-        "samples": samples,
-        "stream_count": len(streams),
-        "stream": url,
-        "error": error,
-        "error_type": error_type
-    })
+    return {
+        "start": candle["start"],
+        "end": candle["end"],
+        "open": candle["open"],
+        "high": candle["high"],
+        "low": candle["low"],
+        "close": candle["close"],
+        "volume": candle["volume"],
+        "buy_volume": candle["buy_volume"],
+        "sell_volume": candle["sell_volume"],
+        "delta": candle["delta"],
+        "trades": candle["trades"],
+    }
 
 
-if __name__ == "__main__":
+# ============================================================
+# TRADE PROCESSING
+# ============================================================
 
-    app.run(
-        host="0.0.0.0",
-        port=10000
-    )
+def process_trade(symbol, trade):
+    price = clean_number(trade.get("p"))
+    quantity = clean_number(trade.get("q"))
+    trade_id = trade.get("t")
+    trade_time = trade.get("T")
+
+    # Reject bad Binance messages
+    if price is None or quantity is None:
+        return
+
+    if price <= 0 or quantity <= 0:
+        return
+
+    if trade_time is None:
+        trade_time = now_ms()
+
+    # --------------------------------------------------------
+    # Duplicate protection
+    # --------------------------------------------------------
+
+    if trade_id is not None:
+        if trade_id in seen_trade_id_sets[symbol]:
+            return
+
+        old_ids = seen_trade_ids[symbol]
+
+        if len(old_ids) >= old_ids.maxlen:
+            old_id = old_ids[0]
+            seen_trade_id_sets[symbol].discard(old_id)
+
+        old_ids.append(trade_id)
+        seen_trade_id_sets[symbol].add(trade_id)
+
+    # --------------------------------------------------------
+    # Aggressor classification
+    #
+    # m = true  -> buyer was maker
+    #              => aggressive SELL
+    #
+    # m = false -> buyer was taker
+    #              => aggressive BUY
+    # --------------------------------------------------------
+
+    buyer_is_maker = bool(trade.get("m", False))
+
+    if buyer_is_maker:
+        buy_volume = 0.0
+        sell_volume = quantity
+    else:
+        buy_volume = quantity
+        sell_volume = 0.0
+
+    with lock:
+        last_trade_time[symbol] = trade_time
+        last_price[symbol] = price
+        trade_count[symbol] += 1
+
+        # ----------------------------------------------------
+        # Update every timeframe directly from live trades
+        # ----------------------------------------------------
+
+        for timeframe, seconds in TIMEFRAMES.items():
+
+            start
