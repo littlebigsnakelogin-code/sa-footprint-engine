@@ -39,13 +39,14 @@ TIMEFRAMES = {
 
 ROLLING_SECONDS = 24 * 60 * 60
 
-WS_URL = "wss://fstream.binance.com/stream?streams=" + "/".join(
-    symbol + "@trade" for symbol in SYMBOLS
+WS_URL = (
+    "wss://fstream.binance.com/stream?streams="
+    + "/".join(symbol + "@trade" for symbol in SYMBOLS)
 )
 
 
 # ============================================================
-# MEMORY
+# IN-MEMORY DATA
 # ============================================================
 
 lock = threading.RLock()
@@ -55,6 +56,7 @@ current_candles = defaultdict(dict)
 
 last_trade_time = {}
 last_price = {}
+
 trade_count = defaultdict(int)
 
 seen_trade_ids = defaultdict(lambda: deque(maxlen=5000))
@@ -76,15 +78,19 @@ def now_ms():
 def clean_number(value):
     try:
         number = float(value)
+
         if not math.isfinite(number):
             return None
+
         return number
+
     except (TypeError, ValueError):
         return None
 
 
 def bucket_start(timestamp_ms, timeframe_seconds):
     timestamp_sec = timestamp_ms // 1000
+
     return (timestamp_sec // timeframe_seconds) * timeframe_seconds
 
 
@@ -105,6 +111,7 @@ def make_empty_candle(start, timeframe_seconds):
 
 
 def candle_to_json(candle):
+
     if candle is None:
         return None
 
@@ -124,16 +131,21 @@ def candle_to_json(candle):
 
 
 # ============================================================
-# TRADE PROCESSING
+# TRADE PROCESSOR
 # ============================================================
 
 def process_trade(symbol, trade):
+
     price = clean_number(trade.get("p"))
     quantity = clean_number(trade.get("q"))
+
     trade_id = trade.get("t")
     trade_time = trade.get("T")
 
-    # Reject bad Binance messages
+    # --------------------------------------------------------
+    # Reject invalid Binance messages
+    # --------------------------------------------------------
+
     if price is None or quantity is None:
         return
 
@@ -148,13 +160,16 @@ def process_trade(symbol, trade):
     # --------------------------------------------------------
 
     if trade_id is not None:
+
         if trade_id in seen_trade_id_sets[symbol]:
             return
 
         old_ids = seen_trade_ids[symbol]
 
         if len(old_ids) >= old_ids.maxlen:
+
             old_id = old_ids[0]
+
             seen_trade_id_sets[symbol].discard(old_id)
 
         old_ids.append(trade_id)
@@ -163,34 +178,50 @@ def process_trade(symbol, trade):
     # --------------------------------------------------------
     # Aggressor classification
     #
-    # m = true  -> buyer was maker
-    #              => aggressive SELL
+    # m = true
+    # Buyer is maker
+    # Therefore seller is aggressive/taker
     #
-    # m = false -> buyer was taker
-    #              => aggressive BUY
+    # m = false
+    # Buyer is taker
+    # Therefore buyer is aggressive
     # --------------------------------------------------------
 
     buyer_is_maker = bool(trade.get("m", False))
 
     if buyer_is_maker:
+
         buy_volume = 0.0
         sell_volume = quantity
+
     else:
+
         buy_volume = quantity
         sell_volume = 0.0
 
+    # --------------------------------------------------------
+    # Update market state
+    # --------------------------------------------------------
+
     with lock:
+
         last_trade_time[symbol] = trade_time
         last_price[symbol] = price
+
         trade_count[symbol] += 1
 
         # ----------------------------------------------------
-        # Update every timeframe directly from live trades
+        # Build all timeframes directly from live trades
         # ----------------------------------------------------
 
         for timeframe, seconds in TIMEFRAMES.items():
 
-            start
-@app.route("/hello")
-def hello():
-    return "SA ENGINE IS RUNNING"
+            start = bucket_start(
+                trade_time,
+                seconds
+            )
+
+            current = current_candles[symbol].get(timeframe)
+
+            # ------------------------------------------------
+            # New candle
