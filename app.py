@@ -1,4 +1,5 @@
 import os
+import encodings.idna
 import json
 import time
 import math
