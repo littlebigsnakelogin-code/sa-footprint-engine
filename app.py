@@ -191,3 +191,6 @@ def process_trade(symbol, trade):
         for timeframe, seconds in TIMEFRAMES.items():
 
             start
+@app.route("/hello")
+def hello():
+    return "SA ENGINE IS RUNNING"
