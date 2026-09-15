@@ -4,7 +4,7 @@ from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 
-BINANCE_URL = "https://fapi.binance.com/fapi/v1/klines"
+BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
 
 HTML = """
 <!DOCTYPE html>
