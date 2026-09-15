@@ -1,12 +1,16 @@
 import json
 import websocket
+import requests
 
 from flask import Flask, jsonify, request
-import requests
 
 
 app = Flask(__name__)
 
+
+# ============================================================
+# CONFIG
+# ============================================================
 
 SPOT_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
 
@@ -19,40 +23,74 @@ FUTURES_WS_BASE = "wss://fstream.binance.com/stream"
 
 @app.route("/")
 def home():
+
     return """
+    <!DOCTYPE html>
     <html>
+
     <head>
         <title>SA Footprint Engine</title>
+
+        <style>
+
+            body {
+                background: #111;
+                color: #eee;
+                font-family: Arial, sans-serif;
+                padding: 30px;
+            }
+
+            a {
+                color: #4da6ff;
+            }
+
+            .box {
+                background: #1b1b1b;
+                padding: 15px;
+                margin: 15px 0;
+                border-radius: 8px;
+            }
+
+        </style>
     </head>
 
-    <body style="background:#111;color:#eee;font-family:Arial;padding:30px">
+    <body>
 
         <h1>SA Footprint Engine</h1>
 
-        <p>Server: ONLINE</p>
+        <div class="box">
+            Server: ONLINE
+        </div>
 
-        <p>
-            <a style="color:#4da6ff"
-               href="/api/aggtrade-test?symbol=BTCUSDT">
-               Test aggTrade
+        <div class="box">
+            <a href="/api/test" target="_blank">
+                Binance Spot Test
             </a>
-        </p>
+        </div>
 
-        <p>
-            <a style="color:#4da6ff"
-               href="/api/depth-test?symbol=BTCUSDT">
-               Test Depth
+        <div class="box">
+            <a href="/api/aggtrade-test?symbol=BTCUSDT"
+               target="_blank">
+                Futures aggTrade Test
             </a>
-        </p>
+        </div>
 
-        <p>
-            <a style="color:#4da6ff"
-               href="/api/futures-ws-test?symbol=BTCUSDT">
-               Test Both
+        <div class="box">
+            <a href="/api/depth-test?symbol=BTCUSDT"
+               target="_blank">
+                Futures Depth Test
             </a>
-        </p>
+        </div>
+
+        <div class="box">
+            <a href="/api/futures-ws-test?symbol=BTCUSDT"
+               target="_blank">
+                Futures Both Test
+            </a>
+        </div>
 
     </body>
+
     </html>
     """
 
@@ -79,6 +117,7 @@ def api_test():
         return jsonify({
             "ok": True,
             "status_code": response.status_code,
+            "url": response.url,
             "body": response.text
         })
 
@@ -92,7 +131,7 @@ def api_test():
 
 
 # ============================================================
-# AGGTRADE ONLY TEST
+# FUTURES AGGTRADE ONLY
 # ============================================================
 
 @app.route("/api/aggtrade-test")
@@ -104,21 +143,23 @@ def aggtrade_test():
     ).lower()
 
     stream_url = (
-        f"{FUTURES_WS_BASE}"
-        f"?streams={symbol}@aggTrade"
+        FUTURES_WS_BASE
+        + "?streams="
+        + symbol
+        + "@aggTrade"
     )
 
     ws = None
 
-    trades = []
+    trade_count = 0
 
-    count = 0
+    samples = []
 
     try:
 
         print("=" * 60)
-        print("AGGTRADE ONLY TEST")
-        print(stream_url)
+        print("FUTURES AGGTRADE TEST")
+        print("URL:", stream_url)
         print("=" * 60)
 
         ws = websocket.create_connection(
@@ -126,7 +167,6 @@ def aggtrade_test():
             timeout=15
         )
 
-        # Wait for up to 15 seconds
         ws.settimeout(15)
 
         for _ in range(100):
@@ -148,28 +188,29 @@ def aggtrade_test():
                 {}
             )
 
-            if "@aggTrade" in stream:
+            if "@aggTrade" not in stream:
+                continue
 
-                count += 1
+            trade_count += 1
 
-                if len(trades) < 10:
+            if len(samples) < 10:
 
-                    trades.append({
-                        "event_time": data.get("E"),
-                        "trade_time": data.get("T"),
-                        "price": data.get("p"),
-                        "quantity": data.get("q"),
-                        "first_trade_id": data.get("f"),
-                        "last_trade_id": data.get("l"),
-                        "buyer_is_maker": data.get("m")
-                    })
+                samples.append({
+                    "event_time": data.get("E"),
+                    "trade_time": data.get("T"),
+                    "price": data.get("p"),
+                    "quantity": data.get("q"),
+                    "first_trade_id": data.get("f"),
+                    "last_trade_id": data.get("l"),
+                    "buyer_is_maker": data.get("m")
+                })
 
         result = {
             "ok": True,
             "symbol": symbol.upper(),
             "stream": stream_url,
-            "aggTrade_messages": count,
-            "samples": trades
+            "aggTrade_messages": trade_count,
+            "samples": samples
         }
 
         print(
@@ -187,7 +228,7 @@ def aggtrade_test():
             "ok": False,
             "symbol": symbol.upper(),
             "stream": stream_url,
-            "aggTrade_messages": count,
+            "aggTrade_messages": trade_count,
             "error_type": type(e).__name__,
             "error": str(e)
         }
@@ -207,12 +248,13 @@ def aggtrade_test():
 
             try:
                 ws.close()
+
             except Exception:
                 pass
 
 
 # ============================================================
-# DEPTH ONLY TEST
+# FUTURES DEPTH ONLY
 # ============================================================
 
 @app.route("/api/depth-test")
@@ -224,8 +266,10 @@ def depth_test():
     ).lower()
 
     stream_url = (
-        f"{FUTURES_WS_BASE}"
-        f"?streams={symbol}@depth"
+        FUTURES_WS_BASE
+        + "?streams="
+        + symbol
+        + "@depth"
     )
 
     ws = None
@@ -237,8 +281,8 @@ def depth_test():
     try:
 
         print("=" * 60)
-        print("DEPTH ONLY TEST")
-        print(stream_url)
+        print("FUTURES DEPTH TEST")
+        print("URL:", stream_url)
         print("=" * 60)
 
         ws = websocket.create_connection(
@@ -267,12 +311,14 @@ def depth_test():
                 {}
             )
 
-            if "@depth" in stream:
+            if "@depth" not in stream:
+                continue
 
-                depth_count += 1
+            depth_count += 1
 
-                if len(samples) < 3:
-                    samples.append(data)
+            if len(samples) < 3:
+
+                samples.append(data)
 
         result = {
             "ok": True,
@@ -317,12 +363,13 @@ def depth_test():
 
             try:
                 ws.close()
+
             except Exception:
                 pass
 
 
 # ============================================================
-# BOTH STREAMS TEST
+# FUTURES AGGTRADE + DEPTH
 # ============================================================
 
 @app.route("/api/futures-ws-test")
@@ -334,25 +381,29 @@ def futures_ws_test():
     ).lower()
 
     stream_url = (
-        f"{FUTURES_WS_BASE}"
-        f"?streams="
-        f"{symbol}@aggTrade/"
-        f"{symbol}@depth"
+        FUTURES_WS_BASE
+        + "?streams="
+        + symbol
+        + "@aggTrade/"
+        + symbol
+        + "@depth"
     )
 
     ws = None
 
     depth_count = 0
+
     trade_count = 0
 
     depth_samples = []
+
     trade_samples = []
 
     try:
 
         print("=" * 60)
         print("FUTURES BOTH STREAM TEST")
-        print(stream_url)
+        print("URL:", stream_url)
         print("=" * 60)
 
         ws = websocket.create_connection(
@@ -360,4 +411,109 @@ def futures_ws_test():
             timeout=15
         )
 
-        ws.settimeout(15
+        ws.settimeout(15)
+
+        for _ in range(100):
+
+            raw = ws.recv()
+
+            if not raw:
+                continue
+
+            message = json.loads(raw)
+
+            stream = message.get(
+                "stream",
+                ""
+            )
+
+            data = message.get(
+                "data",
+                {}
+            )
+
+            if "@depth" in stream:
+
+                depth_count += 1
+
+                if len(depth_samples) < 2:
+
+                    depth_samples.append(data)
+
+            elif "@aggTrade" in stream:
+
+                trade_count += 1
+
+                if len(trade_samples) < 5:
+
+                    trade_samples.append({
+                        "event_time": data.get("E"),
+                        "trade_time": data.get("T"),
+                        "price": data.get("p"),
+                        "quantity": data.get("q"),
+                        "first_trade_id": data.get("f"),
+                        "last_trade_id": data.get("l"),
+                        "buyer_is_maker": data.get("m")
+                    })
+
+        result = {
+            "ok": True,
+            "symbol": symbol.upper(),
+            "stream": stream_url,
+            "depth_messages": depth_count,
+            "aggTrade_messages": trade_count,
+            "depth_samples": depth_samples,
+            "aggTrade_samples": trade_samples
+        }
+
+        print(
+            json.dumps(
+                result,
+                indent=2
+            )
+        )
+
+        return jsonify(result)
+
+    except Exception as e:
+
+        result = {
+            "ok": False,
+            "symbol": symbol.upper(),
+            "stream": stream_url,
+            "depth_messages": depth_count,
+            "aggTrade_messages": trade_count,
+            "error_type": type(e).__name__,
+            "error": str(e)
+        }
+
+        print(
+            json.dumps(
+                result,
+                indent=2
+            )
+        )
+
+        return jsonify(result), 500
+
+    finally:
+
+        if ws is not None:
+
+            try:
+                ws.close()
+
+            except Exception:
+                pass
+
+
+# ============================================================
+# SERVER
+# ============================================================
+
+if __name__ == "__main__":
+
+    app.run(
+        host="0.0.0.0",
+        port=10000
+    )
