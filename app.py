@@ -54,20 +54,28 @@ WS_URL = (
 # ============================================================
 
 lock = threading.Lock()
+collector_start_lock = threading.Lock()
 
 candles = defaultdict(lambda: defaultdict(list))
 current_candles = defaultdict(dict)
 
 last_trade_time = {}
 last_price = {}
+
 trade_count = defaultdict(int)
 
 collector_connected = False
-collector_status = "starting"
+collector_status = "not_started"
 collector_error = None
 
 collector_started_at = None
 collector_last_message_at = None
+
+raw_message_count = 0
+trade_message_count = 0
+invalid_message_count = 0
+
+collector_thread = None
 
 
 # ============================================================
@@ -101,6 +109,10 @@ def empty_candle(symbol, timeframe, start):
     }
 
 
+# ============================================================
+# CANDLE UPDATE
+# ============================================================
+
 def update_candle(
     symbol,
     timeframe,
@@ -109,17 +121,6 @@ def update_candle(
     quantity,
     is_buyer_maker,
 ):
-    """
-    Binance Futures trade:
-
-    m=True:
-        buyer is maker
-        aggressive SELL / taker sell
-
-    m=False:
-        seller is maker
-        aggressive BUY / taker buy
-    """
 
     candle = current_candles[symbol].get(timeframe)
 
@@ -177,8 +178,10 @@ def update_candle(
     # --------------------------------------------------------
 
     if is_buyer_maker:
+        # Buyer is maker = aggressive seller
         candle["sell_volume"] += quantity
     else:
+        # Seller is maker = aggressive buyer
         candle["buy_volume"] += quantity
 
     # --------------------------------------------------------
@@ -190,6 +193,10 @@ def update_candle(
         - candle["sell_volume"]
     )
 
+
+# ============================================================
+# PRUNE
+# ============================================================
 
 def prune_old_data(symbol):
 
@@ -203,7 +210,6 @@ def prune_old_data(symbol):
         arr = candles[symbol][timeframe]
 
         if arr:
-
             candles[symbol][timeframe] = [
                 candle
                 for candle in arr
@@ -218,6 +224,8 @@ def prune_old_data(symbol):
 def process_trade(symbol, data):
 
     global collector_last_message_at
+    global trade_message_count
+    global invalid_message_count
 
     try:
 
@@ -234,16 +242,22 @@ def process_trade(symbol, data):
         )
 
         # ----------------------------------------------------
-        # Reject invalid messages
+        # Validate
         # ----------------------------------------------------
 
         if price <= 0:
+            with lock:
+                invalid_message_count += 1
             return
 
         if quantity <= 0:
+            with lock:
+                invalid_message_count += 1
             return
 
         if trade_time <= 0:
+            with lock:
+                invalid_message_count += 1
             return
 
         is_buyer_maker = bool(
@@ -256,8 +270,9 @@ def process_trade(symbol, data):
 
         with lock:
 
-            last_price[symbol] = price
+            trade_message_count += 1
 
+            last_price[symbol] = price
             last_trade_time[symbol] = trade_time
 
             trade_count[symbol] += 1
@@ -265,7 +280,7 @@ def process_trade(symbol, data):
             collector_last_message_at = now_ms()
 
             # ------------------------------------------------
-            # Build every timeframe
+            # Build all timeframes
             # ------------------------------------------------
 
             for timeframe, seconds in TIMEFRAMES.items():
@@ -285,7 +300,7 @@ def process_trade(symbol, data):
                 )
 
             # ------------------------------------------------
-            # Keep only 24h
+            # Keep 24h only
             # ------------------------------------------------
 
             prune_old_data(symbol)
@@ -293,7 +308,7 @@ def process_trade(symbol, data):
     except Exception as exc:
 
         print(
-            "[TRADE] processing error: "
+            "[TRADE] PROCESSING ERROR: "
             f"{type(exc).__name__}: {exc}",
             flush=True,
         )
@@ -318,33 +333,56 @@ def handle_open(ws):
     with lock:
 
         collector_connected = True
-
         collector_status = "connected"
-
         collector_error = None
-
         collector_started_at = now_ms()
 
 
 def handle_message(ws, message):
 
+    global collector_last_message_at
+    global raw_message_count
     global collector_error
 
     try:
 
+        # ----------------------------------------------------
+        # RAW MESSAGE RECEIVED
+        # ----------------------------------------------------
+
+        with lock:
+
+            raw_message_count += 1
+            collector_last_message_at = now_ms()
+
+            current_raw_count = raw_message_count
+
+        # ----------------------------------------------------
+        # Print first 3 raw messages only
+        # ----------------------------------------------------
+
+        if current_raw_count <= 3:
+
+            print(
+                "[COLLECTOR] RAW MESSAGE "
+                f"#{current_raw_count}: "
+                f"{message[:500]}",
+                flush=True,
+            )
+
         data = json.loads(message)
 
-        # Combined stream:
-        #
-        # {
-        #   "stream": "btcusdt@trade",
-        #   "data": {...}
-        # }
+        # ----------------------------------------------------
+        # Combined stream format
+        # ----------------------------------------------------
 
         stream_data = data.get(
             "data",
             data,
         )
+
+        if not isinstance(stream_data, dict):
+            return
 
         symbol = stream_data.get("s")
 
@@ -356,10 +394,30 @@ def handle_message(ws, message):
         if symbol not in SYMBOLS:
             return
 
+        # ----------------------------------------------------
+        # Process trade
+        # ----------------------------------------------------
+
         process_trade(
             symbol,
             stream_data,
         )
+
+        # ----------------------------------------------------
+        # Progress log every 1000 messages
+        # ----------------------------------------------------
+
+        if current_raw_count % 1000 == 0:
+
+            with lock:
+                counts = dict(trade_count)
+
+            print(
+                "[COLLECTOR] MESSAGE PROGRESS: "
+                f"raw={current_raw_count}, "
+                f"trades={sum(counts.values())}",
+                flush=True,
+            )
 
     except Exception as exc:
 
@@ -388,9 +446,7 @@ def handle_error(ws, error):
     with lock:
 
         collector_connected = False
-
         collector_status = "error"
-
         collector_error = str(error)
 
 
@@ -413,7 +469,6 @@ def handle_close(
     with lock:
 
         collector_connected = False
-
         collector_status = "disconnected"
 
 
@@ -433,7 +488,19 @@ def collector_loop():
     )
 
     print(
-        f"[COLLECTOR] Symbols: "
+        "[COLLECTOR] PID: "
+        f"{os.getpid()}",
+        flush=True,
+    )
+
+    print(
+        "[COLLECTOR] Thread ID: "
+        f"{threading.get_ident()}",
+        flush=True,
+    )
+
+    print(
+        "[COLLECTOR] Symbols: "
         f"{','.join(SYMBOLS)}",
         flush=True,
     )
@@ -450,9 +517,7 @@ def collector_loop():
             with lock:
 
                 collector_connected = False
-
                 collector_status = "connecting"
-
                 collector_error = None
 
             ws = websocket.WebSocketApp(
@@ -474,8 +539,11 @@ def collector_loop():
             )
 
             ws.run_forever(
+
                 ping_interval=20,
+
                 ping_timeout=10,
+
                 ping_payload="SA_ENGINE",
             )
 
@@ -495,9 +563,7 @@ def collector_loop():
             with lock:
 
                 collector_connected = False
-
                 collector_status = "exception"
-
                 collector_error = str(exc)
 
         print(
@@ -509,24 +575,90 @@ def collector_loop():
 
 
 # ============================================================
+# ENSURE COLLECTOR
+# ============================================================
+
+def ensure_collector_started():
+
+    global collector_thread
+    global collector_status
+
+    # Fast path
+    if (
+        collector_thread is not None
+        and collector_thread.is_alive()
+    ):
+        return
+
+    # Prevent multiple request threads
+    # from starting multiple collectors.
+    with collector_start_lock:
+
+        if (
+            collector_thread is not None
+            and collector_thread.is_alive()
+        ):
+            return
+
+        print(
+            "[COLLECTOR] Starting collector from "
+            "HTTP worker...",
+            flush=True,
+        )
+
+        collector_status = "starting"
+
+        collector_thread = threading.Thread(
+
+            target=collector_loop,
+
+            daemon=True,
+
+            name="binance-trade-collector",
+        )
+
+        collector_thread.start()
+
+
+# ============================================================
+# START COLLECTOR BEFORE REQUEST
+# ============================================================
+
+@app.before_request
+def start_collector_if_needed():
+
+    ensure_collector_started()
+
+
+# ============================================================
 # HOME
 # ============================================================
 
 @app.route("/")
 def home():
 
+    with lock:
+        status = collector_status
+
     return jsonify({
+
         "name": "SA Footprint Engine",
+
         "status": "running",
-        "version": "V1",
-        "collector": collector_status,
+
+        "version": "V1-DIAGNOSTIC",
+
+        "collector": status,
+
         "symbols": [
             symbol.upper()
             for symbol in SYMBOLS
         ],
+
         "timeframes": list(
             TIMEFRAMES.keys()
         ),
+
         "rolling_hours": 24,
     })
 
@@ -549,7 +681,9 @@ def hello():
 def api_test():
 
     return jsonify({
+
         "status": "ok",
+
         "message": "SA Engine API is working",
     })
 
@@ -584,9 +718,24 @@ def api_status():
                     ),
             }
 
+        thread_alive = (
+            collector_thread is not None
+            and collector_thread.is_alive()
+        )
+
         return jsonify({
 
             "status": "ok",
+
+            "process": {
+                "pid": os.getpid(),
+                "thread_alive": thread_alive,
+                "thread_name": (
+                    collector_thread.name
+                    if collector_thread is not None
+                    else None
+                ),
+            },
 
             "collector": {
 
@@ -599,8 +748,20 @@ def api_status():
                 "error":
                     collector_error,
 
+                "started_at":
+                    collector_started_at,
+
                 "last_message_at":
                     collector_last_message_at,
+
+                "raw_message_count":
+                    raw_message_count,
+
+                "trade_message_count":
+                    trade_message_count,
+
+                "invalid_message_count":
+                    invalid_message_count,
             },
 
             "rolling_hours": 24,
@@ -650,15 +811,21 @@ def api_candles():
     if symbol not in SYMBOLS:
 
         return jsonify({
+
             "status": "error",
+
             "error": "Invalid symbol",
+
         }), 400
 
     if timeframe not in TIMEFRAMES:
 
         return jsonify({
+
             "status": "error",
+
             "error": "Invalid timeframe",
+
         }), 400
 
     limit = max(
@@ -769,6 +936,12 @@ def api_snapshot():
 
                 "error":
                     collector_error,
+
+                "raw_message_count":
+                    raw_message_count,
+
+                "trade_message_count":
+                    trade_message_count,
             },
 
             "symbols":
@@ -777,26 +950,12 @@ def api_snapshot():
 
 
 # ============================================================
-# START COLLECTOR
-# ============================================================
-
-collector_thread = threading.Thread(
-
-    target=collector_loop,
-
-    daemon=True,
-
-    name="binance-trade-collector",
-)
-
-collector_thread.start()
-
-
-# ============================================================
 # LOCAL DEVELOPMENT
 # ============================================================
 
 if __name__ == "__main__":
+
+    ensure_collector_started()
 
     app.run(
 
