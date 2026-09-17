@@ -126,7 +126,11 @@ def now_ms():
 
 
 def floor_timestamp(ts, seconds):
-    return int(ts // seconds) * seconds
+    """
+    Binance trade timestamp milliseconds mein hota hai.
+    Candle timestamps internally milliseconds mein rakhe ja rahe hain.
+    """
+    return int(ts // (seconds * 1000)) * (seconds * 1000)
 
 
 def round_price_to_step(price, step):
@@ -331,7 +335,7 @@ def store_finished_candle(candle):
             finished
         )
 
-        cutoff = time.time() - ROLLING_SECONDS
+        cutoff = (time.time() - ROLLING_SECONDS) * 1000
 
         dq = candles[symbol][timeframe]
 
