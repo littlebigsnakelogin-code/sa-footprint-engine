@@ -272,7 +272,79 @@ def add_trade_to_candle(
         level["sell"]
     )
 
+def calculate_value_area(footprint, value_area_percent=0.70):
+    """
+    Calculate VAH, VAL and Value Area volume
+    from finalized footprint levels.
+    """
 
+    if not footprint:
+        return None, None, 0.0
+
+    levels = sorted(
+        footprint,
+        key=lambda x: x["price"]
+    )
+
+    total_volume = sum(
+        level["volume"]
+        for level in levels
+    )
+
+    if total_volume <= 0:
+        return None, None, 0.0
+
+    target_volume = total_volume * value_area_percent
+
+    poc_index = max(
+        range(len(levels)),
+        key=lambda i: levels[i]["volume"]
+    )
+
+    included = {poc_index}
+
+    value_area_volume = levels[poc_index]["volume"]
+
+    lower = poc_index - 1
+    upper = poc_index + 1
+
+    while value_area_volume < target_volume:
+
+        lower_volume = (
+            levels[lower]["volume"]
+            if lower >= 0
+            else -1
+        )
+
+        upper_volume = (
+            levels[upper]["volume"]
+            if upper < len(levels)
+            else -1
+        )
+
+        if lower_volume < 0 and upper_volume < 0:
+            break
+
+        if upper_volume >= lower_volume:
+            included.add(upper)
+            value_area_volume += upper_volume
+            upper += 1
+        else:
+            included.add(lower)
+            value_area_volume += lower_volume
+            lower -= 1
+
+    vah = max(
+        levels[i]["price"]
+        for i in included
+    )
+
+    val = min(
+        levels[i]["price"]
+        for i in included
+    )
+
+    return vah, val, value_area_volume
 def finalize_candle(candle):
     """
     Candle ko API-friendly format mein finalize karta hai.
@@ -314,7 +386,15 @@ def finalize_candle(candle):
     else:
         result["poc"] = None
         result["poc_volume"] = 0.0
+    vah, val, value_area_volume = calculate_value_area(
+        result["footprint"],
+        0.70
+    )
 
+    result["vah"] = vah
+    result["val"] = val
+    result["value_area_volume"] = value_area_volume
+    result["value_area_percent"] = 0.70
     return result
 
 
