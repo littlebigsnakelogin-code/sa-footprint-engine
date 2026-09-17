@@ -356,4 +356,708 @@ def process_trade(
 
             start = floor_timestamp(
                 trade_time,
-                
+                seconds
+            )
+
+            current = current_candles[
+                symbol
+            ][timeframe]
+
+            # ------------------------------------------------
+            # First candle
+            # ------------------------------------------------
+
+            if current is None:
+
+                current = create_empty_candle(
+                    symbol,
+                    timeframe,
+                    start,
+                    price,
+                )
+
+                current_candles[
+                    symbol
+                ][timeframe] = current
+
+
+            # ------------------------------------------------
+            # New candle
+            # ------------------------------------------------
+
+            elif start != current["start"]:
+
+                store_finished_candle(
+                    current
+                )
+
+                current = create_empty_candle(
+                    symbol,
+                    timeframe,
+                    start,
+                    price,
+                )
+
+                current_candles[
+                    symbol
+                ][timeframe] = current
+
+
+            # ------------------------------------------------
+            # Add trade
+            # ------------------------------------------------
+
+            add_trade_to_candle(
+                current,
+                price,
+                quantity,
+                is_buyer_maker,
+            )
+
+
+        # ----------------------------------------------------
+        # Last trade info
+        # ----------------------------------------------------
+
+        last_trade[symbol] = {
+            "time": trade_time,
+            "price": price,
+            "quantity": quantity,
+        }
+
+
+# ============================================================
+# BINANCE MESSAGE HANDLER
+# ============================================================
+
+def handle_message(ws, message):
+
+    with lock:
+        collector_state[
+            "raw_message_count"
+        ] += 1
+
+        collector_state[
+            "last_message_at"
+        ] = now_ms()
+
+
+    try:
+
+        payload = json.loads(message)
+
+        data = payload.get("data", payload)
+
+        if data.get("e") != "trade":
+            return
+
+
+        symbol = str(
+            data.get("s", "")
+        ).upper()
+
+        if symbol not in SYMBOLS:
+            return
+
+
+        price = float(
+            data.get("p", 0)
+        )
+
+        quantity = float(
+            data.get("q", 0)
+        )
+
+        trade_time = int(
+            data.get("T", 0)
+        )
+
+        is_buyer_maker = bool(
+            data.get("m", False)
+        )
+
+
+        # ----------------------------------------------------
+        # Invalid trade protection
+        # ----------------------------------------------------
+
+        if (
+            price <= 0
+            or quantity <= 0
+            or trade_time <= 0
+        ):
+
+            with lock:
+                collector_state[
+                    "invalid_message_count"
+                ] += 1
+
+            return
+
+
+        with lock:
+            collector_state[
+                "trade_message_count"
+            ] += 1
+
+
+        process_trade(
+            symbol,
+            price,
+            quantity,
+            trade_time,
+            is_buyer_maker,
+        )
+
+
+    except Exception as exc:
+
+        with lock:
+            collector_state[
+                "invalid_message_count"
+            ] += 1
+
+            collector_state[
+                "error"
+            ] = str(exc)
+
+
+# ============================================================
+# BINANCE CONNECTION
+# ============================================================
+
+def collector_loop():
+
+    streams = "/".join(
+        f"{symbol.lower()}@trade"
+        for symbol in SYMBOLS
+    )
+
+    url = (
+        "wss://fstream.binance.com/stream"
+        f"?streams={streams}"
+    )
+
+
+    with lock:
+        collector_state["status"] = "connecting"
+        collector_state["started_at"] = now_ms()
+
+
+    while True:
+
+        try:
+
+            print(
+                "[COLLECTOR] Connecting to Binance Futures..."
+            )
+
+            def on_open(ws):
+                with lock:
+                    collector_state[
+                        "connected"
+                    ] = True
+
+                    collector_state[
+                        "status"
+                    ] = "connected"
+
+                    collector_state[
+                        "error"
+                    ] = None
+
+                print(
+                    "[COLLECTOR] CONNECTED"
+                )
+
+
+            def on_message(ws, message):
+                handle_message(
+                    ws,
+                    message
+                )
+
+
+            def on_error(ws, error):
+
+                with lock:
+                    collector_state[
+                        "error"
+                    ] = str(error)
+
+                    collector_state[
+                        "status"
+                    ] = "error"
+
+                print(
+                    "[COLLECTOR] ERROR:",
+                    error
+                )
+
+
+            def on_close(
+                ws,
+                close_status_code,
+                close_msg,
+            ):
+
+                with lock:
+                    collector_state[
+                        "connected"
+                    ] = False
+
+                    collector_state[
+                        "status"
+                    ] = "closed"
+
+                print(
+                    "[COLLECTOR] CLOSED:",
+                    close_status_code,
+                    close_msg
+                )
+
+
+            ws = websocket.WebSocketApp(
+                url,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+
+
+            ws.run_forever(
+                ping_interval=20,
+                ping_timeout=10,
+            )
+
+
+        except Exception as exc:
+
+            with lock:
+                collector_state[
+                    "connected"
+                ] = False
+
+                collector_state[
+                    "status"
+                ] = "error"
+
+                collector_state[
+                    "error"
+                ] = str(exc)
+
+            print(
+                "[COLLECTOR] EXCEPTION:",
+                exc
+            )
+
+
+        print(
+            "[COLLECTOR] Reconnecting in 5 seconds..."
+        )
+
+        time.sleep(5)
+
+
+# ============================================================
+# COLLECTOR START
+# ============================================================
+
+def ensure_collector_started():
+
+    global collector_thread
+
+    if (
+        collector_thread is not None
+        and collector_thread.is_alive()
+    ):
+        return
+
+
+    with collector_start_lock:
+
+        if (
+            collector_thread is not None
+            and collector_thread.is_alive()
+        ):
+            return
+
+
+        collector_thread = threading.Thread(
+            target=collector_loop,
+            name="binance-trade-collector",
+            daemon=True,
+        )
+
+        collector_thread.start()
+
+        print(
+            "[COLLECTOR] Background collector started"
+        )
+
+
+@app.before_request
+def before_request():
+    ensure_collector_started()
+
+
+# ============================================================
+# ROUTES
+# ============================================================
+
+@app.route("/")
+def home():
+
+    return jsonify({
+        "status": "ok",
+        "service": "SA Footprint Engine",
+        "version": "V2",
+        "message": "Trade + Footprint engine running",
+    })
+
+
+@app.route("/hello")
+def hello():
+    return "SA Footprint Engine OK"
+
+
+@app.route("/api/test")
+def api_test():
+
+    return jsonify({
+        "status": "ok",
+        "message": "API working",
+        "version": "V2",
+    })
+
+
+# ============================================================
+# STATUS
+# ============================================================
+
+@app.route("/api/status")
+def api_status():
+
+    with lock:
+
+        symbol_status = {}
+
+        for symbol in SYMBOLS:
+
+            symbol_status[symbol] = {
+                "last_trade_time":
+                    last_trade[symbol]["time"],
+
+                "price":
+                    last_trade[symbol]["price"],
+
+                "quantity":
+                    last_trade[symbol]["quantity"],
+            }
+
+
+        return jsonify({
+
+            "status": "ok",
+
+            "version": "V2",
+
+            "rolling_hours": 24,
+
+            "symbols": symbol_status,
+
+            "timeframes": list(
+                TIMEFRAMES.keys()
+            ),
+
+            "price_steps": PRICE_STEP,
+
+            "collector": dict(
+                collector_state
+            ),
+
+            "process": {
+                "thread_alive": (
+                    collector_thread is not None
+                    and collector_thread.is_alive()
+                ),
+                "thread_name": (
+                    collector_thread.name
+                    if collector_thread
+                    else None
+                ),
+            },
+
+        })
+
+
+# ============================================================
+# CANDLES API
+# ============================================================
+
+@app.route("/api/candles")
+def api_candles():
+
+    symbol = (
+        request.args
+        .get("symbol", "BTCUSDT")
+        .upper()
+    )
+
+    timeframe = (
+        request.args
+        .get("timeframe", "1m")
+        .lower()
+    )
+
+    try:
+        limit = int(
+            request.args.get(
+                "limit",
+                100
+            )
+        )
+    except ValueError:
+        limit = 100
+
+
+    if symbol not in SYMBOLS:
+
+        return jsonify({
+            "status": "error",
+            "message": "Invalid symbol",
+            "allowed": SYMBOLS,
+        }), 400
+
+
+    if timeframe not in TIMEFRAMES:
+
+        return jsonify({
+            "status": "error",
+            "message": "Invalid timeframe",
+            "allowed": list(
+                TIMEFRAMES.keys()
+            ),
+        }), 400
+
+
+    limit = max(
+        1,
+        min(limit, 500)
+    )
+
+
+    with lock:
+
+        finished = list(
+            candles[symbol][timeframe]
+        )
+
+        current = current_candles[
+            symbol
+        ][timeframe]
+
+        # ----------------------------------------------------
+        # Current live candle bhi include karenge
+        # ----------------------------------------------------
+
+        result = finished[-limit:]
+
+
+        if current is not None:
+
+            current_final = finalize_candle(
+                current
+            )
+
+            if (
+                not result
+                or current_final["start"]
+                != result[-1]["start"]
+            ):
+                result = (
+                    result + [current_final]
+                )
+
+
+        return jsonify({
+
+            "status": "ok",
+
+            "symbol": symbol,
+
+            "timeframe": timeframe,
+
+            "count": len(result),
+
+            "candles": result,
+
+        })
+
+
+# ============================================================
+# FOOTPRINT SINGLE CANDLE
+# ============================================================
+
+@app.route("/api/footprint")
+def api_footprint():
+
+    symbol = (
+        request.args
+        .get("symbol", "BTCUSDT")
+        .upper()
+    )
+
+    timeframe = (
+        request.args
+        .get("timeframe", "1m")
+        .lower()
+    )
+
+
+    if symbol not in SYMBOLS:
+
+        return jsonify({
+            "status": "error",
+            "message": "Invalid symbol",
+        }), 400
+
+
+    if timeframe not in TIMEFRAMES:
+
+        return jsonify({
+            "status": "error",
+            "message": "Invalid timeframe",
+        }), 400
+
+
+    try:
+        start = int(
+            request.args.get(
+                "start"
+            )
+        )
+    except (TypeError, ValueError):
+
+        return jsonify({
+            "status": "error",
+            "message":
+                "Provide candle start timestamp",
+        }), 400
+
+
+    with lock:
+
+        # Finished candles
+        for candle in candles[
+            symbol
+        ][timeframe]:
+
+            if candle["start"] == start:
+
+                return jsonify({
+                    "status": "ok",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "candle": candle,
+                })
+
+
+        # Current candle
+        current = current_candles[
+            symbol
+        ][timeframe]
+
+        if (
+            current is not None
+            and current["start"] == start
+        ):
+
+            return jsonify({
+                "status": "ok",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "candle":
+                    finalize_candle(current),
+            })
+
+
+    return jsonify({
+        "status": "error",
+        "message": "Candle not found",
+    }), 404
+
+
+# ============================================================
+# SNAPSHOT
+# ============================================================
+
+@app.route("/api/snapshot")
+def api_snapshot():
+
+    symbol = (
+        request.args
+        .get("symbol", "BTCUSDT")
+        .upper()
+    )
+
+    timeframe = (
+        request.args
+        .get("timeframe", "1m")
+        .lower()
+    )
+
+
+    if symbol not in SYMBOLS:
+        return jsonify({
+            "status": "error",
+            "message": "Invalid symbol",
+        }), 400
+
+
+    if timeframe not in TIMEFRAMES:
+        return jsonify({
+            "status": "error",
+            "message": "Invalid timeframe",
+        }), 400
+
+
+    with lock:
+
+        current = current_candles[
+            symbol
+        ][timeframe]
+
+        if current is None:
+
+            return jsonify({
+                "status": "ok",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "current_candle": None,
+            })
+
+
+        return jsonify({
+            "status": "ok",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "current_candle":
+                finalize_candle(current),
+        })
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+
+    ensure_collector_started()
+
+    app.run(
+        host="0.0.0.0",
+        port=10000,
+        debug=False,
+    )
