@@ -167,7 +167,7 @@ def create_empty_candle(
         "timeframe": timeframe,
 
         "start": start,
-        "end": start + TIMEFRAMES[timeframe],
+        "end": start + (TIMEFRAMES[timeframe] * 1000),
 
         "open": open_price,
         "high": open_price,
