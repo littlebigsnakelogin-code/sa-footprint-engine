@@ -1,6 +1,7 @@
 import encodings.idna
 
 import json
+import os
 import threading
 import time
 from collections import defaultdict, deque
@@ -8,8 +9,31 @@ from datetime import datetime, timezone
 
 import websocket
 from flask import Flask, jsonify, request
+from libsql_client import create_client_sync
 
 
+# ============================================================
+# TURSO DATABASE
+# ============================================================
+
+TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL")
+TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
+
+turso_client = None
+
+if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
+    try:
+        turso_client = create_client_sync(
+            TURSO_DATABASE_URL,
+            auth_token=TURSO_AUTH_TOKEN
+        )
+        print("[TURSO] Connected")
+    except Exception as e:
+        print(f"[TURSO] Connection failed: {e}")
+        turso_client = None
+else:
+    print("[TURSO] Environment variables missing")
+last_turso_cleanup = 0
 app = Flask(__name__)
 
 
@@ -399,6 +423,8 @@ def finalize_candle(candle):
 
 
 def store_finished_candle(candle):
+    global last_turso_cleanup
+
     if candle is None:
         return
 
@@ -410,17 +436,40 @@ def store_finished_candle(candle):
     if finished is None:
         return
 
-    with lock:
-        candles[symbol][timeframe].append(
-            finished
-        )
+    # --------------------------------------------------------
+    # 1. Existing RAM storage
+    # --------------------------------------------------------
 
+    with lock:
+        candles[symbol][timeframe].append(finished)
+
+        # 24-hour RAM rolling cleanup
         cutoff = (time.time() - ROLLING_SECONDS) * 1000
 
-        dq = candles[symbol][timeframe]
+        while candles[symbol][timeframe]:
+            oldest = candles[symbol][timeframe][0]
 
-        while dq and dq[0]["end"] < cutoff:
-            dq.popleft()
+            if oldest["start"] >= cutoff:
+                break
+
+            candles[symbol][timeframe].popleft()
+
+    # --------------------------------------------------------
+    # 2. Save finalized candle to Turso
+    # --------------------------------------------------------
+
+    save_candle_to_turso(finished)
+
+    # --------------------------------------------------------
+    # 3. Turso cleanup
+    #    Maximum once every 5 minutes
+    # --------------------------------------------------------
+
+    now = time.time()
+
+    if now - last_turso_cleanup >= 300:
+        cleanup_old_turso_candles()
+        last_turso_cleanup = now
 
 
 def process_trade(
@@ -470,7 +519,95 @@ def process_trade(
             # ------------------------------------------------
 
             elif start != current["start"]:
+def save_candle_to_turso(candle):
+    def cleanup_old_turso_candles():
+    """
+    Turso se 24 ghante se purane candles delete karta hai.
+    """
 
+    if turso_client is None:
+        return
+
+    try:
+        cutoff = int(
+            (time.time() - ROLLING_SECONDS) * 1000
+        )
+
+        turso_client.execute(
+            """
+            DELETE FROM candles
+            WHERE time < ?
+            """,
+            (cutoff,)
+        )
+
+        print("[TURSO] Old candles cleaned")
+
+    except Exception as e:
+        print(f"[TURSO] Cleanup failed: {e}")
+    """
+    Finalized candle ko Turso candles table mein save karta hai.
+    Raw trades nahi, sirf processed candle + footprint save hota hai.
+    """
+
+    if turso_client is None:
+        return
+
+    try:
+        footprint_json = json.dumps(
+            candle.get("footprint", []),
+            separators=(",", ":")
+        )
+
+        sql = """
+        INSERT OR REPLACE INTO candles (
+            symbol,
+            tf,
+            time,
+            open,
+            high,
+            low,
+            close,
+            delta,
+            totalVol,
+            buyVol,
+            sellVol,
+            trades,
+            poc,
+            pocVol,
+            vah,
+            val,
+            valueAreaVol,
+            footprint
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        args = (
+            candle["symbol"],
+            candle["timeframe"],
+            candle["start"],
+            candle["open"],
+            candle["high"],
+            candle["low"],
+            candle["close"],
+            candle["delta"],
+            candle["volume"],
+            candle["buy_volume"],
+            candle["sell_volume"],
+            candle["trades"],
+            candle.get("poc"),
+            candle.get("poc_volume"),
+            candle.get("vah"),
+            candle.get("val"),
+            candle.get("value_area_volume"),
+            footprint_json
+        )
+
+        turso_client.execute(sql, args)
+
+    except Exception as e:
+        print(f"[TURSO] Candle save failed: {e}")
                 store_finished_candle(
                     current
                 )
@@ -815,7 +952,44 @@ def api_test():
         "version": "V2",
     })
 
+@app.route("/api/test")
+def api_test():
+    return jsonify({
+        "ok": True
+    })
 
+
+@app.route("/api/db-test")
+def db_test():
+    if turso_client is None:
+        return jsonify({
+            "ok": False,
+            "error": "Turso client is not connected"
+        }), 500
+
+    try:
+        result = turso_client.execute(
+            "SELECT COUNT(*) AS count FROM candles"
+        )
+
+        count = result.rows[0][0]
+
+        return jsonify({
+            "ok": True,
+            "turso": "connected",
+            "candles": count
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/status")
+def status():
+    ...
 # ============================================================
 # STATUS
 # ============================================================
