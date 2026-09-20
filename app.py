@@ -116,7 +116,7 @@ collector_state = {
 
 
 # ============================================================
-# LAST TRADE
+# LAST TRADE & ORDERBOOK
 # ============================================================
 
 last_trade = {
@@ -128,9 +128,15 @@ last_trade = {
     for symbol in SYMBOLS
 }
 
+orderbook = {
+    symbol: {
+        "bids": {},
+        "asks": {}
+    }
+    for symbol in SYMBOLS
+}
 
 collector_thread = None
-
 
 # ============================================================
 # HELPERS
@@ -716,25 +722,33 @@ def handle_message(
             message
         )
 
-        data = payload.get(
-            "data",
-            payload
-        )
-
-        if data.get("e") != "trade":
-            return
-
-        symbol = str(
-            data.get("s", "")
-        ).upper()
+        data = payload.get("data", payload)
+        event_type = data.get("e")
+        symbol = str(data.get("s", "")).upper()
 
         if symbol not in SYMBOLS:
             return
 
-        price = float(
-            data.get("p", 0)
-        )
+        # --- ORDERBOOK (DEPTH) UPDATE ---
+        if event_type == "depthUpdate":
+            with lock:
+                for b in data.get("b", []):
+                    if float(b[1]) == 0:
+                        orderbook[symbol]["bids"].pop(b[0], None)
+                    else:
+                        orderbook[symbol]["bids"][b[0]] = float(b[1])
+                for a in data.get("a", []):
+                    if float(a[1]) == 0:
+                        orderbook[symbol]["asks"].pop(a[0], None)
+                    else:
+                        orderbook[symbol]["asks"][a[0]] = float(a[1])
+            return
 
+        # --- TRADE UPDATE ---
+        if event_type != "trade":
+            return
+
+        price = float(data.get("p", 0))
         quantity = float(
             data.get("q", 0)
         )
@@ -798,16 +812,15 @@ def handle_message(
 
 def collector_loop():
 
-    streams = "/".join(
-        f"{symbol.lower()}@trade"
-        for symbol in SYMBOLS
-    )
+    trade_streams = [f"{symbol.lower()}@trade" for symbol in SYMBOLS]
+    depth_streams = [f"{symbol.lower()}@depth@100ms" for symbol in SYMBOLS]
+    
+    streams = "/".join(trade_streams + depth_streams)
 
     url = (
         "wss://fstream.binance.com/stream"
         f"?streams={streams}"
     )
-
     with lock:
 
         collector_state[
@@ -1398,13 +1411,36 @@ def api_snapshot():
 
 
 # ============================================================
+# LIVE ORDERBOOK
+# ============================================================
+
+@app.route("/api/orderbook")
+def api_orderbook():
+    symbol = request.args.get("symbol", "BTCUSDT").upper()
+    if symbol not in SYMBOLS:
+        return jsonify({"status": "error", "message": "Invalid symbol"}), 400
+
+    limit = int(request.args.get("limit", 20))
+
+    with lock:
+        bids = sorted(orderbook[symbol]["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:limit]
+        asks = sorted(orderbook[symbol]["asks"].items(), key=lambda x: float(x[0]))[:limit]
+
+    return jsonify({
+        "status": "ok",
+        "symbol": symbol,
+        "bids": [{"price": float(p), "quantity": q} for p, q in bids],
+        "asks": [{"price": float(p), "quantity": q} for p, q in asks]
+    })
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 if __name__ == "__main__":
 
     ensure_collector_started()
-
     app.run(
         host="0.0.0.0",
         port=10000,
