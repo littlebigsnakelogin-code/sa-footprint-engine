@@ -5,7 +5,6 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timezone
 
 import websocket
 from flask import Flask, jsonify, request
@@ -27,13 +26,19 @@ if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
             TURSO_DATABASE_URL,
             auth_token=TURSO_AUTH_TOKEN
         )
+
         print("[TURSO] Connected")
+
     except Exception as e:
         print(f"[TURSO] Connection failed: {e}")
         turso_client = None
+
 else:
     print("[TURSO] Environment variables missing")
+
+
 last_turso_cleanup = 0
+
 app = Flask(__name__)
 
 
@@ -51,6 +56,7 @@ SYMBOLS = [
     "LTCUSDT",
 ]
 
+
 TIMEFRAMES = {
     "1m": 60,
     "3m": 180,
@@ -62,16 +68,14 @@ TIMEFRAMES = {
     "1d": 86400,
 }
 
+
+# Keep 24 hours of RAM + Turso data
 ROLLING_SECONDS = 24 * 60 * 60
 
 
-# ------------------------------------------------------------
-# Initial footprint price steps
-#
-# Ye configurable hain.
-# Baad mein Binance Futures metadata se automatically
-# exact tick size lene ka system add karenge.
-# ------------------------------------------------------------
+# ============================================================
+# FOOTPRINT PRICE STEPS
+# ============================================================
 
 PRICE_STEP = {
     "BTCUSDT": 1.0,
@@ -91,8 +95,8 @@ PRICE_STEP = {
 lock = threading.RLock()
 collector_start_lock = threading.Lock()
 
-# Raw trade-derived candle storage
-# candles[symbol][timeframe] = deque(...)
+
+# Finished candles stored in RAM
 candles = {
     symbol: {
         timeframe: deque()
@@ -112,9 +116,9 @@ current_candles = {
 }
 
 
-# ------------------------------------------------------------
-# Statistics
-# ------------------------------------------------------------
+# ============================================================
+# COLLECTOR STATE
+# ============================================================
 
 collector_state = {
     "status": "starting",
@@ -127,6 +131,10 @@ collector_state = {
     "invalid_message_count": 0,
 }
 
+
+# ============================================================
+# LAST TRADE
+# ============================================================
 
 last_trade = {
     symbol: {
@@ -151,33 +159,40 @@ def now_ms():
 
 def floor_timestamp(ts, seconds):
     """
-    Binance trade timestamp milliseconds mein hota hai.
-    Candle timestamps internally milliseconds mein rakhe ja rahe hain.
+    Binance timestamp milliseconds mein hota hai.
+    Candle timestamp bhi milliseconds mein rakha jayega.
     """
-    return int(ts // (seconds * 1000)) * (seconds * 1000)
+
+    return int(
+        ts // (seconds * 1000)
+    ) * (seconds * 1000)
 
 
 def round_price_to_step(price, step):
     """
-    Price ko footprint bucket mein convert karta hai.
-
-    Example:
-    BTC step=1
-    75787.63 -> 75787.0
-
-    ETH step=0.1
-    2395.82 -> 2395.8
+    Price ko footprint price bucket mein convert karta hai.
     """
 
     if step <= 0:
         return price
 
-    bucket = int(price / step)
+    bucket = int(
+        price / step
+    )
+
     result = bucket * step
 
-    # floating-point garbage avoid karne ke liye
-    decimals = max(0, len(str(step).split(".")[-1]))
-    return round(result, decimals)
+    decimals = max(
+        0,
+        len(
+            str(step).split(".")[-1]
+        )
+    )
+
+    return round(
+        result,
+        decimals
+    )
 
 
 def create_empty_candle(
@@ -186,12 +201,17 @@ def create_empty_candle(
     start,
     open_price,
 ):
+
     return {
         "symbol": symbol,
         "timeframe": timeframe,
 
         "start": start,
-        "end": start + (TIMEFRAMES[timeframe] * 1000),
+
+        "end": (
+            start
+            + TIMEFRAMES[timeframe] * 1000
+        ),
 
         "open": open_price,
         "high": open_price,
@@ -205,21 +225,13 @@ def create_empty_candle(
 
         "trades": 0,
 
-        # ----------------------------------------------------
-        # Footprint
-        #
-        # {
-        #   "price": {
-        #       "buy": x,
-        #       "sell": y,
-        #       "delta": z,
-        #       "trades": n
-        #   }
-        # }
-        # ----------------------------------------------------
         "footprint": {},
     }
 
+
+# ============================================================
+# TRADE -> CANDLE
+# ============================================================
 
 def add_trade_to_candle(
     candle,
@@ -227,50 +239,60 @@ def add_trade_to_candle(
     quantity,
     is_buyer_maker,
 ):
-    """
-    Binance trade:
-        m=false -> buyer was NOT maker
-                   => aggressive BUY / taker buy
 
-        m=true  -> buyer WAS maker
-                   => aggressive SELL / taker sell
-    """
+    candle["high"] = max(
+        candle["high"],
+        price
+    )
 
-    candle["high"] = max(candle["high"], price)
-    candle["low"] = min(candle["low"], price)
+    candle["low"] = min(
+        candle["low"],
+        price
+    )
+
     candle["close"] = price
 
     candle["volume"] += quantity
+
     candle["trades"] += 1
 
     if is_buyer_maker:
-        # aggressive seller
+
+        # Aggressive SELL
         candle["sell_volume"] += quantity
+
     else:
-        # aggressive buyer
+
+        # Aggressive BUY
         candle["buy_volume"] += quantity
 
 
     candle["delta"] = (
-        candle["buy_volume"] -
-        candle["sell_volume"]
+        candle["buy_volume"]
+        - candle["sell_volume"]
     )
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # FOOTPRINT PRICE LEVEL
-    # --------------------------------------------------------
+    # ========================================================
 
     symbol = candle["symbol"]
+
     step = PRICE_STEP[symbol]
 
-    price_level = round_price_to_step(price, step)
+    price_level = round_price_to_step(
+        price,
+        step
+    )
 
     key = str(price_level)
 
     level = candle["footprint"].get(key)
 
+
     if level is None:
+
         level = {
             "price": price_level,
             "buy": 0.0,
@@ -284,53 +306,79 @@ def add_trade_to_candle(
 
 
     if is_buyer_maker:
+
         level["sell"] += quantity
+
     else:
+
         level["buy"] += quantity
 
+
     level["volume"] += quantity
+
     level["trades"] += 1
 
     level["delta"] = (
-        level["buy"] -
-        level["sell"]
+        level["buy"]
+        - level["sell"]
     )
 
-def calculate_value_area(footprint, value_area_percent=0.70):
-    """
-    Calculate VAH, VAL and Value Area volume
-    from finalized footprint levels.
-    """
+
+# ============================================================
+# VALUE AREA
+# ============================================================
+
+def calculate_value_area(
+    footprint,
+    value_area_percent=0.70
+):
 
     if not footprint:
         return None, None, 0.0
+
 
     levels = sorted(
         footprint,
         key=lambda x: x["price"]
     )
 
+
     total_volume = sum(
         level["volume"]
         for level in levels
     )
 
+
     if total_volume <= 0:
         return None, None, 0.0
 
-    target_volume = total_volume * value_area_percent
+
+    target_volume = (
+        total_volume
+        * value_area_percent
+    )
+
 
     poc_index = max(
         range(len(levels)),
-        key=lambda i: levels[i]["volume"]
+        key=lambda i:
+            levels[i]["volume"]
     )
 
-    included = {poc_index}
 
-    value_area_volume = levels[poc_index]["volume"]
+    included = {
+        poc_index
+    }
+
+
+    value_area_volume = (
+        levels[poc_index]["volume"]
+    )
+
 
     lower = poc_index - 1
     upper = poc_index + 1
+
 
     while value_area_volume < target_volume:
 
@@ -346,34 +394,60 @@ def calculate_value_area(footprint, value_area_percent=0.70):
             else -1
         )
 
-        if lower_volume < 0 and upper_volume < 0:
+
+        if (
+            lower_volume < 0
+            and upper_volume < 0
+        ):
             break
 
+
         if upper_volume >= lower_volume:
+
             included.add(upper)
-            value_area_volume += upper_volume
+
+            value_area_volume += (
+                upper_volume
+            )
+
             upper += 1
+
         else:
+
             included.add(lower)
-            value_area_volume += lower_volume
+
+            value_area_volume += (
+                lower_volume
+            )
+
             lower -= 1
+
 
     vah = max(
         levels[i]["price"]
         for i in included
     )
 
+
     val = min(
         levels[i]["price"]
         for i in included
     )
 
-    return vah, val, value_area_volume
+
+    return (
+        vah,
+        val,
+        value_area_volume
+    )
+    # ============================================================
+# FINALIZE CANDLE
+# ============================================================
+
 def finalize_candle(candle):
     """
     Candle ko API-friendly format mein finalize karta hai.
-
-    Footprint levels ko price ascending order mein bhejenge.
+    Footprint levels price ascending order mein bheje jayenge.
     """
 
     if candle is None:
@@ -393,7 +467,6 @@ def finalize_candle(candle):
 
     # --------------------------------------------------------
     # POC
-    # Highest total volume price
     # --------------------------------------------------------
 
     poc = None
@@ -410,6 +483,11 @@ def finalize_candle(candle):
     else:
         result["poc"] = None
         result["poc_volume"] = 0.0
+
+    # --------------------------------------------------------
+    # VALUE AREA
+    # --------------------------------------------------------
+
     vah, val, value_area_volume = calculate_value_area(
         result["footprint"],
         0.70
@@ -419,141 +497,27 @@ def finalize_candle(candle):
     result["val"] = val
     result["value_area_volume"] = value_area_volume
     result["value_area_percent"] = 0.70
+
     return result
 
 
-def store_finished_candle(candle):
-    global last_turso_cleanup
+# ============================================================
+# TURSO SAVE
+# ============================================================
 
-    if candle is None:
-        return
-
-    symbol = candle["symbol"]
-    timeframe = candle["timeframe"]
-
-    finished = finalize_candle(candle)
-
-    if finished is None:
-        return
-
-    # --------------------------------------------------------
-    # 1. Existing RAM storage
-    # --------------------------------------------------------
-
-    with lock:
-        candles[symbol][timeframe].append(finished)
-
-        # 24-hour RAM rolling cleanup
-        cutoff = (time.time() - ROLLING_SECONDS) * 1000
-
-        while candles[symbol][timeframe]:
-            oldest = candles[symbol][timeframe][0]
-
-            if oldest["start"] >= cutoff:
-                break
-
-            candles[symbol][timeframe].popleft()
-
-    # --------------------------------------------------------
-    # 2. Save finalized candle to Turso
-    # --------------------------------------------------------
-
-    save_candle_to_turso(finished)
-
-    # --------------------------------------------------------
-    # 3. Turso cleanup
-    #    Maximum once every 5 minutes
-    # --------------------------------------------------------
-
-    now = time.time()
-
-    if now - last_turso_cleanup >= 300:
-        cleanup_old_turso_candles()
-        last_turso_cleanup = now
-
-
-def process_trade(
-    symbol,
-    price,
-    quantity,
-    trade_time,
-    is_buyer_maker,
-):
-    """
-    Ek Binance trade ko saare timeframes mein process karta hai.
-    """
-
-    with lock:
-
-        for timeframe, seconds in TIMEFRAMES.items():
-
-            start = floor_timestamp(
-                trade_time,
-                seconds
-            )
-
-            current = current_candles[
-                symbol
-            ][timeframe]
-
-            # ------------------------------------------------
-            # First candle
-            # ------------------------------------------------
-
-            if current is None:
-
-                current = create_empty_candle(
-                    symbol,
-                    timeframe,
-                    start,
-                    price,
-                )
-
-                current_candles[
-                    symbol
-                ][timeframe] = current
-
-
-            # ------------------------------------------------
-            # New candle
-            # ------------------------------------------------
-
-            elif start != current["start"]:
 def save_candle_to_turso(candle):
-    def cleanup_old_turso_candles():
-    """
-    Turso se 24 ghante se purane candles delete karta hai.
-    """
-
-    if turso_client is None:
-        return
-
-    try:
-        cutoff = int(
-            (time.time() - ROLLING_SECONDS) * 1000
-        )
-
-        turso_client.execute(
-            """
-            DELETE FROM candles
-            WHERE time < ?
-            """,
-            (cutoff,)
-        )
-
-        print("[TURSO] Old candles cleaned")
-
-    except Exception as e:
-        print(f"[TURSO] Cleanup failed: {e}")
     """
     Finalized candle ko Turso candles table mein save karta hai.
-    Raw trades nahi, sirf processed candle + footprint save hota hai.
+
+    Raw trades save nahi hote.
+    Sirf processed candle + footprint save hota hai.
     """
 
     if turso_client is None:
         return
 
     try:
+
         footprint_json = json.dumps(
             candle.get("footprint", []),
             separators=(",", ":")
@@ -580,7 +544,10 @@ def save_candle_to_turso(candle):
             valueAreaVol,
             footprint
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
         """
 
         args = (
@@ -604,10 +571,179 @@ def save_candle_to_turso(candle):
             footprint_json
         )
 
-        turso_client.execute(sql, args)
+        turso_client.execute(
+            sql,
+            args
+        )
 
     except Exception as e:
-        print(f"[TURSO] Candle save failed: {e}")
+
+        print(
+            f"[TURSO] Candle save failed: {e}"
+        )
+
+
+# ============================================================
+# TURSO CLEANUP
+# ============================================================
+
+def cleanup_old_turso_candles():
+    """
+    Turso se 24 ghante se purane candles delete karta hai.
+    """
+
+    if turso_client is None:
+        return
+
+    try:
+
+        cutoff = int(
+            (time.time() - ROLLING_SECONDS)
+            * 1000
+        )
+
+        turso_client.execute(
+            """
+            DELETE FROM candles
+            WHERE time < ?
+            """,
+            (cutoff,)
+        )
+
+        print(
+            "[TURSO] Old candles cleaned"
+        )
+
+    except Exception as e:
+
+        print(
+            f"[TURSO] Cleanup failed: {e}"
+        )
+
+
+# ============================================================
+# STORE FINISHED CANDLE
+# ============================================================
+
+def store_finished_candle(candle):
+
+    global last_turso_cleanup
+
+    if candle is None:
+        return
+
+    symbol = candle["symbol"]
+    timeframe = candle["timeframe"]
+
+    finished = finalize_candle(
+        candle
+    )
+
+    if finished is None:
+        return
+
+    # --------------------------------------------------------
+    # RAM STORAGE
+    # --------------------------------------------------------
+
+    with lock:
+
+        candles[symbol][timeframe].append(
+            finished
+        )
+
+        cutoff = (
+            time.time()
+            - ROLLING_SECONDS
+        ) * 1000
+
+        while candles[symbol][timeframe]:
+
+            oldest = candles[
+                symbol
+            ][timeframe][0]
+
+            if oldest["start"] >= cutoff:
+                break
+
+            candles[
+                symbol
+            ][timeframe].popleft()
+
+    # --------------------------------------------------------
+    # TURSO SAVE
+    # --------------------------------------------------------
+
+    save_candle_to_turso(
+        finished
+    )
+
+    # --------------------------------------------------------
+    # TURSO CLEANUP
+    # Maximum once every 5 minutes
+    # --------------------------------------------------------
+
+    now = time.time()
+
+    if (
+        now - last_turso_cleanup
+        >= 300
+    ):
+
+        cleanup_old_turso_candles()
+
+        last_turso_cleanup = now
+        # ============================================================
+# PROCESS TRADE
+# ============================================================
+
+def process_trade(
+    symbol,
+    price,
+    quantity,
+    trade_time,
+    is_buyer_maker,
+):
+    """
+    Ek Binance trade ko saare timeframes mein process karta hai.
+    """
+
+    with lock:
+
+        for timeframe, seconds in TIMEFRAMES.items():
+
+            start = floor_timestamp(
+                trade_time,
+                seconds
+            )
+
+            current = current_candles[
+                symbol
+            ][timeframe]
+
+            # ------------------------------------------------
+            # FIRST CANDLE
+            # ------------------------------------------------
+
+            if current is None:
+
+                current = create_empty_candle(
+                    symbol,
+                    timeframe,
+                    start,
+                    price,
+                )
+
+                current_candles[
+                    symbol
+                ][timeframe] = current
+
+            # ------------------------------------------------
+            # NEW CANDLE
+            # ------------------------------------------------
+
+            elif start != current["start"]:
+
                 store_finished_candle(
                     current
                 )
@@ -623,9 +759,8 @@ def save_candle_to_turso(candle):
                     symbol
                 ][timeframe] = current
 
-
             # ------------------------------------------------
-            # Add trade
+            # ADD TRADE
             # ------------------------------------------------
 
             add_trade_to_candle(
@@ -635,9 +770,8 @@ def save_candle_to_turso(candle):
                 is_buyer_maker,
             )
 
-
         # ----------------------------------------------------
-        # Last trade info
+        # LAST TRADE INFO
         # ----------------------------------------------------
 
         last_trade[symbol] = {
@@ -651,9 +785,13 @@ def save_candle_to_turso(candle):
 # BINANCE MESSAGE HANDLER
 # ============================================================
 
-def handle_message(ws, message):
+def handle_message(
+    ws,
+    message
+):
 
     with lock:
+
         collector_state[
             "raw_message_count"
         ] += 1
@@ -662,16 +800,19 @@ def handle_message(ws, message):
             "last_message_at"
         ] = now_ms()
 
-
     try:
 
-        payload = json.loads(message)
+        payload = json.loads(
+            message
+        )
 
-        data = payload.get("data", payload)
+        data = payload.get(
+            "data",
+            payload
+        )
 
         if data.get("e") != "trade":
             return
-
 
         symbol = str(
             data.get("s", "")
@@ -679,7 +820,6 @@ def handle_message(ws, message):
 
         if symbol not in SYMBOLS:
             return
-
 
         price = float(
             data.get("p", 0)
@@ -697,9 +837,8 @@ def handle_message(ws, message):
             data.get("m", False)
         )
 
-
         # ----------------------------------------------------
-        # Invalid trade protection
+        # INVALID TRADE PROTECTION
         # ----------------------------------------------------
 
         if (
@@ -709,18 +848,18 @@ def handle_message(ws, message):
         ):
 
             with lock:
+
                 collector_state[
                     "invalid_message_count"
                 ] += 1
 
             return
 
-
         with lock:
+
             collector_state[
                 "trade_message_count"
             ] += 1
-
 
         process_trade(
             symbol,
@@ -730,10 +869,10 @@ def handle_message(ws, message):
             is_buyer_maker,
         )
 
-
     except Exception as exc:
 
         with lock:
+
             collector_state[
                 "invalid_message_count"
             ] += 1
@@ -759,11 +898,15 @@ def collector_loop():
         f"?streams={streams}"
     )
 
-
     with lock:
-        collector_state["status"] = "connecting"
-        collector_state["started_at"] = now_ms()
 
+        collector_state[
+            "status"
+        ] = "connecting"
+
+        collector_state[
+            "started_at"
+        ] = now_ms()
 
     while True:
 
@@ -774,7 +917,9 @@ def collector_loop():
             )
 
             def on_open(ws):
+
                 with lock:
+
                     collector_state[
                         "connected"
                     ] = True
@@ -791,17 +936,23 @@ def collector_loop():
                     "[COLLECTOR] CONNECTED"
                 )
 
+            def on_message(
+                ws,
+                message
+            ):
 
-            def on_message(ws, message):
                 handle_message(
                     ws,
                     message
                 )
 
-
-            def on_error(ws, error):
+            def on_error(
+                ws,
+                error
+            ):
 
                 with lock:
+
                     collector_state[
                         "error"
                     ] = str(error)
@@ -815,14 +966,14 @@ def collector_loop():
                     error
                 )
 
-
             def on_close(
                 ws,
                 close_status_code,
-                close_msg,
+                close_msg
             ):
 
                 with lock:
+
                     collector_state[
                         "connected"
                     ] = False
@@ -837,7 +988,6 @@ def collector_loop():
                     close_msg
                 )
 
-
             ws = websocket.WebSocketApp(
                 url,
                 on_open=on_open,
@@ -846,16 +996,15 @@ def collector_loop():
                 on_close=on_close,
             )
 
-
             ws.run_forever(
                 ping_interval=20,
                 ping_timeout=10,
             )
 
-
         except Exception as exc:
 
             with lock:
+
                 collector_state[
                     "connected"
                 ] = False
@@ -872,7 +1021,6 @@ def collector_loop():
                 "[COLLECTOR] EXCEPTION:",
                 exc
             )
-
 
         print(
             "[COLLECTOR] Reconnecting in 5 seconds..."
@@ -895,7 +1043,6 @@ def ensure_collector_started():
     ):
         return
 
-
     with collector_start_lock:
 
         if (
@@ -903,7 +1050,6 @@ def ensure_collector_started():
             and collector_thread.is_alive()
         ):
             return
-
 
         collector_thread = threading.Thread(
             target=collector_loop,
@@ -920,10 +1066,9 @@ def ensure_collector_started():
 
 @app.before_request
 def before_request():
+
     ensure_collector_started()
-
-
-# ============================================================
+    # ============================================================
 # ROUTES
 # ============================================================
 
@@ -933,15 +1078,20 @@ def home():
     return jsonify({
         "status": "ok",
         "service": "SA Footprint Engine",
-        "version": "V2",
-        "message": "Trade + Footprint engine running",
+        "version": "V3",
+        "message": "Trade + Footprint + Turso engine running",
     })
 
 
 @app.route("/hello")
 def hello():
+
     return "SA Footprint Engine OK"
 
+
+# ============================================================
+# API TEST
+# ============================================================
 
 @app.route("/api/test")
 def api_test():
@@ -949,25 +1099,26 @@ def api_test():
     return jsonify({
         "status": "ok",
         "message": "API working",
-        "version": "V2",
+        "version": "V3",
     })
 
-@app.route("/api/test")
-def api_test():
-    return jsonify({
-        "ok": True
-    })
 
+# ============================================================
+# TURSO DATABASE TEST
+# ============================================================
 
 @app.route("/api/db-test")
 def db_test():
+
     if turso_client is None:
+
         return jsonify({
             "ok": False,
             "error": "Turso client is not connected"
         }), 500
 
     try:
+
         result = turso_client.execute(
             "SELECT COUNT(*) AS count FROM candles"
         )
@@ -981,15 +1132,13 @@ def db_test():
         })
 
     except Exception as e:
+
         return jsonify({
             "ok": False,
             "error": str(e)
         }), 500
 
 
-@app.route("/api/status")
-def status():
-    ...
 # ============================================================
 # STATUS
 # ============================================================
@@ -1014,12 +1163,11 @@ def api_status():
                     last_trade[symbol]["quantity"],
             }
 
-
         return jsonify({
 
             "status": "ok",
 
-            "version": "V2",
+            "version": "V3",
 
             "rolling_hours": 24,
 
@@ -1036,15 +1184,18 @@ def api_status():
             ),
 
             "process": {
+
                 "thread_alive": (
                     collector_thread is not None
                     and collector_thread.is_alive()
                 ),
+
                 "thread_name": (
                     collector_thread.name
                     if collector_thread
                     else None
                 ),
+
             },
 
         })
@@ -1059,26 +1210,34 @@ def api_candles():
 
     symbol = (
         request.args
-        .get("symbol", "BTCUSDT")
+        .get(
+            "symbol",
+            "BTCUSDT"
+        )
         .upper()
     )
 
     timeframe = (
         request.args
-        .get("timeframe", "1m")
+        .get(
+            "timeframe",
+            "1m"
+        )
         .lower()
     )
 
     try:
+
         limit = int(
             request.args.get(
                 "limit",
                 100
             )
         )
-    except ValueError:
-        limit = 100
 
+    except ValueError:
+
+        limit = 100
 
     if symbol not in SYMBOLS:
 
@@ -1087,7 +1246,6 @@ def api_candles():
             "message": "Invalid symbol",
             "allowed": SYMBOLS,
         }), 400
-
 
     if timeframe not in TIMEFRAMES:
 
@@ -1099,29 +1257,31 @@ def api_candles():
             ),
         }), 400
 
-
     limit = max(
         1,
-        min(limit, 500)
+        min(
+            limit,
+            500
+        )
     )
-
 
     with lock:
 
         finished = list(
-            candles[symbol][timeframe]
+            candles[
+                symbol
+            ][timeframe]
         )
 
         current = current_candles[
             symbol
         ][timeframe]
 
-        # ----------------------------------------------------
-        # Current live candle bhi include karenge
-        # ----------------------------------------------------
-
         result = finished[-limit:]
 
+        # ----------------------------------------------------
+        # CURRENT LIVE CANDLE
+        # ----------------------------------------------------
 
         if current is not None:
 
@@ -1134,10 +1294,11 @@ def api_candles():
                 or current_final["start"]
                 != result[-1]["start"]
             ):
-                result = (
-                    result + [current_final]
-                )
 
+                result = (
+                    result
+                    + [current_final]
+                )
 
         return jsonify({
 
@@ -1155,7 +1316,7 @@ def api_candles():
 
 
 # ============================================================
-# FOOTPRINT SINGLE CANDLE
+# SINGLE FOOTPRINT CANDLE
 # ============================================================
 
 @app.route("/api/footprint")
@@ -1163,16 +1324,21 @@ def api_footprint():
 
     symbol = (
         request.args
-        .get("symbol", "BTCUSDT")
+        .get(
+            "symbol",
+            "BTCUSDT"
+        )
         .upper()
     )
 
     timeframe = (
         request.args
-        .get("timeframe", "1m")
+        .get(
+            "timeframe",
+            "1m"
+        )
         .lower()
     )
-
 
     if symbol not in SYMBOLS:
 
@@ -1181,7 +1347,6 @@ def api_footprint():
             "message": "Invalid symbol",
         }), 400
 
-
     if timeframe not in TIMEFRAMES:
 
         return jsonify({
@@ -1189,14 +1354,18 @@ def api_footprint():
             "message": "Invalid timeframe",
         }), 400
 
-
     try:
+
         start = int(
             request.args.get(
                 "start"
             )
         )
-    except (TypeError, ValueError):
+
+    except (
+        TypeError,
+        ValueError
+    ):
 
         return jsonify({
             "status": "error",
@@ -1204,10 +1373,12 @@ def api_footprint():
                 "Provide candle start timestamp",
         }), 400
 
-
     with lock:
 
-        # Finished candles
+        # ----------------------------------------------------
+        # FINISHED CANDLES
+        # ----------------------------------------------------
+
         for candle in candles[
             symbol
         ][timeframe]:
@@ -1215,14 +1386,21 @@ def api_footprint():
             if candle["start"] == start:
 
                 return jsonify({
+
                     "status": "ok",
+
                     "symbol": symbol,
+
                     "timeframe": timeframe,
+
                     "candle": candle,
+
                 })
 
+        # ----------------------------------------------------
+        # CURRENT CANDLE
+        # ----------------------------------------------------
 
-        # Current candle
         current = current_candles[
             symbol
         ][timeframe]
@@ -1233,13 +1411,19 @@ def api_footprint():
         ):
 
             return jsonify({
-                "status": "ok",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "candle":
-                    finalize_candle(current),
-            })
 
+                "status": "ok",
+
+                "symbol": symbol,
+
+                "timeframe": timeframe,
+
+                "candle":
+                    finalize_candle(
+                        current
+                    ),
+
+            })
 
     return jsonify({
         "status": "error",
@@ -1256,30 +1440,35 @@ def api_snapshot():
 
     symbol = (
         request.args
-        .get("symbol", "BTCUSDT")
+        .get(
+            "symbol",
+            "BTCUSDT"
+        )
         .upper()
     )
 
     timeframe = (
         request.args
-        .get("timeframe", "1m")
+        .get(
+            "timeframe",
+            "1m"
+        )
         .lower()
     )
 
-
     if symbol not in SYMBOLS:
+
         return jsonify({
             "status": "error",
             "message": "Invalid symbol",
         }), 400
 
-
     if timeframe not in TIMEFRAMES:
+
         return jsonify({
             "status": "error",
             "message": "Invalid timeframe",
         }), 400
-
 
     with lock:
 
@@ -1290,19 +1479,30 @@ def api_snapshot():
         if current is None:
 
             return jsonify({
+
                 "status": "ok",
+
                 "symbol": symbol,
+
                 "timeframe": timeframe,
+
                 "current_candle": None,
+
             })
 
-
         return jsonify({
+
             "status": "ok",
+
             "symbol": symbol,
+
             "timeframe": timeframe,
+
             "current_candle":
-                finalize_candle(current),
+                finalize_candle(
+                    current
+                ),
+
         })
 
 
