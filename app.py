@@ -1435,6 +1435,66 @@ def api_orderbook():
 
 
 # ============================================================
+# ADVANCED CLUSTER & ABSORPTION SCANNER
+# ============================================================
+
+@app.route("/api/scan")
+def api_scan():
+    symbol = request.args.get("symbol", "BTCUSDT").upper()
+    if symbol not in SYMBOLS:
+        return jsonify({"status": "error", "message": "Invalid symbol"}), 400
+
+    step = PRICE_STEP.get(symbol, 1.0)
+    
+    # Group resting orders into clusters (guchha)
+    bid_clusters = defaultdict(float)
+    ask_clusters = defaultdict(float)
+
+    with lock:
+        for p, q in orderbook[symbol]["bids"].items():
+            bucket = round_price_to_step(float(p), step)
+            bid_clusters[bucket] += q
+            
+        for p, q in orderbook[symbol]["asks"].items():
+            bucket = round_price_to_step(float(p), step)
+            ask_clusters[bucket] += q
+
+        # Fetch current 1m footprint to compare execution vs resting
+        current_candle = current_candles[symbol]["1m"]
+        footprint_data = current_candle["footprint"] if current_candle else {}
+
+    bids_out = []
+    for p, q in sorted(bid_clusters.items(), reverse=True)[:20]:
+        executed = footprint_data.get(str(p), {}).get("volume", 0.0)
+        delta = footprint_data.get(str(p), {}).get("delta", 0.0)
+        bids_out.append({
+            "price_zone": p, 
+            "resting_liquidity": round(q, 3), 
+            "executed_volume": round(executed, 3),
+            "delta": round(delta, 3)
+        })
+
+    asks_out = []
+    for p, q in sorted(ask_clusters.items())[:20]:
+        executed = footprint_data.get(str(p), {}).get("volume", 0.0)
+        delta = footprint_data.get(str(p), {}).get("delta", 0.0)
+        asks_out.append({
+            "price_zone": p, 
+            "resting_liquidity": round(q, 3), 
+            "executed_volume": round(executed, 3),
+            "delta": round(delta, 3)
+        })
+
+    return jsonify({
+        "status": "ok",
+        "symbol": symbol,
+        "cluster_size": step,
+        "bids_zone": bids_out,
+        "asks_zone": asks_out
+    })
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
