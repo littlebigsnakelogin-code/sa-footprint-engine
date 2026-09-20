@@ -1435,8 +1435,12 @@ def api_orderbook():
 
 
 # ============================================================
-# ADVANCED CLUSTER & ABSORPTION SCANNER
+# CLOUD-BASED SPOOF & ABSORPTION DETECTOR
 # ============================================================
+
+previous_cluster_state = {
+    sym: {"bids": {}, "asks": {}} for sym in SYMBOLS
+}
 
 @app.route("/api/scan")
 def api_scan():
@@ -1446,7 +1450,6 @@ def api_scan():
 
     step = PRICE_STEP.get(symbol, 1.0)
     
-    # Group resting orders into clusters (guchha)
     bid_clusters = defaultdict(float)
     ask_clusters = defaultdict(float)
 
@@ -1459,31 +1462,68 @@ def api_scan():
             bucket = round_price_to_step(float(p), step)
             ask_clusters[bucket] += q
 
-        # Fetch current 1m footprint to compare execution vs resting
         current_candle = current_candles[symbol]["1m"]
         footprint_data = current_candle["footprint"] if current_candle else {}
+
+    # Thresholds for detection
+    HEAVY_ORDER = 5.0
+    MIN_EXECUTION = 1.0
 
     bids_out = []
     for p, q in sorted(bid_clusters.items(), reverse=True)[:20]:
         executed = footprint_data.get(str(p), {}).get("volume", 0.0)
         delta = footprint_data.get(str(p), {}).get("delta", 0.0)
+        
+        prev_q = previous_cluster_state[symbol]["bids"].get(p, 0.0)
+        
+        status = "NORMAL"
+        # Spoofing Logic: If previous heavy order vanished without sufficient execution
+        if prev_q >= HEAVY_ORDER and q < (prev_q * 0.2) and executed < MIN_EXECUTION:
+            status = "LIQUIDITY PULLED (TRAP)"
+        # Absorption Logic: Heavy execution but order is still resting
+        elif executed >= HEAVY_ORDER:
+            status = "ABSORPTION"
+
         bids_out.append({
             "price_zone": p, 
             "resting_liquidity": round(q, 3), 
             "executed_volume": round(executed, 3),
-            "delta": round(delta, 3)
+            "delta": round(delta, 3),
+            "status": status
         })
+        previous_cluster_state[symbol]["bids"][p] = q
 
     asks_out = []
     for p, q in sorted(ask_clusters.items())[:20]:
         executed = footprint_data.get(str(p), {}).get("volume", 0.0)
         delta = footprint_data.get(str(p), {}).get("delta", 0.0)
+        
+        prev_q = previous_cluster_state[symbol]["asks"].get(p, 0.0)
+        
+        status = "NORMAL"
+        if prev_q >= HEAVY_ORDER and q < (prev_q * 0.2) and executed < MIN_EXECUTION:
+            status = "LIQUIDITY PULLED (TRAP)"
+        elif executed >= HEAVY_ORDER:
+            status = "ABSORPTION"
+
         asks_out.append({
             "price_zone": p, 
             "resting_liquidity": round(q, 3), 
             "executed_volume": round(executed, 3),
-            "delta": round(delta, 3)
+            "delta": round(delta, 3),
+            "status": status
         })
+        previous_cluster_state[symbol]["asks"][p] = q
+
+    # Clean memory of old levels
+    for p in list(previous_cluster_state[symbol]["bids"].keys()):
+        if p not in bid_clusters:
+            # If a heavy order completely disappears, flag it next time or just clear it
+            del previous_cluster_state[symbol]["bids"][p]
+            
+    for p in list(previous_cluster_state[symbol]["asks"].keys()):
+        if p not in ask_clusters:
+            del previous_cluster_state[symbol]["asks"][p]
 
     return jsonify({
         "status": "ok",
@@ -1492,7 +1532,6 @@ def api_scan():
         "bids_zone": bids_out,
         "asks_zone": asks_out
     })
-
 
 # ============================================================
 # MAIN
