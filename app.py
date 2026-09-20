@@ -18,29 +18,12 @@ from libsql_client import create_client_sync
 TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL")
 TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
-turso_client = None
-
-if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
-    try:
-        turso_client = create_client_sync(
-            TURSO_DATABASE_URL,
-            auth_token=TURSO_AUTH_TOKEN
-        )
-
-        print("[TURSO] Connected")
-
-    except Exception as e:
-        print(f"[TURSO] Connection failed: {e}")
-        turso_client = None
-
-else:
+if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
     print("[TURSO] Environment variables missing")
-
 
 last_turso_cleanup = 0
 
 app = Flask(__name__)
-
 
 # ============================================================
 # CONFIG
@@ -506,120 +489,47 @@ def finalize_candle(candle):
 # ============================================================
 
 def save_candle_to_turso(candle):
-    """
-    Finalized candle ko Turso candles table mein save karta hai.
-
-    Raw trades save nahi hote.
-    Sirf processed candle + footprint save hota hai.
-    """
-
-    if turso_client is None:
+    if not TURSO_DATABASE_URL:
         return
 
     try:
-
-        footprint_json = json.dumps(
-            candle.get("footprint", []),
-            separators=(",", ":")
-        )
-
+        footprint_json = json.dumps(candle.get("footprint", []), separators=(",", ":"))
         sql = """
         INSERT OR REPLACE INTO candles (
-            symbol,
-            tf,
-            time,
-            open,
-            high,
-            low,
-            close,
-            delta,
-            totalVol,
-            buyVol,
-            sellVol,
-            trades,
-            poc,
-            pocVol,
-            vah,
-            val,
-            valueAreaVol,
-            footprint
-        )
-        VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?
-        )
+            symbol, tf, time, open, high, low, close, delta, totalVol,
+            buyVol, sellVol, trades, poc, pocVol, vah, val, valueAreaVol, footprint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-
         args = (
-            candle["symbol"],
-            candle["timeframe"],
-            candle["start"],
-            candle["open"],
-            candle["high"],
-            candle["low"],
-            candle["close"],
-            candle["delta"],
-            candle["volume"],
-            candle["buy_volume"],
-            candle["sell_volume"],
-            candle["trades"],
-            candle.get("poc"),
-            candle.get("poc_volume"),
-            candle.get("vah"),
-            candle.get("val"),
-            candle.get("value_area_volume"),
+            candle["symbol"], candle["timeframe"], candle["start"], candle["open"],
+            candle["high"], candle["low"], candle["close"], candle["delta"],
+            candle["volume"], candle["buy_volume"], candle["sell_volume"],
+            candle["trades"], candle.get("poc"), candle.get("poc_volume"),
+            candle.get("vah"), candle.get("val"), candle.get("value_area_volume"),
             footprint_json
         )
 
-        turso_client.execute(
-            sql,
-            args
-        )
+        with create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+            client.execute(sql, args)
 
     except Exception as e:
-
-        print(
-            f"[TURSO] Candle save failed: {e}"
-        )
-
+        print(f"[TURSO] Candle save failed: {e}")
 
 # ============================================================
 # TURSO CLEANUP
 # ============================================================
 
 def cleanup_old_turso_candles():
-    """
-    Turso se 24 ghante se purane candles delete karta hai.
-    """
-
-    if turso_client is None:
+    if not TURSO_DATABASE_URL:
         return
 
     try:
-
-        cutoff = int(
-            (time.time() - ROLLING_SECONDS)
-            * 1000
-        )
-
-        turso_client.execute(
-            """
-            DELETE FROM candles
-            WHERE time < ?
-            """,
-            (cutoff,)
-        )
-
-        print(
-            "[TURSO] Old candles cleaned"
-        )
-
+        cutoff = int((time.time() - ROLLING_SECONDS) * 1000)
+        with create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+            client.execute("DELETE FROM candles WHERE time < ?", (cutoff,))
+        print("[TURSO] Old candles cleaned")
     except Exception as e:
-
-        print(
-            f"[TURSO] Cleanup failed: {e}"
-        )
-
+        print(f"[TURSO] Cleanup failed: {e}")
 
 # ============================================================
 # STORE FINISHED CANDLE
@@ -1109,35 +1019,16 @@ def api_test():
 
 @app.route("/api/db-test")
 def db_test():
-
-    if turso_client is None:
-
-        return jsonify({
-            "ok": False,
-            "error": "Turso client is not connected"
-        }), 500
+    if not TURSO_DATABASE_URL:
+        return jsonify({"ok": False, "error": "Turso env variables missing"}), 500
 
     try:
-
-        result = turso_client.execute(
-            "SELECT COUNT(*) AS count FROM candles"
-        )
-
-        count = result.rows[0][0]
-
-        return jsonify({
-            "ok": True,
-            "turso": "connected",
-            "candles": count
-        })
-
+        with create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+            result = client.execute("SELECT COUNT(*) AS count FROM candles")
+            count = result.rows[0][0]
+            return jsonify({"ok": True, "turso": "connected", "candles": count})
     except Exception as e:
-
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
-
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # ============================================================
 # STATUS
