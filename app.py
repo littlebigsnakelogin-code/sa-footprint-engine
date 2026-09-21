@@ -469,23 +469,27 @@ if snapshot is None:
                 bridge_index = index
                 break
 
-        # ----------------------------------------------------
+                # ----------------------------------------------------
         # No valid bridge yet
         # ----------------------------------------------------
 
         if bridge_index is None:
 
-            # Keep only reasonably recent events.
-            # Another snapshot attempt will be made.
+            # Snapshot and buffered events did not overlap.
+            # Keep only recent events so the buffer cannot grow
+            # indefinitely while waiting for a valid bridge.
+            while len(state["buffer"]) > 2000:
+                state["buffer"].popleft()
+
             state["resyncing"] = False
 
             print(
                 f"[ORDERBOOK] No bridge event for "
-                f"{symbol}. Retrying sync."
+                f"{symbol}. Retrying sync. "
+                f"buffer={len(state['buffer'])}"
             )
 
             return False
-
         # ----------------------------------------------------
         # Load REST snapshot
         # ----------------------------------------------------
