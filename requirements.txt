@@ -3,3 +3,4 @@ gunicorn==23.0.0
 websocket-client==1.8.0
 idna==3.10
 libsql-client
+requests==2.32.5
