@@ -1122,15 +1122,16 @@ def handle_message(
         if symbol not in SYMBOLS:
             return
 
-        # --- ORDERBOOK (DEPTH) UPDATE ---
-if event_type == "depthUpdate":
+                # --- ORDERBOOK (DEPTH) UPDATE ---
+        if event_type == "depthUpdate":
 
-    handle_depth_update(
-        symbol,
-        data
-    )
+            handle_depth_update(
+                symbol,
+                data
+            )
 
-    return
+            return
+
         # --- TRADE UPDATE ---
         if event_type != "trade":
             return
