@@ -6,6 +6,7 @@ import threading
 import time
 from collections import defaultdict, deque
 
+import requests
 import websocket
 from flask import Flask, jsonify, request
 from libsql_client import create_client_sync
@@ -131,11 +132,22 @@ last_trade = {
 orderbook = {
     symbol: {
         "bids": {},
-        "asks": {}
+        "asks": {},
+
+        # Binance Futures depth synchronization state
+        "last_update_id": None,
+        "initialized": False,
+        "resyncing": False,
+        "buffer": deque(),
+
+        # Diagnostics
+        "last_depth_event_time": None,
+        "last_depth_update_id": None,
+        "sequence_errors": 0,
+        "resync_count": 0,
     }
     for symbol in SYMBOLS
 }
-
 collector_thread = None
 
 # ============================================================
@@ -312,7 +324,388 @@ def add_trade_to_candle(
         - level["sell"]
     )
 
+# ============================================================
+# BINANCE FUTURES ORDERBOOK SYNCHRONIZATION
+# ============================================================
 
+BINANCE_FUTURES_DEPTH_URL = (
+    "https://fapi.binance.com/fapi/v1/depth"
+)
+
+ORDERBOOK_SNAPSHOT_LIMIT = 1000
+
+
+def fetch_orderbook_snapshot(symbol):
+    """
+    Binance Futures REST snapshot fetch karta hai.
+
+    Snapshot ke saath bids, asks aur lastUpdateId milta hai.
+    """
+    try:
+        response = requests.get(
+            BINANCE_FUTURES_DEPTH_URL,
+            params={
+                "symbol": symbol,
+                "limit": ORDERBOOK_SNAPSHOT_LIMIT,
+            },
+            timeout=10,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if "lastUpdateId" not in data:
+            raise RuntimeError(
+                f"Invalid Binance snapshot for {symbol}: "
+                f"missing lastUpdateId"
+            )
+
+        return data
+
+    except Exception as exc:
+        print(
+            f"[ORDERBOOK] Snapshot failed "
+            f"{symbol}: {exc}"
+        )
+        return None
+
+
+def apply_orderbook_event(symbol, event):
+    """
+    Ek validated Binance depth event ko local orderbook
+    par apply karta hai.
+    """
+
+    state = orderbook[symbol]
+
+    for price, quantity in event.get("b", []):
+
+        quantity = float(quantity)
+
+        if quantity == 0:
+            state["bids"].pop(price, None)
+        else:
+            state["bids"][price] = quantity
+
+    for price, quantity in event.get("a", []):
+
+        quantity = float(quantity)
+
+        if quantity == 0:
+            state["asks"].pop(price, None)
+        else:
+            state["asks"][price] = quantity
+
+    state["last_update_id"] = int(event["u"])
+    state["last_depth_update_id"] = int(event["u"])
+    state["last_depth_event_time"] = now_ms()
+
+
+def initialize_orderbook(symbol):
+    """
+    Binance Futures local orderbook synchronization.
+
+    WebSocket events pehle buffer hote hain.
+    REST snapshot liya jata hai.
+    Snapshot ke baad correct bridging event se
+    buffered updates apply kiye jate hain.
+    """
+
+    snapshot = fetch_orderbook_snapshot(symbol)
+
+    if snapshot is None:
+
+        with lock:
+            orderbook[symbol]["resyncing"] = False
+
+        return False
+
+    snapshot_last_update_id = int(
+        snapshot["lastUpdateId"]
+    )
+
+    snapshot_bids = {
+        str(price): float(quantity)
+        for price, quantity in snapshot.get("bids", [])
+        if float(quantity) > 0
+    }
+
+    snapshot_asks = {
+        str(price): float(quantity)
+        for price, quantity in snapshot.get("asks", [])
+        if float(quantity) > 0
+    }
+
+    with lock:
+
+        state = orderbook[symbol]
+
+        # ----------------------------------------------------
+        # Find first buffered event that bridges the snapshot
+        # ----------------------------------------------------
+
+        bridge_index = None
+
+        for index, event in enumerate(state["buffer"]):
+
+            event_first_id = int(event["U"])
+            event_final_id = int(event["u"])
+
+            if (
+                event_first_id
+                <= snapshot_last_update_id + 1
+                <= event_final_id
+            ):
+                bridge_index = index
+                break
+
+        # ----------------------------------------------------
+        # No valid bridge yet
+        # ----------------------------------------------------
+
+        if bridge_index is None:
+
+            # Keep only reasonably recent events.
+            # Another snapshot attempt will be made.
+            state["resyncing"] = False
+
+            print(
+                f"[ORDERBOOK] No bridge event for "
+                f"{symbol}. Retrying sync."
+            )
+
+            return False
+
+        # ----------------------------------------------------
+        # Load REST snapshot
+        # ----------------------------------------------------
+
+        state["bids"] = snapshot_bids
+        state["asks"] = snapshot_asks
+        state["last_update_id"] = (
+            snapshot_last_update_id
+        )
+
+        # ----------------------------------------------------
+        # Apply buffered events from bridge onward
+        # ----------------------------------------------------
+
+        buffered_events = list(
+            state["buffer"]
+        )[bridge_index:]
+
+        previous_u = snapshot_last_update_id
+
+        for event in buffered_events:
+
+            event_first_id = int(event["U"])
+            event_final_id = int(event["u"])
+
+            # Old event
+            if event_final_id <= snapshot_last_update_id:
+                continue
+
+            # First bridging event
+            if previous_u == snapshot_last_update_id:
+
+                if not (
+                    event_first_id
+                    <= snapshot_last_update_id + 1
+                    <= event_final_id
+                ):
+                    state["sequence_errors"] += 1
+                    state["resyncing"] = False
+
+                    print(
+                        f"[ORDERBOOK] Initial sequence "
+                        f"validation failed: {symbol}"
+                    )
+
+                    return False
+
+            # Every subsequent event must connect
+            else:
+
+                event_previous_id = event.get("pu")
+
+                if (
+                    event_previous_id is not None
+                    and int(event_previous_id)
+                    != previous_u
+                ):
+                    state["sequence_errors"] += 1
+                    state["resyncing"] = False
+
+                    print(
+                        f"[ORDERBOOK] Sequence gap detected "
+                        f"during initialization: {symbol}"
+                    )
+
+                    return False
+
+            apply_orderbook_event(
+                symbol,
+                event
+            )
+
+            previous_u = event_final_id
+
+        # ----------------------------------------------------
+        # Clear consumed buffer
+        # ----------------------------------------------------
+
+        state["buffer"].clear()
+
+        state["initialized"] = True
+        state["resyncing"] = False
+
+        state["last_update_id"] = previous_u
+        state["last_depth_update_id"] = previous_u
+        state["last_depth_event_time"] = now_ms()
+
+        print(
+            f"[ORDERBOOK] SYNCED {symbol} "
+            f"updateId={previous_u} "
+            f"bids={len(state['bids'])} "
+            f"asks={len(state['asks'])}"
+        )
+
+        return True
+
+
+def request_orderbook_resync(symbol):
+    """
+    Background resync request.
+
+    WebSocket callback ko REST request ke liye block nahi karta.
+    """
+
+    with lock:
+
+        state = orderbook[symbol]
+
+        if state["resyncing"]:
+            return
+
+        state["resyncing"] = True
+        state["initialized"] = False
+        state["resync_count"] += 1
+
+        state["bids"].clear()
+        state["asks"].clear()
+        state["last_update_id"] = None
+
+    thread = threading.Thread(
+        target=initialize_orderbook,
+        args=(symbol,),
+        name=f"orderbook-resync-{symbol}",
+        daemon=True,
+    )
+
+    thread.start()
+
+
+def handle_depth_update(symbol, event):
+    """
+    Binance Futures depth event ko safely process karta hai.
+    """
+
+    event_first_id = int(event["U"])
+    event_final_id = int(event["u"])
+
+    with lock:
+
+        state = orderbook[symbol]
+
+        state["last_depth_event_time"] = now_ms()
+
+        # ----------------------------------------------------
+        # Not initialized yet
+        # ----------------------------------------------------
+
+        if not state["initialized"]:
+
+            state["buffer"].append(event)
+
+            # Snapshot synchronization start karo
+            if not state["resyncing"]:
+
+                state["resyncing"] = True
+
+                thread = threading.Thread(
+                    target=initialize_orderbook,
+                    args=(symbol,),
+                    name=f"orderbook-init-{symbol}",
+                    daemon=True,
+                )
+
+                thread.start()
+
+            return
+
+        # ----------------------------------------------------
+        # Already initialized
+        # ----------------------------------------------------
+
+        previous_u = state["last_update_id"]
+
+        if previous_u is None:
+
+            state["buffer"].append(event)
+            state["initialized"] = False
+
+            state["sequence_errors"] += 1
+
+            request_orderbook_resync(symbol)
+
+            return
+
+        # ----------------------------------------------------
+        # Ignore old event
+        # ----------------------------------------------------
+
+        if event_final_id <= previous_u:
+            return
+
+        # ----------------------------------------------------
+        # Futures sequence continuity
+        # ----------------------------------------------------
+
+        event_previous_id = event.get("pu")
+
+        if (
+            event_previous_id is not None
+            and int(event_previous_id) != previous_u
+        ):
+
+            state["sequence_errors"] += 1
+
+            print(
+                f"[ORDERBOOK] SEQUENCE GAP "
+                f"{symbol}: "
+                f"expected pu={previous_u}, "
+                f"received pu={event_previous_id}"
+            )
+
+            # Keep this event so resync can potentially use it
+            state["buffer"].clear()
+            state["buffer"].append(event)
+
+            state["initialized"] = False
+
+            request_orderbook_resync(symbol)
+
+            return
+
+        # ----------------------------------------------------
+        # Apply valid event
+        # ----------------------------------------------------
+
+        apply_orderbook_event(
+            symbol,
+            event
+        )
 # ============================================================
 # VALUE AREA
 # ============================================================
@@ -730,20 +1123,14 @@ def handle_message(
             return
 
         # --- ORDERBOOK (DEPTH) UPDATE ---
-        if event_type == "depthUpdate":
-            with lock:
-                for b in data.get("b", []):
-                    if float(b[1]) == 0:
-                        orderbook[symbol]["bids"].pop(b[0], None)
-                    else:
-                        orderbook[symbol]["bids"][b[0]] = float(b[1])
-                for a in data.get("a", []):
-                    if float(a[1]) == 0:
-                        orderbook[symbol]["asks"].pop(a[0], None)
-                    else:
-                        orderbook[symbol]["asks"][a[0]] = float(a[1])
-            return
+if event_type == "depthUpdate":
 
+    handle_depth_update(
+        symbol,
+        data
+    )
+
+    return
         # --- TRADE UPDATE ---
         if event_type != "trade":
             return
@@ -1087,8 +1474,7 @@ def api_status():
                 collector_state
             ),
 
-            "process": {
-
+                        "process": {
                 "thread_alive": (
                     collector_thread is not None
                     and collector_thread.is_alive()
@@ -1099,7 +1485,32 @@ def api_status():
                     if collector_thread
                     else None
                 ),
+            },
 
+            "orderbook": {
+                symbol: {
+                    "synchronized":
+                        orderbook[symbol]["initialized"],
+
+                    "resyncing":
+                        orderbook[symbol]["resyncing"],
+
+                    "last_update_id":
+                        orderbook[symbol]["last_update_id"],
+
+                    "sequence_errors":
+                        orderbook[symbol]["sequence_errors"],
+
+                    "resync_count":
+                        orderbook[symbol]["resync_count"],
+
+                    "bid_count":
+                        len(orderbook[symbol]["bids"]),
+
+                    "ask_count":
+                        len(orderbook[symbol]["asks"]),
+                }
+                for symbol in SYMBOLS
             },
 
         })
@@ -1416,23 +1827,108 @@ def api_snapshot():
 
 @app.route("/api/orderbook")
 def api_orderbook():
-    symbol = request.args.get("symbol", "BTCUSDT").upper()
-    if symbol not in SYMBOLS:
-        return jsonify({"status": "error", "message": "Invalid symbol"}), 400
 
-    limit = int(request.args.get("limit", 20))
+    symbol = (
+        request.args
+        .get(
+            "symbol",
+            "BTCUSDT"
+        )
+        .upper()
+    )
+
+    if symbol not in SYMBOLS:
+
+        return jsonify({
+            "status": "error",
+            "message": "Invalid symbol",
+        }), 400
+
+    try:
+
+        limit = int(
+            request.args.get(
+                "limit",
+                20
+            )
+        )
+
+    except ValueError:
+
+        limit = 20
+
+    limit = max(
+        1,
+        min(
+            limit,
+            100
+        )
+    )
 
     with lock:
-        bids = sorted(orderbook[symbol]["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:limit]
-        asks = sorted(orderbook[symbol]["asks"].items(), key=lambda x: float(x[0]))[:limit]
 
-    return jsonify({
-        "status": "ok",
-        "symbol": symbol,
-        "bids": [{"price": float(p), "quantity": q} for p, q in bids],
-        "asks": [{"price": float(p), "quantity": q} for p, q in asks]
-    })
+        state = orderbook[symbol]
 
+        bids = sorted(
+            state["bids"].items(),
+            key=lambda x: float(x[0]),
+            reverse=True
+        )[:limit]
+
+        asks = sorted(
+            state["asks"].items(),
+            key=lambda x: float(x[0])
+        )[:limit]
+
+        return jsonify({
+
+            "status": "ok",
+
+            "symbol": symbol,
+
+            "synchronized":
+                state["initialized"],
+
+            "resyncing":
+                state["resyncing"],
+
+            "last_update_id":
+                state["last_update_id"],
+
+            "last_depth_update_id":
+                state["last_depth_update_id"],
+
+            "last_depth_event_time":
+                state["last_depth_event_time"],
+
+            "sequence_errors":
+                state["sequence_errors"],
+
+            "resync_count":
+                state["resync_count"],
+
+            "bid_count":
+                len(state["bids"]),
+
+            "ask_count":
+                len(state["asks"]),
+
+            "bids": [
+                {
+                    "price": float(price),
+                    "quantity": quantity,
+                }
+                for price, quantity in bids
+            ],
+
+            "asks": [
+                {
+                    "price": float(price),
+                    "quantity": quantity,
+                }
+                for price, quantity in asks
+            ],
+        })
 
 # ============================================================
 # CLOUD-BASED SPOOF & ABSORPTION DETECTOR
