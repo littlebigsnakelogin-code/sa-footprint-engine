@@ -414,13 +414,22 @@ def initialize_orderbook(symbol):
 
     snapshot = fetch_orderbook_snapshot(symbol)
 
-    if snapshot is None:
+if snapshot is None:
+    with lock:
+        state = orderbook[symbol]
+        state["resyncing"] = False
 
-        with lock:
-            orderbook[symbol]["resyncing"] = False
+        # Keep only the most recent buffered events.
+        # This prevents unlimited buffer growth while snapshot access
+        # is temporarily unavailable.
+        while len(state["buffer"]) > 2000:
+            state["buffer"].popleft()
 
-        return False
-
+    print(
+        f"[ORDERBOOK] Snapshot fetch failed for {symbol}; "
+        f"will retry on next depth event."
+    )
+    return False
     snapshot_last_update_id = int(
         snapshot["lastUpdateId"]
     )
