@@ -588,36 +588,43 @@ if snapshot is None:
 
 
 def request_orderbook_resync(symbol):
-    """
-    Background resync request.
-
-    WebSocket callback ko REST request ke liye block nahi karta.
-    """
 
     with lock:
 
         state = orderbook[symbol]
 
+        # Do not start multiple resync threads for the same symbol.
         if state["resyncing"]:
             return
 
         state["resyncing"] = True
         state["initialized"] = False
+
         state["resync_count"] += 1
 
+        # Clear the current local book.
         state["bids"].clear()
         state["asks"].clear()
+
         state["last_update_id"] = None
+        state["last_depth_update_id"] = None
+
+        # Keep only a bounded amount of recent events.
+        while len(state["buffer"]) > 2000:
+            state["buffer"].popleft()
+
+    print(
+        f"[ORDERBOOK] Starting resync for {symbol} "
+        f"(attempt #{orderbook[symbol]['resync_count']})"
+    )
 
     thread = threading.Thread(
         target=initialize_orderbook,
         args=(symbol,),
-        name=f"orderbook-resync-{symbol}",
-        daemon=True,
+        daemon=True
     )
 
     thread.start()
-
 
 def handle_depth_update(symbol, event):
     """
