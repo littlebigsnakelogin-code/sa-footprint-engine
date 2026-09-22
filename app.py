@@ -566,28 +566,55 @@ def initialize_orderbook(symbol):
                 bridge_index = index
                 break
 
-        # ----------------------------------------------------
-        # No valid bridge yet
-        # ----------------------------------------------------
+# ----------------------------------------------------
+# No valid bridge yet
+# ----------------------------------------------------
 
-        if bridge_index is None:
+if bridge_index is None:
 
-            # Snapshot and buffered events did not overlap.
-            # Keep only recent events so the buffer cannot grow
-            # indefinitely while waiting for a valid bridge.
-            while len(state["buffer"]) > 2000:
-                state["buffer"].popleft()
+    # Snapshot may already be ahead of the buffered
+    # events. Discard events that are completely older
+    # than the snapshot and wait for fresh events.
+    while state["buffer"]:
 
-            state["resyncing"] = False
+        oldest_event = state["buffer"][0]
 
-            print(
-                f"[ORDERBOOK] No bridge event for "
-                f"{symbol}. Retrying sync. "
-                f"buffer={len(state['buffer'])}"
-            )
+        if int(oldest_event["u"]) <= snapshot_last_update_id:
+            state["buffer"].popleft()
+        else:
+            break
 
-            return False
+    # Re-check after removing stale events.
+    bridge_index = None
 
+    for index, event in enumerate(state["buffer"]):
+
+        event_first_id = int(event["U"])
+        event_final_id = int(event["u"])
+
+        if (
+            event_first_id
+            <= snapshot_last_update_id + 1
+            <= event_final_id
+        ):
+            bridge_index = index
+            break
+
+    if bridge_index is None:
+
+        while len(state["buffer"]) > 2000:
+            state["buffer"].popleft()
+
+        state["resyncing"] = False
+
+        print(
+            f"[ORDERBOOK] No bridge event for "
+            f"{symbol}. Retrying sync. "
+            f"snapshot={snapshot_last_update_id} "
+            f"buffer={len(state['buffer'])}"
+        )
+
+        return False
         # ----------------------------------------------------
         # Load REST snapshot
         # ----------------------------------------------------
