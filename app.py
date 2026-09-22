@@ -658,30 +658,30 @@ def handle_depth_update(symbol, event):
         # Not initialized yet
         # ----------------------------------------------------
 
-        if not state["initialized"]:
+              if not state["initialized"]:
 
-    state["buffer"].append(event)
+            state["buffer"].append(event)
 
-    # Prevent unlimited buffer growth while waiting
-    # for REST snapshot synchronization.
-    while len(state["buffer"]) > 2000:
-        state["buffer"].popleft()
+            # Prevent unlimited buffer growth while waiting
+            # for REST snapshot synchronization.
+            while len(state["buffer"]) > 2000:
+                state["buffer"].popleft()
 
-    # Snapshot synchronization start karo
-    if not state["resyncing"]:
+            # Snapshot synchronization start karo
+            if not state["resyncing"]:
 
-        state["resyncing"] = True
+                state["resyncing"] = True
 
-        thread = threading.Thread(
-            target=initialize_orderbook,
-            args=(symbol,),
-            name=f"orderbook-init-{symbol}",
-            daemon=True,
-        )
+                thread = threading.Thread(
+                    target=initialize_orderbook,
+                    args=(symbol,),
+                    name=f"orderbook-init-{symbol}",
+                    daemon=True,
+                )
 
-        thread.start()
+                thread.start()
 
-    return
+            return
         # ----------------------------------------------------
         # Already initialized
         # ----------------------------------------------------
