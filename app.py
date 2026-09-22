@@ -4,8 +4,8 @@ import json
 import os
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
-
 import requests
 import websocket
 from flask import Flask, jsonify, request
@@ -334,7 +334,105 @@ BINANCE_FUTURES_DEPTH_URL = (
 
 ORDERBOOK_SNAPSHOT_LIMIT = 1000
 
+def fetch_orderbook_snapshot_ws(symbol):
+    """
+    Binance Futures WebSocket API se orderbook snapshot
+    request karne ki koshish karta hai.
 
+    Ye REST /fapi/v1/depth ko bypass karne ke liye hai.
+    """
+
+    ws_url = "wss://ws-fapi.binance.com/ws-fapi/v1"
+
+    ws = None
+
+    try:
+
+        ws = websocket.create_connection(
+            ws_url,
+            timeout=10,
+        )
+
+        request_id = str(uuid.uuid4())
+
+        request = {
+            "id": request_id,
+            "method": "depth",
+            "params": {
+                "symbol": symbol,
+                "limit": ORDERBOOK_SNAPSHOT_LIMIT,
+            },
+        }
+
+        ws.send(
+            json.dumps(request)
+        )
+
+        while True:
+
+            raw_message = ws.recv()
+
+            if not raw_message:
+                continue
+
+            response = json.loads(
+                raw_message
+            )
+
+            if response.get("id") != request_id:
+                continue
+
+            print(
+                f"[ORDERBOOK WS API] "
+                f"{symbol} response: "
+                f"{response}"
+            )
+
+            if response.get("status") != 200:
+                raise RuntimeError(
+                    f"WS API error: {response}"
+                )
+
+            result = response.get(
+                "result"
+            )
+
+            if not result:
+                raise RuntimeError(
+                    f"WS API missing result: "
+                    f"{response}"
+                )
+
+            if (
+                "lastUpdateId" not in result
+                or "bids" not in result
+                or "asks" not in result
+            ):
+                raise RuntimeError(
+                    f"Invalid WS orderbook "
+                    f"snapshot: {response}"
+                )
+
+            return result
+
+    except Exception as exc:
+
+        print(
+            f"[ORDERBOOK WS API] "
+            f"Snapshot failed {symbol}: "
+            f"{exc}"
+        )
+
+        return None
+
+    finally:
+
+        if ws is not None:
+
+            try:
+                ws.close()
+            except Exception:
+                pass
 def fetch_orderbook_snapshot(symbol):
     """
     Binance Futures REST snapshot fetch karta hai.
