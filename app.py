@@ -494,15 +494,14 @@ def apply_orderbook_event(symbol, event):
     state["last_depth_update_id"] = int(event["u"])
     state["last_depth_event_time"] = now_ms()
 
-
 def initialize_orderbook(symbol):
     """
     Binance Futures local orderbook synchronization.
 
     WebSocket events pehle buffer hote hain.
     WebSocket API snapshot liya jata hai.
-    Snapshot ke baad correct bridging event se
-    buffered updates apply kiye jate hain.
+    Snapshot ke baad correct bridging event ka wait
+    kiya jata hai aur buffered updates apply hote hain.
     """
 
     snapshot = fetch_orderbook_snapshot_ws(symbol)
@@ -511,11 +510,7 @@ def initialize_orderbook(symbol):
 
         with lock:
             state = orderbook[symbol]
-
             state["resyncing"] = False
-
-            while len(state["buffer"]) > 2000:
-                state["buffer"].popleft()
 
         print(
             f"[ORDERBOOK] Snapshot fetch failed for {symbol}; "
@@ -540,164 +535,161 @@ def initialize_orderbook(symbol):
         if float(quantity) > 0
     }
 
-    with lock:
+    # ----------------------------------------------------
+    # Wait for the buffered depth stream to reach the
+    # snapshot update ID.
+    # ----------------------------------------------------
 
-        state = orderbook[symbol]
+    while True:
 
-        # ----------------------------------------------------
-        # Remove events that are completely older than snapshot
-        # ----------------------------------------------------
+        with lock:
 
-        while state["buffer"]:
+            state = orderbook[symbol]
 
-            oldest_event = state["buffer"][0]
+            # Remove events completely older than snapshot.
+            while state["buffer"]:
 
-            if int(oldest_event["u"]) <= snapshot_last_update_id:
-                state["buffer"].popleft()
-            else:
-                break
+                oldest_event = state["buffer"][0]
 
-        # ----------------------------------------------------
-        # Find bridge event
-        # ----------------------------------------------------
+                if int(oldest_event["u"]) <= snapshot_last_update_id:
+                    state["buffer"].popleft()
+                else:
+                    break
 
-        bridge_index = None
+            # ------------------------------------------------
+            # Find bridge event
+            # ------------------------------------------------
 
-        for index, event in enumerate(state["buffer"]):
+            bridge_index = None
 
-            event_first_id = int(event["U"])
-            event_final_id = int(event["u"])
+            for index, event in enumerate(state["buffer"]):
 
-            if (
-                event_first_id
-                <= snapshot_last_update_id + 1
-                <= event_final_id
-            ):
-                bridge_index = index
-                break
+                event_first_id = int(event["U"])
+                event_final_id = int(event["u"])
 
-        # ----------------------------------------------------
-        # No valid bridge yet
-        # ----------------------------------------------------
-
-        if bridge_index is None:
-
-            while len(state["buffer"]) > 2000:
-                state["buffer"].popleft()
-
-            state["resyncing"] = False
-
-            print(
-                f"[ORDERBOOK] No bridge event for "
-                f"{symbol}. Retrying sync. "
-                f"snapshot={snapshot_last_update_id} "
-                f"buffer={len(state['buffer'])}"
-            )
-
-            return False
-
-        # ----------------------------------------------------
-        # Load snapshot
-        # ----------------------------------------------------
-
-        state["bids"] = snapshot_bids
-        state["asks"] = snapshot_asks
-
-        state["last_update_id"] = (
-            snapshot_last_update_id
-        )
-
-        # ----------------------------------------------------
-        # Apply buffered events from bridge onward
-        # ----------------------------------------------------
-
-        buffered_events = list(
-            state["buffer"]
-        )[bridge_index:]
-
-        previous_u = snapshot_last_update_id
-
-        for event in buffered_events:
-
-            event_first_id = int(event["U"])
-            event_final_id = int(event["u"])
-
-            if event_final_id <= snapshot_last_update_id:
-                continue
-
-            if previous_u == snapshot_last_update_id:
-
-                if not (
+                if (
                     event_first_id
                     <= snapshot_last_update_id + 1
                     <= event_final_id
                 ):
-                    state["sequence_errors"] += 1
-                    state["resyncing"] = False
+                    bridge_index = index
+                    break
 
-                    print(
-                        f"[ORDERBOOK] Initial sequence "
-                        f"validation failed: {symbol}"
-                    )
+            # ------------------------------------------------
+            # Bridge not available yet.
+            #
+            # IMPORTANT:
+            # Do NOT set resyncing=False.
+            # Keep buffering incoming events and wait.
+            # ------------------------------------------------
 
-                    return False
+            if bridge_index is None:
+
+                while len(state["buffer"]) > 2000:
+                    state["buffer"].popleft()
 
             else:
 
-                event_previous_id = event.get("pu")
+                # ------------------------------------------------
+                # Load snapshot
+                # ------------------------------------------------
 
-                if event_previous_id is None:
+                state["bids"] = snapshot_bids
+                state["asks"] = snapshot_asks
+
+                state["last_update_id"] = (
+                    snapshot_last_update_id
+                )
+
+                # ------------------------------------------------
+                # Apply buffered events from bridge onward
+                # ------------------------------------------------
+
+                buffered_events = list(
+                    state["buffer"]
+                )[bridge_index:]
+
+                previous_u = snapshot_last_update_id
+
+                valid = True
+
+                for event in buffered_events:
+
+                    event_first_id = int(event["U"])
+                    event_final_id = int(event["u"])
+
+                    if event_final_id <= snapshot_last_update_id:
+                        continue
+
+                    if previous_u == snapshot_last_update_id:
+
+                        if not (
+                            event_first_id
+                            <= snapshot_last_update_id + 1
+                            <= event_final_id
+                        ):
+                            valid = False
+                            break
+
+                    else:
+
+                        event_previous_id = event.get("pu")
+
+                        if event_previous_id is None:
+                            valid = False
+                            break
+
+                        if int(event_previous_id) != previous_u:
+                            valid = False
+                            break
+
+                    apply_orderbook_event(
+                        symbol,
+                        event
+                    )
+
+                    previous_u = event_final_id
+
+                if not valid:
 
                     state["sequence_errors"] += 1
                     state["resyncing"] = False
 
                     print(
-                        f"[ORDERBOOK] Missing pu during "
-                        f"initialization: {symbol}"
+                        f"[ORDERBOOK] Sequence validation "
+                        f"failed during initialization: {symbol}"
                     )
 
                     return False
 
-                if int(event_previous_id) != previous_u:
+                # ------------------------------------------------
+                # Synchronization complete
+                # ------------------------------------------------
 
-                    state["sequence_errors"] += 1
-                    state["resyncing"] = False
+                state["buffer"].clear()
 
-                    print(
-                        f"[ORDERBOOK] Sequence gap detected "
-                        f"during initialization: {symbol}"
-                    )
+                state["initialized"] = True
+                state["resyncing"] = False
 
-                    return False
+                state["last_update_id"] = previous_u
+                state["last_depth_update_id"] = previous_u
+                state["last_depth_event_time"] = now_ms()
 
-            apply_orderbook_event(
-                symbol,
-                event
-            )
+                print(
+                    f"[ORDERBOOK] SYNCED {symbol} "
+                    f"updateId={previous_u} "
+                    f"bids={len(state['bids'])} "
+                    f"asks={len(state['asks'])}"
+                )
 
-            previous_u = event_final_id
+                return True
 
         # ----------------------------------------------------
-        # Clear consumed buffer
+        # No bridge yet.
+        # Let new depth events arrive into the buffer.
         # ----------------------------------------------------
 
-        state["buffer"].clear()
-
-        state["initialized"] = True
-        state["resyncing"] = False
-
-        state["last_update_id"] = previous_u
-        state["last_depth_update_id"] = previous_u
-        state["last_depth_event_time"] = now_ms()
-
-        print(
-            f"[ORDERBOOK] SYNCED {symbol} "
-            f"updateId={previous_u} "
-            f"bids={len(state['bids'])} "
-            f"asks={len(state['asks'])}"
-        )
-
-        return True
+        time.sleep(0.05)
 def request_orderbook_resync(symbol):
 
     with lock:
