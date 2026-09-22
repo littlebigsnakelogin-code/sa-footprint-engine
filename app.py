@@ -414,22 +414,26 @@ def initialize_orderbook(symbol):
 
     snapshot = fetch_orderbook_snapshot(symbol)
 
-if snapshot is None:
-    with lock:
-        state = orderbook[symbol]
-        state["resyncing"] = False
+    if snapshot is None:
 
-        # Keep only the most recent buffered events.
-        # This prevents unlimited buffer growth while snapshot access
-        # is temporarily unavailable.
-        while len(state["buffer"]) > 2000:
-            state["buffer"].popleft()
+        with lock:
+            state = orderbook[symbol]
 
-    print(
-        f"[ORDERBOOK] Snapshot fetch failed for {symbol}; "
-        f"will retry on next depth event."
-    )
-    return False
+            state["resyncing"] = False
+
+            # Keep only the most recent buffered events.
+            # This prevents unlimited buffer growth while snapshot access
+            # is temporarily unavailable.
+            while len(state["buffer"]) > 2000:
+                state["buffer"].popleft()
+
+        print(
+            f"[ORDERBOOK] Snapshot fetch failed for {symbol}; "
+            f"will retry on next depth event."
+        )
+
+        return False
+
     snapshot_last_update_id = int(
         snapshot["lastUpdateId"]
     )
@@ -469,7 +473,7 @@ if snapshot is None:
                 bridge_index = index
                 break
 
-                # ----------------------------------------------------
+        # ----------------------------------------------------
         # No valid bridge yet
         # ----------------------------------------------------
 
@@ -490,12 +494,14 @@ if snapshot is None:
             )
 
             return False
+
         # ----------------------------------------------------
         # Load REST snapshot
         # ----------------------------------------------------
 
         state["bids"] = snapshot_bids
         state["asks"] = snapshot_asks
+
         state["last_update_id"] = (
             snapshot_last_update_id
         )
@@ -542,11 +548,20 @@ if snapshot is None:
 
                 event_previous_id = event.get("pu")
 
-                if (
-                    event_previous_id is not None
-                    and int(event_previous_id)
-                    != previous_u
-                ):
+                if event_previous_id is None:
+
+                    state["sequence_errors"] += 1
+                    state["resyncing"] = False
+
+                    print(
+                        f"[ORDERBOOK] Missing pu during "
+                        f"initialization: {symbol}"
+                    )
+
+                    return False
+
+                if int(event_previous_id) != previous_u:
+
                     state["sequence_errors"] += 1
                     state["resyncing"] = False
 
@@ -585,7 +600,6 @@ if snapshot is None:
         )
 
         return True
-
 
 def request_orderbook_resync(symbol):
 
