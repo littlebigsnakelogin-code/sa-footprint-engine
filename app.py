@@ -2067,7 +2067,33 @@ def api_scan():
         "bids_zone": bids_out,
         "asks_zone": asks_out
     })
+@app.route("/api/binance-test")
+def binance_test():
 
+    url = "https://fapi.binance.com/fapi/v1/depth"
+
+    try:
+        response = requests.get(
+            url,
+            params={
+                "symbol": "BTCUSDT",
+                "limit": 5
+            },
+            timeout=10,
+        )
+
+        return {
+            "status_code": response.status_code,
+            "server": response.headers.get("server"),
+            "content_type": response.headers.get("content-type"),
+            "body": response.text[:1000],
+        }
+
+    except Exception as exc:
+
+        return {
+            "error": str(exc)
+        }, 500
 # ============================================================
 # MAIN
 # ============================================================
