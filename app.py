@@ -658,7 +658,7 @@ def handle_depth_update(symbol, event):
         # Not initialized yet
         # ----------------------------------------------------
 
-              if not state["initialized"]:
+        if not state["initialized"]:
 
             state["buffer"].append(event)
 
