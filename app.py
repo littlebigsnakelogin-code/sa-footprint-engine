@@ -2070,7 +2070,7 @@ def api_scan():
 @app.route("/api/binance-test")
 def binance_test():
 
-    url = "https://fapi2.binance.com/fapi/v1/depth"
+    url = "https://fapi3.binance.com/fapi/v1/depth"
 
     try:
         response = requests.get(
