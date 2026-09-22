@@ -510,7 +510,7 @@ def initialize_orderbook(symbol):
     buffered updates apply kiye jate hain.
     """
 
-    snapshot = fetch_orderbook_snapshot(symbol)
+    snapshot = fetch_orderbook_snapshot_ws(symbol)
 
     if snapshot is None:
 
