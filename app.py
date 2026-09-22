@@ -382,12 +382,7 @@ def fetch_orderbook_snapshot_ws(symbol):
             if response.get("id") != request_id:
                 continue
 
-            print(
-                f"[ORDERBOOK WS API] "
-                f"{symbol} response: "
-                f"{response}"
-            )
-
+            
             if response.get("status") != 200:
                 raise RuntimeError(
                     f"WS API error: {response}"
