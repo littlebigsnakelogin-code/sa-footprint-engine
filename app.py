@@ -140,6 +140,9 @@ orderbook = {
         "resyncing": False,
         "buffer": deque(),
 
+        # Liquidity history
+        "liquidity_history": deque(maxlen=3000),
+
         # Diagnostics
         "last_depth_event_time": None,
         "last_depth_update_id": None,
@@ -148,8 +151,8 @@ orderbook = {
     }
     for symbol in SYMBOLS
 }
-collector_thread = None
 
+collector_thread = None
 # ============================================================
 # HELPERS
 # ============================================================
