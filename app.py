@@ -469,32 +469,126 @@ def fetch_orderbook_snapshot(symbol):
 
 def apply_orderbook_event(symbol, event):
     """
-    Ek validated Binance depth event ko local orderbook
-    par apply karta hai.
+    Validated Binance depth event ko local orderbook par apply karta hai
+    aur har price-level liquidity movement ko record karta hai.
+
+    IMPORTANT:
+    - added_qty    = nayi resting liquidity
+    - reduced_qty  = orderbook se quantity kam hui
+    - executed_qty = abhi yahan calculate nahi hoti
+    - pulled_qty   = abhi yahan calculate nahi hoti
+
+    Baad mein footprint/trade matching ke through:
+        reduced_qty = executed_qty + pulled_qty
     """
 
     state = orderbook[symbol]
 
+    event_update_id = int(event["u"])
+    event_time = int(event.get("E", now_ms()))
+
+    # ========================================================
+    # BIDS
+    # ========================================================
+
     for price, quantity in event.get("b", []):
 
-        quantity = float(quantity)
+        price = str(price)
+        new_quantity = float(quantity)
 
-        if quantity == 0:
+        old_quantity = float(
+            state["bids"].get(price, 0.0)
+        )
+
+        added_qty = max(
+            new_quantity - old_quantity,
+            0.0
+        )
+
+        reduced_qty = max(
+            old_quantity - new_quantity,
+            0.0
+        )
+
+        if new_quantity == 0.0:
             state["bids"].pop(price, None)
         else:
-            state["bids"][price] = quantity
+            state["bids"][price] = new_quantity
+
+        if old_quantity != new_quantity:
+
+            state["liquidity_history"].append({
+                "time": event_time,
+                "update_id": event_update_id,
+
+                "side": "bid",
+                "price": price,
+
+                "old_qty": old_quantity,
+                "new_qty": new_quantity,
+
+                "added_qty": added_qty,
+                "reduced_qty": reduced_qty,
+
+                # Future execution-matching layer
+                "executed_qty": 0.0,
+                "pulled_qty": 0.0,
+            })
+
+    # ========================================================
+    # ASKS
+    # ========================================================
 
     for price, quantity in event.get("a", []):
 
-        quantity = float(quantity)
+        price = str(price)
+        new_quantity = float(quantity)
 
-        if quantity == 0:
+        old_quantity = float(
+            state["asks"].get(price, 0.0)
+        )
+
+        added_qty = max(
+            new_quantity - old_quantity,
+            0.0
+        )
+
+        reduced_qty = max(
+            old_quantity - new_quantity,
+            0.0
+        )
+
+        if new_quantity == 0.0:
             state["asks"].pop(price, None)
         else:
-            state["asks"][price] = quantity
+            state["asks"][price] = new_quantity
 
-    state["last_update_id"] = int(event["u"])
-    state["last_depth_update_id"] = int(event["u"])
+        if old_quantity != new_quantity:
+
+            state["liquidity_history"].append({
+                "time": event_time,
+                "update_id": event_update_id,
+
+                "side": "ask",
+                "price": price,
+
+                "old_qty": old_quantity,
+                "new_qty": new_quantity,
+
+                "added_qty": added_qty,
+                "reduced_qty": reduced_qty,
+
+                # Future execution-matching layer
+                "executed_qty": 0.0,
+                "pulled_qty": 0.0,
+            })
+
+    # ========================================================
+    # UPDATE SYNC STATE
+    # ========================================================
+
+    state["last_update_id"] = event_update_id
+    state["last_depth_update_id"] = event_update_id
     state["last_depth_event_time"] = now_ms()
 
 def initialize_orderbook(symbol):
