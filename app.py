@@ -143,6 +143,9 @@ orderbook = {
         # Liquidity history
         "liquidity_history": deque(maxlen=3000),
 
+        # Recent aggressive trades
+        "trade_history": deque(maxlen=2000),
+
         # Diagnostics
         "last_depth_event_time": None,
         "last_depth_update_id": None,
@@ -465,6 +468,32 @@ def fetch_orderbook_snapshot(symbol):
             f"{symbol}: {exc}"
         )
         return None
+
+
+def record_trade_for_execution_matching(
+    symbol,
+    price,
+    quantity,
+    trade_time,
+    is_buyer_maker,
+):
+    """
+    Recent aggressive trade ko execution matching ke liye store karta hai.
+
+    is_buyer_maker:
+        True  -> aggressive SELL -> bid consume
+        False -> aggressive BUY  -> ask consume
+    """
+
+    trade_record = {
+        "time": int(trade_time),
+        "price": float(price),
+        "quantity": float(quantity),
+        "remaining_qty": float(quantity),
+        "is_buyer_maker": bool(is_buyer_maker),
+    }
+
+    orderbook[symbol]["trade_history"].append(trade_record)
 
 
 def apply_orderbook_event(symbol, event):
@@ -1240,7 +1269,19 @@ def process_trade(
     """
     Ek Binance trade ko saare timeframes mein process karta hai.
     """
+    
+    # ----------------------------------------------------
+    # EXECUTION MATCHING
+    # ----------------------------------------------------
 
+    record_trade_for_execution_matching(
+        symbol,
+        price,
+        quantity,
+        trade_time,
+        is_buyer_maker,
+    )
+    
     with lock:
 
         for timeframe, seconds in TIMEFRAMES.items():
