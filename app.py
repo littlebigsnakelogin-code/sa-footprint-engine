@@ -1960,15 +1960,25 @@ def handle_message(
 
 def collector_loop():
 
-    trade_streams = [f"{symbol.lower()}@trade" for symbol in SYMBOLS]
-    depth_streams = [f"{symbol.lower()}@depth@100ms" for symbol in SYMBOLS]
-    
-    streams = "/".join(trade_streams + depth_streams)
+    trade_streams = [
+        f"{symbol.lower()}@trade"
+        for symbol in SYMBOLS
+    ]
+
+    depth_streams = [
+        f"{symbol.lower()}@depth@100ms"
+        for symbol in SYMBOLS
+    ]
+
+    streams = "/".join(
+        trade_streams + depth_streams
+    )
 
     url = (
         "wss://fstream.binance.com/stream"
         f"?streams={streams}"
     )
+
     with lock:
 
         collector_state[
@@ -2067,9 +2077,20 @@ def collector_loop():
                 on_close=on_close,
             )
 
+            # ------------------------------------------------
+            # Binance server-side ping/pong ko handle karne
+            # do.
+            #
+            # websocket-client incoming Binance ping ka
+            # automatic pong response deta hai.
+            #
+            # Client-side aggressive ping/timeout intentionally
+            # disabled hai.
+            # ------------------------------------------------
+
             ws.run_forever(
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=0,
+                ping_timeout=None,
             )
 
         except Exception as exc:
@@ -2098,7 +2119,6 @@ def collector_loop():
         )
 
         time.sleep(5)
-
 
 # ============================================================
 # COLLECTOR START
