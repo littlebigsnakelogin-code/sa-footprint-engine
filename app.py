@@ -483,17 +483,167 @@ def record_trade_for_execution_matching(
     is_buyer_maker:
         True  -> aggressive SELL -> bid consume
         False -> aggressive BUY  -> ask consume
+
+    Trade ko:
+    1. trade_history mein store karta hai
+    2. already recorded pending liquidity reductions ke saath match karta hai
+
+    Isse dono event orders handle hote hain:
+
+        depth reduction -> trade
+        trade -> depth reduction
     """
 
+    state = orderbook[symbol]
+
+    trade_time = int(trade_time)
+    price = float(price)
+    quantity = float(quantity)
+
     trade_record = {
-        "time": int(trade_time),
-        "price": float(price),
-        "quantity": float(quantity),
-        "remaining_qty": float(quantity),
+        "time": trade_time,
+        "price": price,
+        "quantity": quantity,
+        "remaining_qty": quantity,
         "is_buyer_maker": bool(is_buyer_maker),
     }
 
-    orderbook[symbol]["trade_history"].append(trade_record)
+    state["trade_history"].append(trade_record)
+
+    # ========================================================
+    # MATCH TRADE AGAINST ALREADY RECORDED REDUCTIONS
+    # ========================================================
+
+    expected_side = (
+        "bid" if is_buyer_maker else "ask"
+    )
+
+    for liquidity in state["liquidity_history"]:
+
+        if trade_record["remaining_qty"] <= 0.0:
+            break
+
+        if liquidity.get("finalized", False):
+            continue
+
+        if liquidity.get("side") != expected_side:
+            continue
+
+        if float(liquidity.get("price", 0.0)) != price:
+            continue
+
+        reduced_qty = float(
+            liquidity.get("reduced_qty", 0.0)
+        )
+
+        executed_qty = float(
+            liquidity.get("executed_qty", 0.0)
+        )
+
+        remaining_reduction = (
+            reduced_qty - executed_qty
+        )
+
+        if remaining_reduction <= 0.0:
+            continue
+
+        time_difference = abs(
+            trade_time - int(liquidity["time"])
+        )
+
+        if time_difference > 1500:
+            continue
+
+        matched_qty = min(
+            trade_record["remaining_qty"],
+            remaining_reduction,
+        )
+
+        if matched_qty <= 0.0:
+            continue
+
+        liquidity["executed_qty"] = (
+            executed_qty + matched_qty
+        )
+
+        trade_record["remaining_qty"] -= matched_qty
+        
+
+def match_trade_to_liquidity_reduction(
+    symbol,
+    side,
+    price,
+    reduction_qty,
+    reduction_time,
+):
+    """
+    Orderbook reduction ko recent aggressive trades ke saath match karta hai.
+
+    Bid reduction:
+        aggressive SELL trade se match hoga.
+
+    Ask reduction:
+        aggressive BUY trade se match hoga.
+
+    Matching:
+        - same symbol
+        - same price
+        - correct aggressive side
+        - limited time window
+
+    Trade quantity ko partially consume kiya ja sakta hai.
+    """
+
+    state = orderbook[symbol]
+
+    if reduction_qty <= 0:
+        return 0.0
+
+    executed_qty = 0.0
+
+    # Bid reduction -> aggressive SELL
+    # Ask reduction -> aggressive BUY
+    expected_is_buyer_maker = (
+        True if side == "bid" else False
+    )
+
+    for trade in state["trade_history"]:
+
+        if trade["remaining_qty"] <= 0:
+            continue
+
+        if trade["is_buyer_maker"] != expected_is_buyer_maker:
+            continue
+
+        if float(trade["price"]) != float(price):
+            continue
+
+        time_difference = abs(
+            int(reduction_time) - int(trade["time"])
+        )
+
+        if time_difference > 1500:
+            continue
+
+        available_trade_qty = float(
+            trade["remaining_qty"]
+        )
+
+        matched_qty = min(
+            available_trade_qty,
+            reduction_qty - executed_qty
+        )
+
+        if matched_qty <= 0:
+            break
+
+        trade["remaining_qty"] -= matched_qty
+        executed_qty += matched_qty
+
+        if executed_qty >= reduction_qty:
+            break
+
+    return executed_qty
 
 
 def apply_orderbook_event(symbol, event):
@@ -504,10 +654,10 @@ def apply_orderbook_event(symbol, event):
     IMPORTANT:
     - added_qty    = nayi resting liquidity
     - reduced_qty  = orderbook se quantity kam hui
-    - executed_qty = abhi yahan calculate nahi hoti
-    - pulled_qty   = abhi yahan calculate nahi hoti
+    - executed_qty = trade matching se calculate hoti hai
+    - pulled_qty   = finalization ke time calculate hogi
 
-    Baad mein footprint/trade matching ke through:
+    Baad mein:
         reduced_qty = executed_qty + pulled_qty
     """
 
@@ -546,6 +696,17 @@ def apply_orderbook_event(symbol, event):
 
         if old_quantity != new_quantity:
 
+            executed_qty = 0.0
+
+            if reduced_qty > 0.0:
+                executed_qty = match_trade_to_liquidity_reduction(
+                    symbol,
+                    "bid",
+                    price,
+                    reduced_qty,
+                    event_time,
+                )
+
             state["liquidity_history"].append({
                 "time": event_time,
                 "update_id": event_update_id,
@@ -559,9 +720,11 @@ def apply_orderbook_event(symbol, event):
                 "added_qty": added_qty,
                 "reduced_qty": reduced_qty,
 
-                # Future execution-matching layer
-                "executed_qty": 0.0,
+                "executed_qty": executed_qty,
                 "pulled_qty": 0.0,
+
+                # Reduction abhi pending hai.
+                "finalized": False,
             })
 
     # ========================================================
@@ -594,6 +757,17 @@ def apply_orderbook_event(symbol, event):
 
         if old_quantity != new_quantity:
 
+            executed_qty = 0.0
+
+            if reduced_qty > 0.0:
+                executed_qty = match_trade_to_liquidity_reduction(
+                    symbol,
+                    "ask",
+                    price,
+                    reduced_qty,
+                    event_time,
+                )
+
             state["liquidity_history"].append({
                 "time": event_time,
                 "update_id": event_update_id,
@@ -607,9 +781,11 @@ def apply_orderbook_event(symbol, event):
                 "added_qty": added_qty,
                 "reduced_qty": reduced_qty,
 
-                # Future execution-matching layer
-                "executed_qty": 0.0,
+                "executed_qty": executed_qty,
                 "pulled_qty": 0.0,
+
+                # Reduction abhi pending hai.
+                "finalized": False,
             })
 
     # ========================================================
@@ -619,6 +795,7 @@ def apply_orderbook_event(symbol, event):
     state["last_update_id"] = event_update_id
     state["last_depth_update_id"] = event_update_id
     state["last_depth_event_time"] = now_ms()
+    
 
 def initialize_orderbook(symbol):
     """
