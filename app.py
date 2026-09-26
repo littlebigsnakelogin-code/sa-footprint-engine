@@ -694,381 +694,429 @@ def apply_orderbook_event(symbol, event):
         pulled_qty
             = finalization ke baad non-executed quantity
 
+    FIFO evidence:
+
+        fifo_consumption
+            = exactly kaunse observed old lots consume hue
+
+        fifo_unattributed_qty
+            = reduction ka woh portion jiske liye
+              modeled FIFO ledger mein enough old liquidity nahi thi
+
     IMPORTANT:
-    - LIVE reduction ko kabhi delay nahi kiya jata.
-    - Trade matching sirf attribution/evidence ke liye hai.
-    - Price approach hone se pehle hui deletion bhi record hoti hai.
-    - FIFO yahan observed liquidity additions par based hai.
-    - Binance aggregated orderbook individual order IDs nahi deta,
-      isliye ye modeled FIFO evidence hai, exchange queue ka exact proof nahi.
+
+        - LIVE reduction ko kabhi delay nahi kiya jata.
+        - Trade matching sirf attribution/evidence ke liye hai.
+        - Price approach hone se pehle hui deletion bhi record hoti hai.
+        - FIFO yahan observed liquidity additions par based hai.
+        - Binance aggregated orderbook individual order IDs nahi deta,
+          isliye ye modeled FIFO evidence hai, exchange queue ka exact proof nahi.
     """
 
     state = orderbook[symbol]
 
     event_update_id = int(event["u"])
-    event_time = int(event.get("E", now_ms()))
+    event_time = int(
+        event.get("E", now_ms())
+    )
 
-    # ========================================================
+    def process_side(
+        side,
+        event_levels,
+        book,
+    ):
+        for price, quantity in event_levels:
+
+            price = str(price)
+            new_quantity = float(quantity)
+
+            old_quantity = float(
+                book.get(price, 0.0)
+            )
+
+            added_qty = max(
+                new_quantity - old_quantity,
+                0.0
+            )
+
+            reduced_qty = max(
+                old_quantity - new_quantity,
+                0.0
+            )
+
+            # ====================================================
+            # UPDATE LIVE ORDERBOOK FIRST
+            # ====================================================
+
+            if new_quantity == 0.0:
+
+                book.pop(
+                    price,
+                    None
+                )
+
+            else:
+
+                book[price] = new_quantity
+
+            # ====================================================
+            # FIFO LIQUIDITY LEDGER
+            # ====================================================
+
+            lots = state[
+                "liquidity_lots"
+            ][side][price]
+
+            # ====================================================
+            # NEW LIQUIDITY
+            # ====================================================
+
+            if added_qty > 0.0:
+
+                lots.append({
+                    "lot_id": str(uuid.uuid4()),
+
+                    "original_qty": float(
+                        added_qty
+                    ),
+
+                    "remaining_qty": float(
+                        added_qty
+                    ),
+
+                    "time": event_time,
+                    "origin": "depth_add",
+                    "update_id": event_update_id,
+                })
+
+            # ====================================================
+            # FIFO REDUCTION
+            # ====================================================
+
+            fifo_consumption = []
+
+            fifo_unattributed_qty = 0.0
+
+            if reduced_qty > 0.0:
+
+                remaining_reduction = float(
+                    reduced_qty
+                )
+
+                while (
+                    remaining_reduction > 0.0
+                    and lots
+                ):
+
+                    oldest_lot = lots[0]
+
+                    lot_remaining = float(
+                        oldest_lot.get(
+                            "remaining_qty",
+                            0.0
+                        )
+                    )
+
+                    if lot_remaining <= 0.0:
+
+                        lots.popleft()
+
+                        continue
+
+                    consumed_qty = min(
+                        lot_remaining,
+                        remaining_reduction
+                    )
+
+                    remaining_after = (
+                        lot_remaining
+                        - consumed_qty
+                    )
+
+                    oldest_lot[
+                        "remaining_qty"
+                    ] = remaining_after
+
+                    # --------------------------------------------
+                    # FIFO CONSUMPTION RECORD
+                    # --------------------------------------------
+
+                    fifo_consumption.append({
+                        "lot_id": oldest_lot.get(
+                            "lot_id"
+                        ),
+
+                        "origin": oldest_lot.get(
+                            "origin"
+                        ),
+
+                        "origin_time": int(
+                            oldest_lot.get(
+                                "time",
+                                event_time
+                            )
+                        ),
+
+                        "origin_update_id": oldest_lot.get(
+                            "update_id"
+                        ),
+
+                        "original_qty": float(
+                            oldest_lot.get(
+                                "original_qty",
+                                0.0
+                            )
+                        ),
+
+                        "consumed_qty": float(
+                            consumed_qty
+                        ),
+
+                        "remaining_qty_after": float(
+                            remaining_after
+                        ),
+
+                        "execution_qty": 0.0,
+
+                        "unmatched_qty": 0.0,
+                    })
+
+                    remaining_reduction -= (
+                        consumed_qty
+                    )
+
+                    if (
+                        oldest_lot[
+                            "remaining_qty"
+                        ] <= 0.0
+                    ):
+
+                        lots.popleft()
+
+                # ------------------------------------------------
+                # Agar modeled FIFO ledger mein enough quantity
+                # nahi thi, to remainder explicitly record karo.
+                # ------------------------------------------------
+
+                fifo_unattributed_qty = max(
+                    remaining_reduction,
+                    0.0
+                )
+
+            # ====================================================
+            # EMPTY FIFO PRICE LEVEL CLEANUP
+            # ====================================================
+
+            if not lots:
+
+                state[
+                    "liquidity_lots"
+                ][side].pop(
+                    price,
+                    None
+                )
+
+            # ====================================================
+            # RECORD LIQUIDITY MOVEMENT
+            # ====================================================
+
+            if old_quantity != new_quantity:
+
+                executed_qty = 0.0
+
+                # ------------------------------------------------
+                # EXISTING TRADE KO REDUCTION SE MATCH KARO
+                # ------------------------------------------------
+
+                if reduced_qty > 0.0:
+
+                    executed_qty = (
+                        match_trade_to_liquidity_reduction(
+                            symbol,
+                            side,
+                            price,
+                            reduced_qty,
+                            event_time,
+                        )
+                    )
+
+                executed_qty = min(
+                    max(
+                        float(executed_qty),
+                        0.0
+                    ),
+                    float(reduced_qty)
+                )
+
+                unmatched_qty = max(
+                    reduced_qty
+                    - executed_qty,
+                    0.0
+                )
+
+                # ------------------------------------------------
+                # FIFO CONSUMPTION PAR EXECUTION ATTRIBUTE KARO
+                #
+                # Trade attribution bhi FIFO order mein assign
+                # hoga, taaki old liquidity ke execution ko
+                # new liquidity ke saath mix na kiya jaye.
+                # ------------------------------------------------
+
+                remaining_execution = (
+                    executed_qty
+                )
+
+                for consumption in fifo_consumption:
+
+                    if remaining_execution <= 0.0:
+                        break
+
+                    consumed_qty = float(
+                        consumption.get(
+                            "consumed_qty",
+                            0.0
+                        )
+                    )
+
+                    allocated_execution = min(
+                        consumed_qty,
+                        remaining_execution
+                    )
+
+                    consumption[
+                        "execution_qty"
+                    ] = allocated_execution
+
+                    consumption[
+                        "unmatched_qty"
+                    ] = max(
+                        consumed_qty
+                        - allocated_execution,
+                        0.0
+                    )
+
+                    remaining_execution -= (
+                        allocated_execution
+                    )
+
+                # ------------------------------------------------
+                # FIFO evidence ko direct event mein preserve karo.
+                # ------------------------------------------------
+
+                state[
+                    "liquidity_history"
+                ].append({
+
+                    "time": event_time,
+
+                    "update_id": event_update_id,
+
+                    "side": side,
+
+                    "price": price,
+
+                    "old_qty": old_quantity,
+
+                    "new_qty": new_quantity,
+
+                    "added_qty": added_qty,
+
+                    "reduced_qty": reduced_qty,
+
+                    "executed_qty": executed_qty,
+
+                    "unmatched_qty": unmatched_qty,
+
+                    # Final pull abhi declare nahi kar rahe.
+                    "pulled_qty": 0.0,
+
+                    "finalized": False,
+
+                    # --------------------------------------------
+                    # FIFO EVIDENCE
+                    # --------------------------------------------
+
+                    "fifo_reduction": (
+                        reduced_qty > 0.0
+                    ),
+
+                    "fifo_consumption": (
+                        fifo_consumption
+                    ),
+
+                    "fifo_consumed_qty": sum(
+                        float(
+                            item.get(
+                                "consumed_qty",
+                                0.0
+                            )
+                        )
+                        for item in fifo_consumption
+                    ),
+
+                    "fifo_unattributed_qty": (
+                        fifo_unattributed_qty
+                    ),
+
+                    "fifo_executed_qty": sum(
+                        float(
+                            item.get(
+                                "execution_qty",
+                                0.0
+                            )
+                        )
+                        for item in fifo_consumption
+                    ),
+
+                    "fifo_unmatched_qty": sum(
+                        float(
+                            item.get(
+                                "unmatched_qty",
+                                0.0
+                            )
+                        )
+                        for item in fifo_consumption
+                    ),
+
+                    # --------------------------------------------
+                    # LIVE STATE
+                    # --------------------------------------------
+
+                    "status": (
+                        "reduction_pending"
+                        if reduced_qty > 0.0
+                        else "liquidity_added"
+                    ),
+                })
+
+    # ============================================================
     # BIDS
-    # ========================================================
+    # ============================================================
 
-    for price, quantity in event.get("b", []):
+    process_side(
+        "bid",
+        event.get("b", []),
+        state["bids"],
+    )
 
-        price = str(price)
-        new_quantity = float(quantity)
-
-        old_quantity = float(
-            state["bids"].get(price, 0.0)
-        )
-
-        added_qty = max(
-            new_quantity - old_quantity,
-            0.0
-        )
-
-        reduced_qty = max(
-            old_quantity - new_quantity,
-            0.0
-        )
-
-        # ----------------------------------------------------
-        # UPDATE LIVE ORDERBOOK
-        # ----------------------------------------------------
-
-        if new_quantity == 0.0:
-            state["bids"].pop(price, None)
-        else:
-            state["bids"][price] = new_quantity
-
-        # ----------------------------------------------------
-        # FIFO LIQUIDITY LEDGER
-        # ----------------------------------------------------
-
-        lots = state["liquidity_lots"]["bid"][price]
-
-        # ----------------------------------------------------
-        # NEW LIQUIDITY
-        #
-        # Existing quantity se zyada quantity aayi hai.
-        # Difference ko NEW FIFO lot maana jayega.
-        # ----------------------------------------------------
-
-        if added_qty > 0.0:
-
-            lots.append({
-                "original_qty": float(added_qty),
-                "remaining_qty": float(added_qty),
-
-                "time": event_time,
-                "origin": "depth_add",
-                "update_id": event_update_id,
-            })
-
-        # ----------------------------------------------------
-        # LIQUIDITY REDUCTION
-        #
-        # Sabse purane observed lots pehle consume honge.
-        # ----------------------------------------------------
-
-        if reduced_qty > 0.0:
-
-            remaining_reduction = float(reduced_qty)
-
-            while (
-                remaining_reduction > 0.0
-                and lots
-            ):
-
-                oldest_lot = lots[0]
-
-                lot_remaining = float(
-                    oldest_lot.get(
-                        "remaining_qty",
-                        0.0
-                    )
-                )
-
-                if lot_remaining <= 0.0:
-                    lots.popleft()
-                    continue
-
-                consumed_qty = min(
-                    lot_remaining,
-                    remaining_reduction
-                )
-
-                oldest_lot["remaining_qty"] = (
-                    lot_remaining - consumed_qty
-                )
-
-                remaining_reduction -= consumed_qty
-
-                if oldest_lot["remaining_qty"] <= 0.0:
-                    lots.popleft()
-
-        # ----------------------------------------------------
-        # EMPTY FIFO PRICE LEVEL CLEANUP
-        # ----------------------------------------------------
-
-        if not lots:
-            state["liquidity_lots"]["bid"].pop(
-                price,
-                None
-            )
-
-        # ----------------------------------------------------
-        # RECORD LIQUIDITY MOVEMENT
-        # ----------------------------------------------------
-
-        if old_quantity != new_quantity:
-
-            executed_qty = 0.0
-
-            # ------------------------------------------------
-            # EXISTING TRADE KO REDUCTION SE MATCH KARO
-            # ------------------------------------------------
-
-            if reduced_qty > 0.0:
-
-                executed_qty = (
-                    match_trade_to_liquidity_reduction(
-                        symbol,
-                        "bid",
-                        price,
-                        reduced_qty,
-                        event_time,
-                    )
-                )
-
-            unmatched_qty = max(
-                reduced_qty - executed_qty,
-                0.0
-            )
-
-            # ------------------------------------------------
-            # LIVE EVIDENCE RECORD
-            # ------------------------------------------------
-
-            state["liquidity_history"].append({
-                "time": event_time,
-                "update_id": event_update_id,
-
-                "side": "bid",
-                "price": price,
-
-                "old_qty": old_quantity,
-                "new_qty": new_quantity,
-
-                "added_qty": added_qty,
-                "reduced_qty": reduced_qty,
-
-                "executed_qty": executed_qty,
-                "unmatched_qty": unmatched_qty,
-
-                # Final pull abhi declare nahi kar rahe.
-                "pulled_qty": 0.0,
-
-                # Future finalization ke liye.
-                "finalized": False,
-
-                # FIFO evidence metadata
-                "fifo_reduction": (
-                    reduced_qty > 0.0
-                ),
-
-                # ------------------------------------------------
-                # LIVE STATE
-                # ------------------------------------------------
-
-                "status": (
-                    "reduction_pending"
-                    if reduced_qty > 0.0
-                    else "liquidity_added"
-                ),
-            })
-
-    # ========================================================
+    # ============================================================
     # ASKS
-    # ========================================================
+    # ============================================================
 
-    for price, quantity in event.get("a", []):
+    process_side(
+        "ask",
+        event.get("a", []),
+        state["asks"],
+    )
 
-        price = str(price)
-        new_quantity = float(quantity)
-
-        old_quantity = float(
-            state["asks"].get(price, 0.0)
-        )
-
-        added_qty = max(
-            new_quantity - old_quantity,
-            0.0
-        )
-
-        reduced_qty = max(
-            old_quantity - new_quantity,
-            0.0
-        )
-
-        # ----------------------------------------------------
-        # UPDATE LIVE ORDERBOOK
-        # ----------------------------------------------------
-
-        if new_quantity == 0.0:
-            state["asks"].pop(price, None)
-        else:
-            state["asks"][price] = new_quantity
-
-        # ----------------------------------------------------
-        # FIFO LIQUIDITY LEDGER
-        # ----------------------------------------------------
-
-        lots = state["liquidity_lots"]["ask"][price]
-
-        # ----------------------------------------------------
-        # NEW LIQUIDITY
-        # ----------------------------------------------------
-
-        if added_qty > 0.0:
-
-            lots.append({
-                "original_qty": float(added_qty),
-                "remaining_qty": float(added_qty),
-
-                "time": event_time,
-                "origin": "depth_add",
-                "update_id": event_update_id,
-            })
-
-        # ----------------------------------------------------
-        # LIQUIDITY REDUCTION
-        #
-        # Sabse purane observed lots pehle consume honge.
-        # ----------------------------------------------------
-
-        if reduced_qty > 0.0:
-
-            remaining_reduction = float(reduced_qty)
-
-            while (
-                remaining_reduction > 0.0
-                and lots
-            ):
-
-                oldest_lot = lots[0]
-
-                lot_remaining = float(
-                    oldest_lot.get(
-                        "remaining_qty",
-                        0.0
-                    )
-                )
-
-                if lot_remaining <= 0.0:
-                    lots.popleft()
-                    continue
-
-                consumed_qty = min(
-                    lot_remaining,
-                    remaining_reduction
-                )
-
-                oldest_lot["remaining_qty"] = (
-                    lot_remaining - consumed_qty
-                )
-
-                remaining_reduction -= consumed_qty
-
-                if oldest_lot["remaining_qty"] <= 0.0:
-                    lots.popleft()
-
-        # ----------------------------------------------------
-        # EMPTY FIFO PRICE LEVEL CLEANUP
-        # ----------------------------------------------------
-
-        if not lots:
-            state["liquidity_lots"]["ask"].pop(
-                price,
-                None
-            )
-
-        # ----------------------------------------------------
-        # RECORD LIQUIDITY MOVEMENT
-        # ----------------------------------------------------
-
-        if old_quantity != new_quantity:
-
-            executed_qty = 0.0
-
-            # ------------------------------------------------
-            # EXISTING TRADE KO REDUCTION SE MATCH KARO
-            # ------------------------------------------------
-
-            if reduced_qty > 0.0:
-
-                executed_qty = (
-                    match_trade_to_liquidity_reduction(
-                        symbol,
-                        "ask",
-                        price,
-                        reduced_qty,
-                        event_time,
-                    )
-                )
-
-            unmatched_qty = max(
-                reduced_qty - executed_qty,
-                0.0
-            )
-
-            # ------------------------------------------------
-            # LIVE EVIDENCE RECORD
-            # ------------------------------------------------
-
-            state["liquidity_history"].append({
-                "time": event_time,
-                "update_id": event_update_id,
-
-                "side": "ask",
-                "price": price,
-
-                "old_qty": old_quantity,
-                "new_qty": new_quantity,
-
-                "added_qty": added_qty,
-                "reduced_qty": reduced_qty,
-
-                "executed_qty": executed_qty,
-                "unmatched_qty": unmatched_qty,
-
-                # Final pull abhi declare nahi kar rahe.
-                "pulled_qty": 0.0,
-
-                # Future finalization ke liye.
-                "finalized": False,
-
-                # FIFO evidence metadata
-                "fifo_reduction": (
-                    reduced_qty > 0.0
-                ),
-
-                # ------------------------------------------------
-                # LIVE STATE
-                # ------------------------------------------------
-
-                "status": (
-                    "reduction_pending"
-                    if reduced_qty > 0.0
-                    else "liquidity_added"
-                ),
-            })
-
-    # ========================================================
+    # ============================================================
     # UPDATE SYNC STATE
-    # ========================================================
+    # ============================================================
 
     state["last_update_id"] = event_update_id
+
     state["last_depth_update_id"] = event_update_id
+
     state["last_depth_event_time"] = now_ms()
 
 
