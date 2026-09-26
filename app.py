@@ -1979,17 +1979,17 @@ def collector_loop():
         f"?streams={streams}"
     )
 
+    reconnect_delay = 5
+    max_reconnect_delay = 60
+
     with lock:
 
-        collector_state[
-            "status"
-        ] = "connecting"
-
-        collector_state[
-            "started_at"
-        ] = now_ms()
+        collector_state["status"] = "connecting"
+        collector_state["started_at"] = now_ms()
 
     while True:
+
+        connection_started_at = time.time()
 
         try:
 
@@ -1999,48 +1999,33 @@ def collector_loop():
 
             def on_open(ws):
 
+                nonlocal reconnect_delay
+
                 with lock:
 
-                    collector_state[
-                        "connected"
-                    ] = True
+                    collector_state["connected"] = True
+                    collector_state["status"] = "connected"
+                    collector_state["error"] = None
 
-                    collector_state[
-                        "status"
-                    ] = "connected"
-
-                    collector_state[
-                        "error"
-                    ] = None
+                reconnect_delay = 5
 
                 print(
                     "[COLLECTOR] CONNECTED"
                 )
 
-            def on_message(
-                ws,
-                message
-            ):
+            def on_message(ws, message):
 
                 handle_message(
                     ws,
                     message
                 )
 
-            def on_error(
-                ws,
-                error
-            ):
+            def on_error(ws, error):
 
                 with lock:
 
-                    collector_state[
-                        "error"
-                    ] = str(error)
-
-                    collector_state[
-                        "status"
-                    ] = "error"
+                    collector_state["error"] = str(error)
+                    collector_state["status"] = "error"
 
                 print(
                     "[COLLECTOR] ERROR:",
@@ -2055,13 +2040,31 @@ def collector_loop():
 
                 with lock:
 
-                    collector_state[
-                        "connected"
-                    ] = False
+                    collector_state["connected"] = False
+                    collector_state["status"] = "closed"
 
-                    collector_state[
-                        "status"
-                    ] = "closed"
+                    for symbol in SYMBOLS:
+
+                        state = orderbook[symbol]
+
+                        # Current orderbook ko invalid mark karo.
+                        # Disconnect ke baad purana book evidence
+                        # ke liye use nahi hona chahiye.
+                        state["initialized"] = False
+
+                        state["last_update_id"] = None
+                        state["last_depth_update_id"] = None
+
+                        state["bids"].clear()
+                        state["asks"].clear()
+
+                        # Purani FIFO liquidity bhi invalid hai.
+                        state["liquidity_lots"]["bid"].clear()
+                        state["liquidity_lots"]["ask"].clear()
+
+                        # Purane connection ke buffered events
+                        # naye connection ke saath mix nahi hone chahiye.
+                        state["buffer"].clear()
 
                 print(
                     "[COLLECTOR] CLOSED:",
@@ -2077,49 +2080,49 @@ def collector_loop():
                 on_close=on_close,
             )
 
-            # ------------------------------------------------
-            # Binance server-side ping/pong ko handle karne
-            # do.
-            #
-            # websocket-client incoming Binance ping ka
-            # automatic pong response deta hai.
-            #
-            # Client-side aggressive ping/timeout intentionally
-            # disabled hai.
-            # ------------------------------------------------
-
+            # Binance server-side ping/pong handle karega.
+            # Client-side ping ko disable rakha hai taaki
+            # websocket-client ka artificial ping timeout
+            # reconnect trigger na kare.
             ws.run_forever(
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=0,
+                ping_timeout=None,
             )
 
         except Exception as exc:
 
             with lock:
 
-                collector_state[
-                    "connected"
-                ] = False
-
-                collector_state[
-                    "status"
-                ] = "error"
-
-                collector_state[
-                    "error"
-                ] = str(exc)
+                collector_state["connected"] = False
+                collector_state["status"] = "error"
+                collector_state["error"] = str(exc)
 
             print(
                 "[COLLECTOR] EXCEPTION:",
                 exc
             )
 
-        print(
-            "[COLLECTOR] Reconnecting in 5 seconds..."
+        connection_uptime = (
+            time.time() - connection_started_at
         )
 
-        time.sleep(5)
+        # Agar connection reasonably long chala,
+        # reconnect delay ko reset rakho.
+        if connection_uptime >= 60:
+            reconnect_delay = 5
 
+        print(
+            f"[COLLECTOR] Reconnecting in "
+            f"{reconnect_delay} seconds..."
+        )
+
+        time.sleep(reconnect_delay)
+
+        reconnect_delay = min(
+            reconnect_delay * 2,
+            max_reconnect_delay
+        )
+        
 # ============================================================
 # COLLECTOR START
 # ============================================================
