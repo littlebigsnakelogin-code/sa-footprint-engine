@@ -509,6 +509,8 @@ def record_trade_for_execution_matching(
     Trade ko:
     1. trade_history mein store karta hai
     2. already recorded pending liquidity reductions ke saath match karta hai
+    3. later-arriving execution ko FIFO consumption records mein
+       bhi correctly attribute karta hai
 
     Isse dono event orders handle hote hain:
 
@@ -584,12 +586,155 @@ def record_trade_for_execution_matching(
         if matched_qty <= 0.0:
             continue
 
-        liquidity["executed_qty"] = (
-            executed_qty + matched_qty
+        # ====================================================
+        # UPDATE TOP-LEVEL EXECUTION
+        # ====================================================
+
+        new_executed_qty = (
+            executed_qty
+            + matched_qty
         )
 
-        trade_record["remaining_qty"] -= matched_qty
-        
+        liquidity["executed_qty"] = new_executed_qty
+
+        liquidity["unmatched_qty"] = max(
+            reduced_qty
+            - new_executed_qty,
+            0.0
+        )
+
+        # ====================================================
+        # UPDATE FIFO EXECUTION ATTRIBUTION
+        #
+        # IMPORTANT:
+        # Existing FIFO execution ko reset nahi karna.
+        # Sirf newly matched execution ko remaining FIFO
+        # consumption par allocate karna hai.
+        # ====================================================
+
+        remaining_fifo_execution = matched_qty
+
+        fifo_consumption = liquidity.get(
+            "fifo_consumption",
+            []
+        )
+
+        for consumption in fifo_consumption:
+
+            if remaining_fifo_execution <= 0.0:
+                break
+
+            consumed_qty = float(
+                consumption.get(
+                    "consumed_qty",
+                    0.0
+                )
+            )
+
+            existing_execution_qty = float(
+                consumption.get(
+                    "execution_qty",
+                    0.0
+                )
+            )
+
+            fifo_available_qty = max(
+                consumed_qty
+                - existing_execution_qty,
+                0.0
+            )
+
+            if fifo_available_qty <= 0.0:
+                consumption["unmatched_qty"] = 0.0
+                continue
+
+            allocated_execution = min(
+                fifo_available_qty,
+                remaining_fifo_execution
+            )
+
+            new_fifo_execution_qty = (
+                existing_execution_qty
+                + allocated_execution
+            )
+
+            consumption["execution_qty"] = (
+                new_fifo_execution_qty
+            )
+
+            consumption["unmatched_qty"] = max(
+                consumed_qty
+                - new_fifo_execution_qty,
+                0.0
+            )
+
+            remaining_fifo_execution -= (
+                allocated_execution
+            )
+
+        # ====================================================
+        # EXECUTION THAT COULD NOT BE ATTRIBUTED TO MODELED
+        # FIFO LOTS
+        #
+        # This can happen when reduced_qty > fifo_consumed_qty.
+        # Keep it explicitly separate instead of falsely assigning
+        # it to a FIFO lot.
+        # ====================================================
+
+        previous_unattributed_execution = float(
+            liquidity.get(
+                "fifo_unattributed_execution_qty",
+                0.0
+            )
+        )
+
+        liquidity[
+            "fifo_unattributed_execution_qty"
+        ] = (
+            previous_unattributed_execution
+            + remaining_fifo_execution
+        )
+
+        # ====================================================
+        # RECALCULATE FIFO AGGREGATES
+        # ====================================================
+
+        fifo_executed_qty = sum(
+            float(
+                item.get(
+                    "execution_qty",
+                    0.0
+                )
+            )
+            for item in fifo_consumption
+        )
+
+        fifo_unmatched_qty = sum(
+            float(
+                item.get(
+                    "unmatched_qty",
+                    0.0
+                )
+            )
+            for item in fifo_consumption
+        )
+
+        liquidity["fifo_executed_qty"] = (
+            fifo_executed_qty
+        )
+
+        liquidity["fifo_unmatched_qty"] = (
+            fifo_unmatched_qty
+        )
+
+        # ====================================================
+        # CONSUME THIS TRADE'S REMAINING QUANTITY
+        # ====================================================
+
+        trade_record["remaining_qty"] -= (
+            matched_qty
+        )        
+
 
 def match_trade_to_liquidity_reduction(
     symbol,
