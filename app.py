@@ -972,6 +972,23 @@ def apply_orderbook_event(symbol, event):
         event.get("E", now_ms())
     )
 
+    # ============================================================
+    # FINALIZE EXPIRED LIQUIDITY REDUCTIONS
+    #
+    # Har depth event ke arrival par purane reduction records
+    # check karo. Isse finalization sirf naye trade par dependent
+    # nahi rahega.
+    #
+    # Important:
+    # Current event ke naye reduction ko ye finalize nahi karega,
+    # kyunki uski age abhi 1500 ms se kam hogi.
+    # ============================================================
+
+    finalize_liquidity_records(
+        symbol,
+        event_time
+    )
+
     def process_side(
         side,
         event_levels,
@@ -1281,6 +1298,8 @@ def apply_orderbook_event(symbol, event):
 
                     # Final pull abhi declare nahi kar rahe.
                     "pulled_qty": 0.0,
+
+                    "pull_pct": 0.0,
 
                     "finalized": False,
 
