@@ -491,6 +491,89 @@ def fetch_orderbook_snapshot(symbol):
         )
         return None
 
+def finalize_liquidity_records(symbol, current_time_ms=None):
+    """
+    Finalize liquidity-reduction records whose execution-matching window
+    has expired.
+
+    Accounting:
+        pulled_qty = reduced_qty - executed_qty
+
+    Execution can be matched from both:
+        - trades already present before the depth reduction
+        - late trades arriving after the reduction
+
+    This function does not classify spoofing or absorption.
+    It only finalizes objective liquidity accounting.
+    """
+
+    if symbol not in orderbook:
+        return 0
+
+    if current_time_ms is None:
+        current_time_ms = now_ms()
+
+    finalized_count = 0
+
+    state = orderbook[symbol]
+
+    for record in state["liquidity_history"]:
+
+        if record.get("finalized"):
+            continue
+
+        reduced_qty = float(record.get("reduced_qty", 0.0))
+
+        # Only reductions need execution matching/finalization.
+        if reduced_qty <= 0.0:
+            continue
+
+        record_time = int(record.get("time", current_time_ms))
+
+        # Keep the 1500 ms matching window open.
+        if current_time_ms - record_time < 1500:
+            continue
+
+        executed_qty = max(
+            0.0,
+            min(
+                reduced_qty,
+                float(record.get("executed_qty", 0.0))
+            )
+        )
+
+        unmatched_qty = max(
+            0.0,
+            reduced_qty - executed_qty
+        )
+
+        pulled_qty = unmatched_qty
+
+        if reduced_qty > 0.0:
+            pull_pct = (pulled_qty / reduced_qty) * 100.0
+        else:
+            pull_pct = 0.0
+
+        record["executed_qty"] = executed_qty
+        record["unmatched_qty"] = unmatched_qty
+        record["pulled_qty"] = pulled_qty
+        record["pull_pct"] = pull_pct
+        record["finalized"] = True
+
+        # Pure accounting state.
+        if executed_qty > 0.0 and pulled_qty > 0.0:
+            record["status"] = "PARTIAL_EXECUTION_PULL"
+        elif executed_qty > 0.0:
+            record["status"] = "EXECUTED"
+        elif pulled_qty > 0.0:
+            record["status"] = "LIQUIDITY_PULLED"
+        else:
+            record["status"] = "REDUCTION_ZERO"
+
+        finalized_count += 1
+
+    return finalized_count
+
 
 def record_trade_for_execution_matching(
     symbol,
