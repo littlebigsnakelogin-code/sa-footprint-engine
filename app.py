@@ -2457,6 +2457,7 @@ def collector_loop():
                         # Disconnect ke baad purana book evidence
                         # ke liye use nahi hona chahiye.
                         state["initialized"] = False
+                        state["resyncing"] = False
 
                         state["last_update_id"] = None
                         state["last_depth_update_id"] = None
@@ -2527,8 +2528,8 @@ def collector_loop():
         reconnect_delay = min(
             reconnect_delay * 2,
             max_reconnect_delay
-        )
-        
+        )        
+
 # ============================================================
 # COLLECTOR START
 # ============================================================
