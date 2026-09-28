@@ -590,15 +590,20 @@ def record_trade_for_execution_matching(
         False -> aggressive BUY  -> ask consume
 
     Trade ko:
-    1. trade_history mein store karta hai
-    2. already recorded pending liquidity reductions ke saath match karta hai
+    1. expired liquidity reductions finalize karne ke baad
+       trade_history mein store karta hai
+    2. already recorded pending liquidity reductions ke saath match
+       karta hai
     3. later-arriving execution ko FIFO consumption records mein
-       bhi correctly attribute karta hai
+       correctly attribute karta hai
 
-    Isse dono event orders handle hote hain:
+    Event orders:
 
         depth reduction -> trade
         trade -> depth reduction
+
+    Matching window:
+        1500 ms
     """
 
     state = orderbook[symbol]
@@ -606,6 +611,25 @@ def record_trade_for_execution_matching(
     trade_time = int(trade_time)
     price = float(price)
     quantity = float(quantity)
+
+    # ========================================================
+    # FINALIZE OLD REDUCTIONS FIRST
+    #
+    # Current trade se pehle jo reductions apni 1500 ms
+    # matching window cross kar chuki hain unhe close kar do.
+    #
+    # Current trade ko sirf active matching window ke records
+    # ke saath match kiya jayega.
+    # ========================================================
+
+    finalize_liquidity_records(
+        symbol,
+        trade_time
+    )
+
+    # ========================================================
+    # STORE TRADE
+    # ========================================================
 
     trade_record = {
         "time": trade_time,
@@ -647,8 +671,9 @@ def record_trade_for_execution_matching(
             liquidity.get("executed_qty", 0.0)
         )
 
-        remaining_reduction = (
-            reduced_qty - executed_qty
+        remaining_reduction = max(
+            reduced_qty - executed_qty,
+            0.0
         )
 
         if remaining_reduction <= 0.0:
@@ -678,7 +703,9 @@ def record_trade_for_execution_matching(
             + matched_qty
         )
 
-        liquidity["executed_qty"] = new_executed_qty
+        liquidity["executed_qty"] = (
+            new_executed_qty
+        )
 
         liquidity["unmatched_qty"] = max(
             reduced_qty
@@ -689,7 +716,6 @@ def record_trade_for_execution_matching(
         # ====================================================
         # UPDATE FIFO EXECUTION ATTRIBUTION
         #
-        # IMPORTANT:
         # Existing FIFO execution ko reset nahi karna.
         # Sirf newly matched execution ko remaining FIFO
         # consumption par allocate karna hai.
@@ -758,10 +784,6 @@ def record_trade_for_execution_matching(
         # ====================================================
         # EXECUTION THAT COULD NOT BE ATTRIBUTED TO MODELED
         # FIFO LOTS
-        #
-        # This can happen when reduced_qty > fifo_consumed_qty.
-        # Keep it explicitly separate instead of falsely assigning
-        # it to a FIFO lot.
         # ====================================================
 
         previous_unattributed_execution = float(
@@ -814,9 +836,11 @@ def record_trade_for_execution_matching(
         # CONSUME THIS TRADE'S REMAINING QUANTITY
         # ====================================================
 
-        trade_record["remaining_qty"] -= (
-            matched_qty
-        )        
+        trade_record["remaining_qty"] = max(
+            trade_record["remaining_qty"]
+            - matched_qty,
+            0.0
+        )
 
 
 def match_trade_to_liquidity_reduction(
