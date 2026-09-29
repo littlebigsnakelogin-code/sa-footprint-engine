@@ -855,17 +855,19 @@ def match_trade_to_liquidity_reduction(
     """
     Match orderbook liquidity reduction against recent aggressive trades.
 
+    Diagnostic version:
+    Matching logic unchanged.
+    Har rejection ka reason record karta hai taaki pata chale
+    trade kahan reject ho raha hai.
+
     Bid reduction  -> aggressive SELL
     Ask reduction  -> aggressive BUY
 
-    Matching uses:
-        - same symbol state
+    Matching:
         - correct aggressive side
-        - same price level with float tolerance
-        - trade/reduction within 1500 ms
-        - FIFO order of recent trades
-
-    Trade quantity is partially consumed when necessary.
+        - same price with float tolerance
+        - within 1500 ms
+        - FIFO trade_history order
     """
 
     state = orderbook[symbol]
@@ -875,8 +877,6 @@ def match_trade_to_liquidity_reduction(
 
     executed_qty = 0.0
 
-    # Bid liquidity is consumed by aggressive SELL.
-    # Ask liquidity is consumed by aggressive BUY.
     expected_is_buyer_maker = (
         True if side == "bid" else False
     )
@@ -884,9 +884,26 @@ def match_trade_to_liquidity_reduction(
     reduction_time = int(reduction_time)
     reduction_price = float(price)
 
-    # trade_history is chronological.
-    # Match oldest eligible trade first.
+    diagnostic = {
+        "symbol": symbol,
+        "side": side,
+        "price": reduction_price,
+        "reduction_qty": float(reduction_qty),
+        "reduction_time": reduction_time,
+        "expected_is_buyer_maker": expected_is_buyer_maker,
+        "trade_count": 0,
+        "skipped_no_remaining": 0,
+        "skipped_side": 0,
+        "skipped_price": 0,
+        "skipped_time": 0,
+        "matched_trade_count": 0,
+        "matched_qty": 0.0,
+        "samples": [],
+    }
+
     for trade in state["trade_history"]:
+
+        diagnostic["trade_count"] += 1
 
         if executed_qty >= reduction_qty:
             break
@@ -896,37 +913,90 @@ def match_trade_to_liquidity_reduction(
         )
 
         if remaining_qty <= 0:
+            diagnostic[
+                "skipped_no_remaining"
+            ] += 1
             continue
 
-        # Correct aggressive direction
         if (
             bool(trade.get("is_buyer_maker"))
             != expected_is_buyer_maker
         ):
+            diagnostic[
+                "skipped_side"
+            ] += 1
+
+            if len(diagnostic["samples"]) < 5:
+                diagnostic["samples"].append({
+                    "reason": "side",
+                    "trade_time": int(
+                        trade.get("time", 0)
+                    ),
+                    "trade_price": float(
+                        trade.get("price", 0.0)
+                    ),
+                    "trade_qty": remaining_qty,
+                    "is_buyer_maker": bool(
+                        trade.get(
+                            "is_buyer_maker"
+                        )
+                    ),
+                })
+
             continue
 
         trade_price = float(
             trade.get("price", 0.0)
         )
 
-        # Same Binance price level.
-        # Small tolerance only for floating-point representation.
-        if abs(
+        price_difference = abs(
             trade_price - reduction_price
-        ) > 1e-6:
+        )
+
+        if price_difference > 1e-6:
+
+            diagnostic[
+                "skipped_price"
+            ] += 1
+
+            if len(diagnostic["samples"]) < 5:
+                diagnostic["samples"].append({
+                    "reason": "price",
+                    "trade_time": int(
+                        trade.get("time", 0)
+                    ),
+                    "trade_price": trade_price,
+                    "reduction_price": reduction_price,
+                    "price_difference": price_difference,
+                    "trade_qty": remaining_qty,
+                })
+
             continue
 
         trade_time = int(
             trade.get("time", 0)
         )
 
-        # Trade and depth streams are independent.
-        # Allow either event to arrive first.
         time_difference = abs(
             reduction_time - trade_time
         )
 
         if time_difference > 1500:
+
+            diagnostic[
+                "skipped_time"
+            ] += 1
+
+            if len(diagnostic["samples"]) < 5:
+                diagnostic["samples"].append({
+                    "reason": "time",
+                    "trade_time": trade_time,
+                    "reduction_time": reduction_time,
+                    "time_difference_ms": time_difference,
+                    "trade_price": trade_price,
+                    "trade_qty": remaining_qty,
+                })
+
             continue
 
         available_qty = remaining_qty
@@ -950,6 +1020,32 @@ def match_trade_to_liquidity_reduction(
         )
 
         executed_qty += matched_qty
+
+        diagnostic[
+            "matched_trade_count"
+        ] += 1
+
+        diagnostic[
+            "matched_qty"
+        ] += matched_qty
+
+    diagnostic[
+        "final_executed_qty"
+    ] = executed_qty
+
+    diagnostic[
+        "final_unmatched_qty"
+    ] = max(
+        reduction_qty - executed_qty,
+        0.0
+    )
+
+    state.setdefault(
+        "match_diagnostics",
+        deque(maxlen=200)
+    ).append(
+        diagnostic
+    )
 
     return executed_qty
 
