@@ -3357,6 +3357,13 @@ def api_liquidity_debug():
             state["liquidity_history"]
         )[-limit:]
 
+        match_diagnostics = list(
+            state.get(
+                "match_diagnostics",
+                []
+            )
+        )[-20:]
+
         def serialize_fifo(side):
 
             result = []
@@ -3486,6 +3493,9 @@ def api_liquidity_debug():
 
             "liquidity_history":
                 history,
+
+            "match_diagnostics":
+                match_diagnostics,
 
         })
 
