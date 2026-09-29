@@ -614,12 +614,6 @@ def record_trade_for_execution_matching(
 
     # ========================================================
     # FINALIZE OLD REDUCTIONS FIRST
-    #
-    # Current trade se pehle jo reductions apni 1500 ms
-    # matching window cross kar chuki hain unhe close kar do.
-    #
-    # Current trade ko sirf active matching window ke records
-    # ke saath match kiya jayega.
     # ========================================================
 
     finalize_liquidity_records(
@@ -639,7 +633,9 @@ def record_trade_for_execution_matching(
         "is_buyer_maker": bool(is_buyer_maker),
     }
 
-    state["trade_history"].append(trade_record)
+    state["trade_history"].append(
+        trade_record
+    )
 
     # ========================================================
     # MATCH TRADE AGAINST ALREADY RECORDED REDUCTIONS
@@ -660,7 +656,14 @@ def record_trade_for_execution_matching(
         if liquidity.get("side") != expected_side:
             continue
 
-        if float(liquidity.get("price", 0.0)) != price:
+        liquidity_price = float(
+            liquidity.get("price", 0.0)
+        )
+
+        # Same price level with small floating-point tolerance.
+        if abs(
+            liquidity_price - price
+        ) > 1e-6:
             continue
 
         reduced_qty = float(
@@ -679,8 +682,12 @@ def record_trade_for_execution_matching(
         if remaining_reduction <= 0.0:
             continue
 
+        # Trade and depth streams are independent,
+        # so either event may arrive first.
         time_difference = abs(
-            trade_time - int(liquidity["time"])
+            trade_time - int(
+                liquidity["time"]
+            )
         )
 
         if time_difference > 1500:
@@ -715,10 +722,6 @@ def record_trade_for_execution_matching(
 
         # ====================================================
         # UPDATE FIFO EXECUTION ATTRIBUTION
-        #
-        # Existing FIFO execution ko reset nahi karna.
-        # Sirf newly matched execution ko remaining FIFO
-        # consumption par allocate karna hai.
         # ====================================================
 
         remaining_fifo_execution = matched_qty
@@ -782,8 +785,7 @@ def record_trade_for_execution_matching(
             )
 
         # ====================================================
-        # EXECUTION THAT COULD NOT BE ATTRIBUTED TO MODELED
-        # FIFO LOTS
+        # EXECUTION NOT ATTRIBUTED TO FIFO LOTS
         # ====================================================
 
         previous_unattributed_execution = float(
@@ -844,7 +846,6 @@ def record_trade_for_execution_matching(
 
 
 def match_trade_to_liquidity_reduction(
-def match_trade_to_liquidity_reduction(
     symbol,
     side,
     price,
@@ -860,8 +861,8 @@ def match_trade_to_liquidity_reduction(
     Matching uses:
         - same symbol state
         - correct aggressive side
-        - exact price level
-        - trade within 1500 ms before reduction
+        - same price level with float tolerance
+        - trade/reduction within 1500 ms
         - FIFO order of recent trades
 
     Trade quantity is partially consumed when necessary.
@@ -898,29 +899,42 @@ def match_trade_to_liquidity_reduction(
             continue
 
         # Correct aggressive direction
-        if bool(trade.get("is_buyer_maker")) != expected_is_buyer_maker:
+        if (
+            bool(trade.get("is_buyer_maker"))
+            != expected_is_buyer_maker
+        ):
             continue
 
-        trade_price = float(trade.get("price", 0.0))
+        trade_price = float(
+            trade.get("price", 0.0)
+        )
 
-        # Same price level
-        if abs(trade_price - reduction_price) > 1e-12:
+        # Same Binance price level.
+        # Small tolerance only for floating-point representation.
+        if abs(
+            trade_price - reduction_price
+        ) > 1e-6:
             continue
 
-        trade_time = int(trade.get("time", 0))
+        trade_time = int(
+            trade.get("time", 0)
+        )
 
-        # Trade must occur BEFORE the book reduction.
-        age_ms = reduction_time - trade_time
+        # Trade and depth streams are independent.
+        # Allow either event to arrive first.
+        time_difference = abs(
+            reduction_time - trade_time
+        )
 
-        if age_ms < 0:
-            continue
-
-        if age_ms > 1500:
+        if time_difference > 1500:
             continue
 
         available_qty = remaining_qty
 
-        needed_qty = reduction_qty - executed_qty
+        needed_qty = (
+            reduction_qty
+            - executed_qty
+        )
 
         matched_qty = min(
             available_qty,
