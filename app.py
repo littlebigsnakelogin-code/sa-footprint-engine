@@ -844,6 +844,7 @@ def record_trade_for_execution_matching(
 
 
 def match_trade_to_liquidity_reduction(
+def match_trade_to_liquidity_reduction(
     symbol,
     side,
     price,
@@ -851,21 +852,19 @@ def match_trade_to_liquidity_reduction(
     reduction_time,
 ):
     """
-    Orderbook reduction ko recent aggressive trades ke saath match karta hai.
+    Match orderbook liquidity reduction against recent aggressive trades.
 
-    Bid reduction:
-        aggressive SELL trade se match hoga.
+    Bid reduction  -> aggressive SELL
+    Ask reduction  -> aggressive BUY
 
-    Ask reduction:
-        aggressive BUY trade se match hoga.
-
-    Matching:
-        - same symbol
-        - same price
+    Matching uses:
+        - same symbol state
         - correct aggressive side
-        - limited time window
+        - exact price level
+        - trade within 1500 ms before reduction
+        - FIFO order of recent trades
 
-    Trade quantity ko partially consume kiya ja sakta hai.
+    Trade quantity is partially consumed when necessary.
     """
 
     state = orderbook[symbol]
@@ -875,47 +874,68 @@ def match_trade_to_liquidity_reduction(
 
     executed_qty = 0.0
 
-    # Bid reduction -> aggressive SELL
-    # Ask reduction -> aggressive BUY
+    # Bid liquidity is consumed by aggressive SELL.
+    # Ask liquidity is consumed by aggressive BUY.
     expected_is_buyer_maker = (
         True if side == "bid" else False
     )
 
+    reduction_time = int(reduction_time)
+    reduction_price = float(price)
+
+    # trade_history is chronological.
+    # Match oldest eligible trade first.
     for trade in state["trade_history"]:
-
-        if trade["remaining_qty"] <= 0:
-            continue
-
-        if trade["is_buyer_maker"] != expected_is_buyer_maker:
-            continue
-
-        if float(trade["price"]) != float(price):
-            continue
-
-        time_difference = abs(
-            int(reduction_time) - int(trade["time"])
-        )
-
-        if time_difference > 1500:
-            continue
-
-        available_trade_qty = float(
-            trade["remaining_qty"]
-        )
-
-        matched_qty = min(
-            available_trade_qty,
-            reduction_qty - executed_qty
-        )
-
-        if matched_qty <= 0:
-            break
-
-        trade["remaining_qty"] -= matched_qty
-        executed_qty += matched_qty
 
         if executed_qty >= reduction_qty:
             break
+
+        remaining_qty = float(
+            trade.get("remaining_qty", 0.0)
+        )
+
+        if remaining_qty <= 0:
+            continue
+
+        # Correct aggressive direction
+        if bool(trade.get("is_buyer_maker")) != expected_is_buyer_maker:
+            continue
+
+        trade_price = float(trade.get("price", 0.0))
+
+        # Same price level
+        if abs(trade_price - reduction_price) > 1e-12:
+            continue
+
+        trade_time = int(trade.get("time", 0))
+
+        # Trade must occur BEFORE the book reduction.
+        age_ms = reduction_time - trade_time
+
+        if age_ms < 0:
+            continue
+
+        if age_ms > 1500:
+            continue
+
+        available_qty = remaining_qty
+
+        needed_qty = reduction_qty - executed_qty
+
+        matched_qty = min(
+            available_qty,
+            needed_qty
+        )
+
+        if matched_qty <= 0:
+            continue
+
+        trade["remaining_qty"] = max(
+            0.0,
+            available_qty - matched_qty
+        )
+
+        executed_qty += matched_qty
 
     return executed_qty
 
