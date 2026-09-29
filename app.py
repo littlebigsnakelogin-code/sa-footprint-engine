@@ -3170,6 +3170,196 @@ def api_orderbook():
         })
 
 # ============================================================
+# LIQUIDITY DEBUG / FIFO EVIDENCE
+# ============================================================
+
+@app.route("/api/liquidity-debug")
+def api_liquidity_debug():
+
+    symbol = (
+        request.args
+        .get(
+            "symbol",
+            "BTCUSDT"
+        )
+        .upper()
+    )
+
+    if symbol not in SYMBOLS:
+
+        return jsonify({
+            "status": "error",
+            "message": "Invalid symbol",
+        }), 400
+
+    try:
+
+        limit = int(
+            request.args.get(
+                "limit",
+                50
+            )
+        )
+
+    except ValueError:
+
+        limit = 50
+
+    limit = max(
+        1,
+        min(
+            limit,
+            200
+        )
+    )
+
+    with lock:
+
+        state = orderbook[symbol]
+
+        # Finalize reduction records whose
+        # 1500 ms execution-matching window expired.
+        finalized_count = finalize_liquidity_records(
+            symbol
+        )
+
+        history = list(
+            state["liquidity_history"]
+        )[-limit:]
+
+        def serialize_fifo(side):
+
+            result = []
+
+            for price, lots in state[
+                "liquidity_lots"
+            ][side].items():
+
+                for lot in lots:
+
+                    result.append({
+
+                        "price":
+                            float(price),
+
+                        "lot_id":
+                            lot.get(
+                                "lot_id"
+                            ),
+
+                        "original_qty":
+                            float(
+                                lot.get(
+                                    "original_qty",
+                                    0.0
+                                )
+                            ),
+
+                        "remaining_qty":
+                            float(
+                                lot.get(
+                                    "remaining_qty",
+                                    0.0
+                                )
+                            ),
+
+                        "time":
+                            lot.get(
+                                "time"
+                            ),
+
+                        "origin":
+                            lot.get(
+                                "origin"
+                            ),
+
+                        "update_id":
+                            lot.get(
+                                "update_id"
+                            ),
+
+                    })
+
+            return result
+
+        return jsonify({
+
+            "status":
+                "ok",
+
+            "symbol":
+                symbol,
+
+            "finalized_count":
+                finalized_count,
+
+            "orderbook": {
+
+                "synchronized":
+                    state["initialized"],
+
+                "resyncing":
+                    state["resyncing"],
+
+                "last_update_id":
+                    state["last_update_id"],
+
+                "last_depth_update_id":
+                    state["last_depth_update_id"],
+
+                "last_depth_event_time":
+                    state["last_depth_event_time"],
+
+                "sequence_errors":
+                    state["sequence_errors"],
+
+                "resync_count":
+                    state["resync_count"],
+
+                "bid_count":
+                    len(state["bids"]),
+
+                "ask_count":
+                    len(state["asks"]),
+
+            },
+
+            "fifo": {
+
+                "bid_lot_count":
+                    sum(
+                        len(lots)
+                        for lots in state[
+                            "liquidity_lots"
+                        ]["bid"].values()
+                    ),
+
+                "ask_lot_count":
+                    sum(
+                        len(lots)
+                        for lots in state[
+                            "liquidity_lots"
+                        ]["ask"].values()
+                    ),
+
+                "bids":
+                    serialize_fifo(
+                        "bid"
+                    ),
+
+                "asks":
+                    serialize_fifo(
+                        "ask"
+                    ),
+
+            },
+
+            "liquidity_history":
+                history,
+
+        })
+
+# ============================================================
 # CLOUD-BASED SPOOF & ABSORPTION DETECTOR
 # ============================================================
 
