@@ -1405,317 +1405,365 @@ def initialize_orderbook(symbol):
     use baseline / oldest observed liquidity maana jata hai.
 
     Recovery model:
-    - Bridge na mile to indefinitely wait nahi karna.
-    - Limited wait ke baad fresh snapshot lena.
-    - Sequence validation fail ho to fresh retry.
-    - Symbol ko permanently resyncing state me nahi chhodna.
+    - Ek initializer sirf ek synchronization attempt karega.
+    - Bridge na mile to bounded wait ke baad return karega.
+    - Fresh retry next depth event ke through trigger hoga.
+    - Collector disconnect hone par stale initializer exit karega.
+    - Same symbol ke liye uncontrolled retry/thread loop nahi hoga.
     """
 
     BRIDGE_WAIT_SECONDS = 10
     BRIDGE_CHECK_INTERVAL = 0.05
 
-    while True:
+    # ------------------------------------------------------------
+    # Collector connection check
+    # ------------------------------------------------------------
 
-        snapshot = fetch_orderbook_snapshot_ws(symbol)
-
-        if snapshot is None:
-
-            with lock:
-                state = orderbook[symbol]
-                state["resyncing"] = False
+    with lock:
+        if not collector_state.get("connected", False):
+            state = orderbook[symbol]
+            state["resyncing"] = False
 
             print(
-                f"[ORDERBOOK] Snapshot fetch failed for {symbol}; "
-                f"will retry on next depth event."
+                f"[ORDERBOOK] Initialization aborted for {symbol}; "
+                f"collector is not connected."
             )
 
             return False
 
-        snapshot_last_update_id = int(
-            snapshot["lastUpdateId"]
+    # ------------------------------------------------------------
+    # Fetch ONE fresh snapshot
+    # ------------------------------------------------------------
+
+    snapshot = fetch_orderbook_snapshot_ws(symbol)
+
+    if snapshot is None:
+
+        with lock:
+            state = orderbook[symbol]
+            state["initialized"] = False
+            state["resyncing"] = False
+
+        print(
+            f"[ORDERBOOK] Snapshot fetch failed for {symbol}; "
+            f"will retry on next depth event."
         )
 
-        snapshot_time = now_ms()
+        return False
 
-        snapshot_bids = {
-            str(price): float(quantity)
-            for price, quantity in snapshot.get("bids", [])
-            if float(quantity) > 0
-        }
+    snapshot_last_update_id = int(
+        snapshot["lastUpdateId"]
+    )
 
-        snapshot_asks = {
-            str(price): float(quantity)
-            for price, quantity in snapshot.get("asks", [])
-            if float(quantity) > 0
-        }
+    snapshot_time = now_ms()
 
-        bridge_wait_started = time.time()
+    snapshot_bids = {
+        str(price): float(quantity)
+        for price, quantity in snapshot.get("bids", [])
+        if float(quantity) > 0
+    }
 
-        while True:
+    snapshot_asks = {
+        str(price): float(quantity)
+        for price, quantity in snapshot.get("asks", [])
+        if float(quantity) > 0
+    }
 
-            retry_snapshot = False
-            sequence_failed = False
+    bridge_wait_started = time.time()
+
+    # ------------------------------------------------------------
+    # Wait for bridge event
+    # ------------------------------------------------------------
+
+    while True:
+
+        retry_snapshot = False
+        sequence_failed = False
+
+        with lock:
+
+            state = orderbook[symbol]
+
+            # ----------------------------------------------------
+            # Collector disconnect protection
+            # ----------------------------------------------------
+
+            if not collector_state.get("connected", False):
+
+                state["initialized"] = False
+                state["resyncing"] = False
+
+                print(
+                    f"[ORDERBOOK] Initialization stopped for {symbol}; "
+                    f"collector disconnected."
+                )
+
+                return False
+
+            # ----------------------------------------------------
+            # Remove events completely older than snapshot
+            # ----------------------------------------------------
+
+            while state["buffer"]:
+
+                oldest_event = state["buffer"][0]
+
+                if int(oldest_event["u"]) <= snapshot_last_update_id:
+                    state["buffer"].popleft()
+                else:
+                    break
+
+            # ----------------------------------------------------
+            # Find bridge event
+            # ----------------------------------------------------
+
+            bridge_index = None
+
+            for index, event in enumerate(state["buffer"]):
+
+                event_first_id = int(event["U"])
+                event_final_id = int(event["u"])
+
+                if (
+                    event_first_id
+                    <= snapshot_last_update_id + 1
+                    <= event_final_id
+                ):
+                    bridge_index = index
+                    break
+
+            # ----------------------------------------------------
+            # Bridge not available yet
+            # ----------------------------------------------------
+
+            if bridge_index is None:
+
+                while len(state["buffer"]) > 2000:
+                    state["buffer"].popleft()
+
+                if (
+                    time.time()
+                    - bridge_wait_started
+                    >= BRIDGE_WAIT_SECONDS
+                ):
+                    retry_snapshot = True
+
+            # ----------------------------------------------------
+            # Bridge found
+            # ----------------------------------------------------
+
+            else:
+
+                # ------------------------------------------------
+                # Load snapshot
+                # ------------------------------------------------
+
+                state["bids"] = snapshot_bids.copy()
+                state["asks"] = snapshot_asks.copy()
+
+                state["last_update_id"] = (
+                    snapshot_last_update_id
+                )
+
+                # =================================================
+                # RESET FIFO LEDGER
+                # =================================================
+
+                state["liquidity_lots"]["bid"].clear()
+                state["liquidity_lots"]["ask"].clear()
+
+                # =================================================
+                # SEED SNAPSHOT AS BASELINE LIQUIDITY
+                # =================================================
+
+                for price, quantity in snapshot_bids.items():
+
+                    state[
+                        "liquidity_lots"
+                    ][
+                        "bid"
+                    ][
+                        price
+                    ].append({
+                        "lot_id": str(uuid.uuid4()),
+                        "original_qty": float(quantity),
+                        "remaining_qty": float(quantity),
+                        "time": snapshot_time,
+                        "origin": "snapshot",
+                        "update_id": snapshot_last_update_id,
+                    })
+
+                for price, quantity in snapshot_asks.items():
+
+                    state[
+                        "liquidity_lots"
+                    ][
+                        "ask"
+                    ][
+                        price
+                    ].append({
+                        "lot_id": str(uuid.uuid4()),
+                        "original_qty": float(quantity),
+                        "remaining_qty": float(quantity),
+                        "time": snapshot_time,
+                        "origin": "snapshot",
+                        "update_id": snapshot_last_update_id,
+                    })
+
+                # ------------------------------------------------
+                # Apply buffered events from bridge onward
+                # ------------------------------------------------
+
+                buffered_events = list(
+                    state["buffer"]
+                )[bridge_index:]
+
+                previous_u = snapshot_last_update_id
+                valid = True
+
+                for event in buffered_events:
+
+                    event_first_id = int(event["U"])
+                    event_final_id = int(event["u"])
+
+                    if event_final_id <= snapshot_last_update_id:
+                        continue
+
+                    # --------------------------------------------
+                    # First event after snapshot
+                    # --------------------------------------------
+
+                    if previous_u == snapshot_last_update_id:
+
+                        if not (
+                            event_first_id
+                            <= snapshot_last_update_id + 1
+                            <= event_final_id
+                        ):
+                            valid = False
+                            break
+
+                    # --------------------------------------------
+                    # Subsequent events
+                    # --------------------------------------------
+
+                    else:
+
+                        event_previous_id = event.get("pu")
+
+                        if event_previous_id is None:
+                            valid = False
+                            break
+
+                        if int(event_previous_id) != previous_u:
+                            valid = False
+                            break
+
+                    apply_orderbook_event(
+                        symbol,
+                        event
+                    )
+
+                    previous_u = event_final_id
+
+                if not valid:
+
+                    state["sequence_errors"] += 1
+                    sequence_failed = True
+
+                else:
+
+                    # ------------------------------------------------
+                    # Synchronization complete
+                    # ------------------------------------------------
+
+                    state["buffer"].clear()
+
+                    state["initialized"] = True
+                    state["resyncing"] = False
+
+                    state["last_update_id"] = previous_u
+                    state["last_depth_update_id"] = previous_u
+                    state["last_depth_event_time"] = now_ms()
+
+                    print(
+                        f"[ORDERBOOK] SYNCED {symbol} "
+                        f"updateId={previous_u} "
+                        f"bids={len(state['bids'])} "
+                        f"asks={len(state['asks'])} "
+                        f"fifo_bids={len(state['liquidity_lots']['bid'])} "
+                        f"fifo_asks={len(state['liquidity_lots']['ask'])}"
+                    )
+
+                    return True
+
+        # --------------------------------------------------------
+        # Sequence validation failed
+        # --------------------------------------------------------
+
+        if sequence_failed:
+
+            print(
+                f"[ORDERBOOK] Sequence validation failed "
+                f"during initialization: {symbol}; "
+                f"will retry on next depth event."
+            )
 
             with lock:
 
                 state = orderbook[symbol]
 
-                # ------------------------------------------------
-                # Remove events completely older than snapshot.
-                # ------------------------------------------------
+                state["initialized"] = False
+                state["resyncing"] = False
 
-                while state["buffer"]:
+                state["last_update_id"] = None
+                state["last_depth_update_id"] = None
 
-                    oldest_event = state["buffer"][0]
+                state["bids"].clear()
+                state["asks"].clear()
 
-                    if int(oldest_event["u"]) <= snapshot_last_update_id:
-                        state["buffer"].popleft()
-                    else:
-                        break
+                state["liquidity_lots"]["bid"].clear()
+                state["liquidity_lots"]["ask"].clear()
 
-                # ------------------------------------------------
-                # Find bridge event.
-                # ------------------------------------------------
+                state["buffer"].clear()
 
-                bridge_index = None
+            return False
 
-                for index, event in enumerate(state["buffer"]):
+        # --------------------------------------------------------
+        # Bridge timeout
+        # --------------------------------------------------------
 
-                    event_first_id = int(event["U"])
-                    event_final_id = int(event["u"])
+        if retry_snapshot:
 
-                    if (
-                        event_first_id
-                        <= snapshot_last_update_id + 1
-                        <= event_final_id
-                    ):
-                        bridge_index = index
-                        break
-
-                # ------------------------------------------------
-                # Bridge not available yet.
-                # ------------------------------------------------
-
-                if bridge_index is None:
-
-                    # Buffer ko bounded rakho.
-                    while len(state["buffer"]) > 2000:
-                        state["buffer"].popleft()
-
-                    # ------------------------------------------------
-                    # IMPORTANT:
-                    # Agar bridge 10 seconds me nahi mila,
-                    # current snapshot stale/misaligned maana jayega.
-                    # Fresh snapshot se retry karo.
-                    # ------------------------------------------------
-
-                    if (
-                        time.time()
-                        - bridge_wait_started
-                        >= BRIDGE_WAIT_SECONDS
-                    ):
-                        retry_snapshot = True
-
-                else:
-
-                    # ------------------------------------------------
-                    # Load snapshot.
-                    # ------------------------------------------------
-
-                    state["bids"] = snapshot_bids.copy()
-                    state["asks"] = snapshot_asks.copy()
-
-                    state["last_update_id"] = (
-                        snapshot_last_update_id
-                    )
-
-                    # ====================================================
-                    # RESET FIFO LEDGER
-                    # ====================================================
-
-                    state["liquidity_lots"]["bid"].clear()
-                    state["liquidity_lots"]["ask"].clear()
-
-                    # ====================================================
-                    # SEED SNAPSHOT AS OLDEST / BASELINE LIQUIDITY
-                    # ====================================================
-
-                    for price, quantity in snapshot_bids.items():
-
-                        state[
-                            "liquidity_lots"
-                        ][
-                            "bid"
-                        ][
-                            price
-                        ].append({
-                            "lot_id": str(uuid.uuid4()),
-                            "original_qty": float(quantity),
-                            "remaining_qty": float(quantity),
-                            "time": snapshot_time,
-                            "origin": "snapshot",
-                            "update_id": snapshot_last_update_id,
-                        })
-
-                    for price, quantity in snapshot_asks.items():
-
-                        state[
-                            "liquidity_lots"
-                        ][
-                            "ask"
-                        ][
-                            price
-                        ].append({
-                            "lot_id": str(uuid.uuid4()),
-                            "original_qty": float(quantity),
-                            "remaining_qty": float(quantity),
-                            "time": snapshot_time,
-                            "origin": "snapshot",
-                            "update_id": snapshot_last_update_id,
-                        })
-
-                    # ------------------------------------------------
-                    # Apply buffered events from bridge onward.
-                    # ------------------------------------------------
-
-                    buffered_events = list(
-                        state["buffer"]
-                    )[bridge_index:]
-
-                    previous_u = snapshot_last_update_id
-                    valid = True
-
-                    for event in buffered_events:
-
-                        event_first_id = int(event["U"])
-                        event_final_id = int(event["u"])
-
-                        if event_final_id <= snapshot_last_update_id:
-                            continue
-
-                        # --------------------------------------------
-                        # First event after snapshot.
-                        # --------------------------------------------
-
-                        if previous_u == snapshot_last_update_id:
-
-                            if not (
-                                event_first_id
-                                <= snapshot_last_update_id + 1
-                                <= event_final_id
-                            ):
-                                valid = False
-                                break
-
-                        # --------------------------------------------
-                        # Subsequent events.
-                        # --------------------------------------------
-
-                        else:
-
-                            event_previous_id = event.get("pu")
-
-                            if event_previous_id is None:
-                                valid = False
-                                break
-
-                            if int(event_previous_id) != previous_u:
-                                valid = False
-                                break
-
-                        apply_orderbook_event(
-                            symbol,
-                            event
-                        )
-
-                        previous_u = event_final_id
-
-                    if not valid:
-
-                        state["sequence_errors"] += 1
-
-                        sequence_failed = True
-
-                    else:
-
-                        # ------------------------------------------------
-                        # Synchronization complete.
-                        # ------------------------------------------------
-
-                        state["buffer"].clear()
-
-                        state["initialized"] = True
-                        state["resyncing"] = False
-
-                        state["last_update_id"] = previous_u
-                        state["last_depth_update_id"] = previous_u
-                        state["last_depth_event_time"] = now_ms()
-
-                        print(
-                            f"[ORDERBOOK] SYNCED {symbol} "
-                            f"updateId={previous_u} "
-                            f"bids={len(state['bids'])} "
-                            f"asks={len(state['asks'])} "
-                            f"fifo_bids={len(state['liquidity_lots']['bid'])} "
-                            f"fifo_asks={len(state['liquidity_lots']['ask'])}"
-                        )
-
-                        return True
-
-            # ----------------------------------------------------
-            # Sequence validation failed.
-            # Fresh snapshot required.
-            # ----------------------------------------------------
-
-            if sequence_failed:
-
-                print(
-                    f"[ORDERBOOK] Sequence validation failed "
-                    f"during initialization: {symbol}; "
-                    f"retrying with fresh snapshot."
-                )
-
-                with lock:
-                    state = orderbook[symbol]
-                    state["initialized"] = False
-                    state["last_update_id"] = None
-                    state["last_depth_update_id"] = None
-                    state["bids"].clear()
-                    state["asks"].clear()
-                    state["liquidity_lots"]["bid"].clear()
-                    state["liquidity_lots"]["ask"].clear()
-                    state["buffer"].clear()
-
-                break
-
-            # ----------------------------------------------------
-            # Bridge timeout.
-            # Fresh snapshot required.
-            # ----------------------------------------------------
-
-            if retry_snapshot:
-
-                print(
-                    f"[ORDERBOOK] Bridge timeout for {symbol}; "
-                    f"retrying with fresh snapshot."
-                )
-
-                with lock:
-                    state = orderbook[symbol]
-                    state["initialized"] = False
-                    state["last_update_id"] = None
-                    state["last_depth_update_id"] = None
-                    state["bids"].clear()
-                    state["asks"].clear()
-                    state["liquidity_lots"]["bid"].clear()
-                    state["liquidity_lots"]["ask"].clear()
-                    state["buffer"].clear()
-
-                break
-
-            time.sleep(
-                BRIDGE_CHECK_INTERVAL
+            print(
+                f"[ORDERBOOK] Bridge timeout for {symbol}; "
+                f"stopping current initialization attempt."
             )
+
+            with lock:
+
+                state = orderbook[symbol]
+
+                state["initialized"] = False
+                state["resyncing"] = False
+
+                state["last_update_id"] = None
+                state["last_depth_update_id"] = None
+
+                state["bids"].clear()
+                state["asks"].clear()
+
+                state["liquidity_lots"]["bid"].clear()
+                state["liquidity_lots"]["ask"].clear()
+
+                state["buffer"].clear()
+
+            return False
+
+        time.sleep(
+            BRIDGE_CHECK_INTERVAL
+        )
+
 
 def request_orderbook_resync(symbol):
 
