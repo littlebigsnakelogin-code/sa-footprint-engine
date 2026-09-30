@@ -847,167 +847,186 @@ def record_trade_for_execution_matching(
 
 def match_trade_to_liquidity_reduction(
     symbol,
-    reduction,
-    trade_time=None
+    side,
+    price,
+    reduced_qty,
+    reduction_time,
 ):
     """
-    Match aggressive trades against a liquidity reduction.
+    Existing aggressive trades ko newly observed liquidity reduction
+    ke saath match karta hai.
 
-    The trade/depth streams are independent, so exchange timestamps
-    can have a small observation skew. We therefore allow a bounded
-    asymmetric window:
+    Caller compatibility:
+        symbol
+        side
+        price
+        reduced_qty
+        reduction_time
 
-        trade <= 300ms before reduction
-        trade <= 1500ms after reduction
+    Matching rules:
+        BID reduction -> aggressive SELL -> is_buyer_maker=True
+        ASK reduction -> aggressive BUY  -> is_buyer_maker=False
 
-    A trade must also:
-        - be for the same symbol
-        - be at the same price level
-        - have the correct aggressive side
+    Timing:
+        Trade maximum 300 ms reduction se pehle ho sakta hai.
+        Trade maximum 1500 ms reduction ke baad ho sakta hai.
 
-    BID reduction -> aggressive SELL execution
-    ASK reduction -> aggressive BUY execution
+    IMPORTANT:
+        Binance timestamps milliseconds mein hain.
     """
 
-    if not reduction:
+    if symbol not in orderbook:
         return 0.0
 
-    reduction_time = reduction.get("time")
-
-    if reduction_time is None:
+    try:
+        price = float(price)
+        reduced_qty = float(reduced_qty)
+        reduction_time = int(reduction_time)
+    except (TypeError, ValueError):
         return 0.0
 
-    reduction_side = reduction.get("side")
-    reduction_price = float(reduction.get("price", 0.0))
-
-    if reduction_side not in ("bid", "ask"):
+    if side not in ("bid", "ask"):
         return 0.0
 
-    if reduction_price <= 0:
+    if price <= 0.0 or reduced_qty <= 0.0:
         return 0.0
 
-    if trade_time is None:
-        trade_time = reduction_time
+    # ------------------------------------------------------------
+    # AGGRESSIVE SIDE
+    #
+    # Bid liquidity reduction:
+    #   aggressive seller hits bid
+    #
+    # Ask liquidity reduction:
+    #   aggressive buyer hits ask
+    # ------------------------------------------------------------
+
+    expected_is_buyer_maker = (
+        True if side == "bid" else False
+    )
+
+    # ------------------------------------------------------------
+    # ASYMMETRIC TIMING WINDOW
+    #
+    # Exchange streams independent hain, isliye observed depth
+    # reduction aur trade timestamp mein small skew possible hai.
+    #
+    # Lekin bahut purana trade reduction ko explain nahi karega.
+    # ------------------------------------------------------------
 
     MAX_TRADE_BEFORE_REDUCTION_MS = 300
     MAX_TRADE_AFTER_REDUCTION_MS = 1500
 
     earliest_allowed = (
         reduction_time
-        - MAX_TRADE_BEFORE_REDUCTION_MS / 1000.0
+        - MAX_TRADE_BEFORE_REDUCTION_MS
     )
 
     latest_allowed = (
         reduction_time
-        + MAX_TRADE_AFTER_REDUCTION_MS / 1000.0
+        + MAX_TRADE_AFTER_REDUCTION_MS
     )
 
-    expected_trade_side = (
-        "sell" if reduction_side == "bid" else "buy"
-    )
-
-    remaining_reduction = max(
-        float(reduction.get("reduced_qty", 0.0))
-        - float(reduction.get("executed_qty", 0.0)),
-        0.0
-    )
-
-    if remaining_reduction <= 0:
-        return 0.0
-
+    remaining_reduction = reduced_qty
     matched_qty = 0.0
 
+    state = orderbook[symbol]
+
+    # ------------------------------------------------------------
+    # RECENT TRADES SCAN
+    # ------------------------------------------------------------
+
     for trade in list(
-        orderbook[symbol]["trade_history"]
+        state["trade_history"]
     ):
-        if remaining_reduction <= 0:
+
+        if remaining_reduction <= 0.0:
             break
 
-        if trade.get("symbol") != symbol:
+        trade_time = trade.get("time")
+
+        if trade_time is None:
             continue
 
-        if trade.get("remaining_qty", 0.0) <= 0:
+        trade_time = int(trade_time)
+
+        # --------------------------------------------------------
+        # TIME FILTER
+        # --------------------------------------------------------
+
+        if trade_time < earliest_allowed:
             continue
 
-        trade_side = trade.get("side")
-
-        if trade_side != expected_trade_side:
+        if trade_time > latest_allowed:
             continue
 
-        trade_price = float(
-            trade.get("price", 0.0)
-        )
+        # --------------------------------------------------------
+        # SIDE FILTER
+        # --------------------------------------------------------
 
-        if abs(trade_price - reduction_price) > 1e-6:
+        if bool(
+            trade.get("is_buyer_maker", False)
+        ) != expected_is_buyer_maker:
             continue
 
-        current_trade_time = trade.get("time")
+        # --------------------------------------------------------
+        # PRICE FILTER
+        # --------------------------------------------------------
 
-        if current_trade_time is None:
+        try:
+            trade_price = float(
+                trade.get("price", 0.0)
+            )
+        except (TypeError, ValueError):
             continue
 
-        # Trade/depth streams are independent.
-        # Allow a small amount of timestamp skew before
-        # the observed depth reduction, but reject trades
-        # that are too old or too far in the future.
-        if current_trade_time < earliest_allowed:
+        if abs(
+            trade_price - price
+        ) > 1e-6:
             continue
 
-        if current_trade_time > latest_allowed:
+        # --------------------------------------------------------
+        # REMAINING TRADE QUANTITY
+        # --------------------------------------------------------
+
+        try:
+            available_trade_qty = float(
+                trade.get(
+                    "remaining_qty",
+                    0.0
+                )
+            )
+        except (TypeError, ValueError):
             continue
 
-        available_trade_qty = float(
-            trade.get("remaining_qty", 0.0)
-        )
-
-        if available_trade_qty <= 0:
+        if available_trade_qty <= 0.0:
             continue
+
+        # --------------------------------------------------------
+        # MATCH QUANTITY
+        # --------------------------------------------------------
 
         execution_qty = min(
             available_trade_qty,
-            remaining_reduction
+            remaining_reduction,
         )
 
-        if execution_qty <= 0:
+        if execution_qty <= 0.0:
             continue
 
-        trade["remaining_qty"] = (
-            available_trade_qty - execution_qty
-        )
+        # --------------------------------------------------------
+        # CONSUME TRADE
+        # --------------------------------------------------------
 
-        reduction["executed_qty"] = (
-            float(reduction.get("executed_qty", 0.0))
-            + execution_qty
+        trade["remaining_qty"] = max(
+            available_trade_qty
+            - execution_qty,
+            0.0
         )
 
         matched_qty += execution_qty
+
         remaining_reduction -= execution_qty
-
-        reduction.setdefault(
-            "matched_trades",
-            []
-        ).append({
-            "trade_id": trade.get("trade_id"),
-            "time": current_trade_time,
-            "price": trade_price,
-            "side": trade_side,
-            "qty": execution_qty
-        })
-
-        reduction.setdefault(
-            "match_diagnostics",
-            []
-        ).append({
-            "trade_id": trade.get("trade_id"),
-            "trade_time": current_trade_time,
-            "reduction_time": reduction_time,
-            "time_difference_ms": (
-                current_trade_time - reduction_time
-            ) * 1000.0,
-            "price": trade_price,
-            "execution_qty": execution_qty,
-            "side": trade_side
-        })
 
     return matched_qty
 
