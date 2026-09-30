@@ -847,207 +847,169 @@ def record_trade_for_execution_matching(
 
 def match_trade_to_liquidity_reduction(
     symbol,
-    side,
-    price,
-    reduction_qty,
-    reduction_time,
+    reduction,
+    trade_time=None
 ):
     """
-    Match orderbook liquidity reduction against recent aggressive trades.
+    Match aggressive trades against a liquidity reduction.
 
-    Diagnostic version:
-    Matching logic unchanged.
-    Har rejection ka reason record karta hai taaki pata chale
-    trade kahan reject ho raha hai.
+    The trade/depth streams are independent, so exchange timestamps
+    can have a small observation skew. We therefore allow a bounded
+    asymmetric window:
 
-    Bid reduction  -> aggressive SELL
-    Ask reduction  -> aggressive BUY
+        trade <= 300ms before reduction
+        trade <= 1500ms after reduction
 
-    Matching:
-        - correct aggressive side
-        - same price with float tolerance
-        - within 1500 ms
-        - FIFO trade_history order
+    A trade must also:
+        - be for the same symbol
+        - be at the same price level
+        - have the correct aggressive side
+
+    BID reduction -> aggressive SELL execution
+    ASK reduction -> aggressive BUY execution
     """
 
-    state = orderbook[symbol]
-
-    if reduction_qty <= 0:
+    if not reduction:
         return 0.0
 
-    executed_qty = 0.0
+    reduction_time = reduction.get("time")
 
-    expected_is_buyer_maker = (
-        True if side == "bid" else False
+    if reduction_time is None:
+        return 0.0
+
+    reduction_side = reduction.get("side")
+    reduction_price = float(reduction.get("price", 0.0))
+
+    if reduction_side not in ("bid", "ask"):
+        return 0.0
+
+    if reduction_price <= 0:
+        return 0.0
+
+    if trade_time is None:
+        trade_time = reduction_time
+
+    MAX_TRADE_BEFORE_REDUCTION_MS = 300
+    MAX_TRADE_AFTER_REDUCTION_MS = 1500
+
+    earliest_allowed = (
+        reduction_time
+        - MAX_TRADE_BEFORE_REDUCTION_MS / 1000.0
     )
 
-    reduction_time = int(reduction_time)
-    reduction_price = float(price)
+    latest_allowed = (
+        reduction_time
+        + MAX_TRADE_AFTER_REDUCTION_MS / 1000.0
+    )
 
-    diagnostic = {
-        "symbol": symbol,
-        "side": side,
-        "price": reduction_price,
-        "reduction_qty": float(reduction_qty),
-        "reduction_time": reduction_time,
-        "expected_is_buyer_maker": expected_is_buyer_maker,
-        "trade_count": 0,
-        "skipped_no_remaining": 0,
-        "skipped_side": 0,
-        "skipped_price": 0,
-        "skipped_time": 0,
-        "matched_trade_count": 0,
-        "matched_qty": 0.0,
-        "samples": [],
-    }
+    expected_trade_side = (
+        "sell" if reduction_side == "bid" else "buy"
+    )
 
-    for trade in state["trade_history"]:
+    remaining_reduction = max(
+        float(reduction.get("reduced_qty", 0.0))
+        - float(reduction.get("executed_qty", 0.0)),
+        0.0
+    )
 
-        diagnostic["trade_count"] += 1
+    if remaining_reduction <= 0:
+        return 0.0
 
-        if executed_qty >= reduction_qty:
+    matched_qty = 0.0
+
+    for trade in list(
+        orderbook[symbol]["trade_history"]
+    ):
+        if remaining_reduction <= 0:
             break
 
-        remaining_qty = float(
-            trade.get("remaining_qty", 0.0)
-        )
-
-        if remaining_qty <= 0:
-            diagnostic[
-                "skipped_no_remaining"
-            ] += 1
+        if trade.get("symbol") != symbol:
             continue
 
-        if (
-            bool(trade.get("is_buyer_maker"))
-            != expected_is_buyer_maker
-        ):
-            diagnostic[
-                "skipped_side"
-            ] += 1
+        if trade.get("remaining_qty", 0.0) <= 0:
+            continue
 
-            if len(diagnostic["samples"]) < 5:
-                diagnostic["samples"].append({
-                    "reason": "side",
-                    "trade_time": int(
-                        trade.get("time", 0)
-                    ),
-                    "trade_price": float(
-                        trade.get("price", 0.0)
-                    ),
-                    "trade_qty": remaining_qty,
-                    "is_buyer_maker": bool(
-                        trade.get(
-                            "is_buyer_maker"
-                        )
-                    ),
-                })
+        trade_side = trade.get("side")
 
+        if trade_side != expected_trade_side:
             continue
 
         trade_price = float(
             trade.get("price", 0.0)
         )
 
-        price_difference = abs(
-            trade_price - reduction_price
-        )
-
-        if price_difference > 1e-6:
-
-            diagnostic[
-                "skipped_price"
-            ] += 1
-
-            if len(diagnostic["samples"]) < 5:
-                diagnostic["samples"].append({
-                    "reason": "price",
-                    "trade_time": int(
-                        trade.get("time", 0)
-                    ),
-                    "trade_price": trade_price,
-                    "reduction_price": reduction_price,
-                    "price_difference": price_difference,
-                    "trade_qty": remaining_qty,
-                })
-
+        if abs(trade_price - reduction_price) > 1e-6:
             continue
 
-        trade_time = int(
-            trade.get("time", 0)
-        )
+        current_trade_time = trade.get("time")
 
-        time_difference = abs(
-            reduction_time - trade_time
-        )
-
-        if time_difference > 1500:
-
-            diagnostic[
-                "skipped_time"
-            ] += 1
-
-            if len(diagnostic["samples"]) < 5:
-                diagnostic["samples"].append({
-                    "reason": "time",
-                    "trade_time": trade_time,
-                    "reduction_time": reduction_time,
-                    "time_difference_ms": time_difference,
-                    "trade_price": trade_price,
-                    "trade_qty": remaining_qty,
-                })
-
+        if current_trade_time is None:
             continue
 
-        available_qty = remaining_qty
-
-        needed_qty = (
-            reduction_qty
-            - executed_qty
-        )
-
-        matched_qty = min(
-            available_qty,
-            needed_qty
-        )
-
-        if matched_qty <= 0:
+        # Trade/depth streams are independent.
+        # Allow a small amount of timestamp skew before
+        # the observed depth reduction, but reject trades
+        # that are too old or too far in the future.
+        if current_trade_time < earliest_allowed:
             continue
 
-        trade["remaining_qty"] = max(
-            0.0,
-            available_qty - matched_qty
+        if current_trade_time > latest_allowed:
+            continue
+
+        available_trade_qty = float(
+            trade.get("remaining_qty", 0.0)
         )
 
-        executed_qty += matched_qty
+        if available_trade_qty <= 0:
+            continue
 
-        diagnostic[
-            "matched_trade_count"
-        ] += 1
+        execution_qty = min(
+            available_trade_qty,
+            remaining_reduction
+        )
 
-        diagnostic[
-            "matched_qty"
-        ] += matched_qty
+        if execution_qty <= 0:
+            continue
 
-    diagnostic[
-        "final_executed_qty"
-    ] = executed_qty
+        trade["remaining_qty"] = (
+            available_trade_qty - execution_qty
+        )
 
-    diagnostic[
-        "final_unmatched_qty"
-    ] = max(
-        reduction_qty - executed_qty,
-        0.0
-    )
+        reduction["executed_qty"] = (
+            float(reduction.get("executed_qty", 0.0))
+            + execution_qty
+        )
 
-    state.setdefault(
-        "match_diagnostics",
-        deque(maxlen=200)
-    ).append(
-        diagnostic
-    )
+        matched_qty += execution_qty
+        remaining_reduction -= execution_qty
 
-    return executed_qty
+        reduction.setdefault(
+            "matched_trades",
+            []
+        ).append({
+            "trade_id": trade.get("trade_id"),
+            "time": current_trade_time,
+            "price": trade_price,
+            "side": trade_side,
+            "qty": execution_qty
+        })
+
+        reduction.setdefault(
+            "match_diagnostics",
+            []
+        ).append({
+            "trade_id": trade.get("trade_id"),
+            "trade_time": current_trade_time,
+            "reduction_time": reduction_time,
+            "time_difference_ms": (
+                current_trade_time - reduction_time
+            ) * 1000.0,
+            "price": trade_price,
+            "execution_qty": execution_qty,
+            "side": trade_side
+        })
+
+    return matched_qty
 
 
 def apply_orderbook_event(symbol, event):
