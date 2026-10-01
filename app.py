@@ -3783,7 +3783,6 @@ def api_liquidity_debug():
                 match_diagnostics,
 
         })
-```
 
 
 @app.route("/api/scan")
