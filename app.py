@@ -3580,6 +3580,7 @@ def api_orderbook():
 # LIQUIDITY DEBUG / FIFO EVIDENCE
 # ============================================================
 
+
 @app.route("/api/liquidity-debug")
 def api_liquidity_debug():
 
@@ -3616,7 +3617,7 @@ def api_liquidity_debug():
         1,
         min(
             limit,
-            200
+            100
         )
     )
 
@@ -3630,71 +3631,98 @@ def api_liquidity_debug():
             symbol
         )
 
-        history = list(
+        raw_history = list(
             state["liquidity_history"]
         )[-limit:]
 
-        match_diagnostics = list(
+        raw_diagnostics = list(
             state.get(
                 "match_diagnostics",
                 []
             )
-        )[-20:]
+        )[-10:]
 
-        def serialize_fifo(side):
+        def compact_record(record):
 
-            result = []
+            if not isinstance(
+                record,
+                dict
+            ):
+                return record
 
-            for price, lots in state[
+            allowed_keys = (
+                "event",
+                "event_type",
+                "type",
+                "status",
+                "symbol",
+                "side",
+                "price",
+                "time",
+                "timestamp",
+                "created_at",
+                "updated_at",
+                "original_qty",
+                "initial_qty",
+                "reduced_qty",
+                "executed_qty",
+                "remaining_qty",
+                "pulled_qty",
+                "unmatched_qty",
+                "pull_pct",
+                "distance_pct",
+                "distance",
+                "reason",
+                "lot_id",
+                "update_id",
+            )
+
+            compact = {}
+
+            for key in allowed_keys:
+
+                if key not in record:
+                    continue
+
+                value = record[key]
+
+                if isinstance(
+                    value,
+                    (int, float)
+                ):
+                    compact[key] = value
+
+                elif isinstance(
+                    value,
+                    (str, bool)
+                ) or value is None:
+                    compact[key] = value
+
+            return compact
+
+        history = [
+            compact_record(record)
+            for record in raw_history
+        ]
+
+        match_diagnostics = [
+            compact_record(record)
+            for record in raw_diagnostics
+        ]
+
+        bid_lot_count = sum(
+            len(lots)
+            for lots in state[
                 "liquidity_lots"
-            ][side].items():
+            ]["bid"].values()
+        )
 
-                for lot in lots:
-
-                    result.append({
-
-                        "price":
-                            float(price),
-
-                        "lot_id":
-                            lot.get(
-                                "lot_id"
-                            ),
-
-                        "original_qty":
-                            float(
-                                lot.get(
-                                    "original_qty",
-                                    0.0
-                                )
-                            ),
-
-                        "remaining_qty":
-                            float(
-                                lot.get(
-                                    "remaining_qty",
-                                    0.0
-                                )
-                            ),
-
-                        "time":
-                            lot.get(
-                                "time"
-                            ),
-
-                        "origin":
-                            lot.get(
-                                "origin"
-                            ),
-
-                        "update_id":
-                            lot.get(
-                                "update_id"
-                            ),
-
-                    })
-
-            return result
+        ask_lot_count = sum(
+            len(lots)
+            for lots in state[
+                "liquidity_lots"
+            ]["ask"].values()
+        )
 
         return jsonify({
 
@@ -3741,30 +3769,10 @@ def api_liquidity_debug():
             "fifo": {
 
                 "bid_lot_count":
-                    sum(
-                        len(lots)
-                        for lots in state[
-                            "liquidity_lots"
-                        ]["bid"].values()
-                    ),
+                    bid_lot_count,
 
                 "ask_lot_count":
-                    sum(
-                        len(lots)
-                        for lots in state[
-                            "liquidity_lots"
-                        ]["ask"].values()
-                    ),
-
-                "bids":
-                    serialize_fifo(
-                        "bid"
-                    ),
-
-                "asks":
-                    serialize_fifo(
-                        "ask"
-                    ),
+                    ask_lot_count,
 
             },
 
@@ -3775,14 +3783,8 @@ def api_liquidity_debug():
                 match_diagnostics,
 
         })
+```
 
-# ============================================================
-# CLOUD-BASED SPOOF & ABSORPTION DETECTOR
-# ============================================================
-
-previous_cluster_state = {
-    sym: {"bids": {}, "asks": {}} for sym in SYMBOLS
-}
 
 @app.route("/api/scan")
 def api_scan():
