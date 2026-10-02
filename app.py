@@ -2,6 +2,7 @@ import encodings.idna
 
 import json
 import os
+import queue
 import threading
 import time
 import uuid
@@ -21,6 +22,14 @@ TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
 if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
     print("[TURSO] Environment variables missing")
+
+# ============================================================
+# TURSO BACKGROUND WORKER
+# ============================================================
+turso_write_queue = queue.Queue()
+turso_worker_started = False
+turso_worker_lock = threading.Lock()
+turso_client = None
 
 last_turso_cleanup = 0
 
@@ -2497,31 +2506,50 @@ def finalize_candle(candle):
 # ============================================================
 
 def save_candle_to_turso(candle):
-    if not TURSO_DATABASE_URL:
+    if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return
 
     try:
-        footprint_json = json.dumps(candle.get("footprint", []), separators=(",", ":"))
+        footprint_json = json.dumps(
+            candle.get("footprint", []),
+            separators=(",", ":")
+        )
+
         sql = """
         INSERT OR REPLACE INTO candles (
             symbol, tf, time, open, high, low, close, delta, totalVol,
             buyVol, sellVol, trades, poc, pocVol, vah, val, valueAreaVol, footprint
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+
         args = (
-            candle["symbol"], candle["timeframe"], candle["start"], candle["open"],
-            candle["high"], candle["low"], candle["close"], candle["delta"],
-            candle["volume"], candle["buy_volume"], candle["sell_volume"],
-            candle["trades"], candle.get("poc"), candle.get("poc_volume"),
-            candle.get("vah"), candle.get("val"), candle.get("value_area_volume"),
+            candle["symbol"],
+            candle["timeframe"],
+            candle["start"],
+            candle["open"],
+            candle["high"],
+            candle["low"],
+            candle["close"],
+            candle["delta"],
+            candle["volume"],
+            candle["buy_volume"],
+            candle["sell_volume"],
+            candle["trades"],
+            candle.get("poc"),
+            candle.get("poc_volume"),
+            candle.get("vah"),
+            candle.get("val"),
+            candle.get("value_area_volume"),
             footprint_json
         )
 
-        with create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as client:
-            client.execute(sql, args)
+        turso_write_queue.put({
+            "sql": sql,
+            "args": args
+        })
 
     except Exception as e:
-        print(f"[TURSO] Candle save failed: {e}")
+        print(f"[TURSO] Candle queue failed: {e}")
 
 # ============================================================
 # TURSO CLEANUP
