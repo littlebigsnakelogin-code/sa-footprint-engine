@@ -2551,29 +2551,148 @@ def save_candle_to_turso(candle):
     except Exception as e:
         print(f"[TURSO] Candle queue failed: {e}")
 
+
+def _write_candle_to_turso(sql, args):
+    global turso_client
+
+    try:
+        if turso_client is None:
+            turso_client = create_client_sync(
+                TURSO_DATABASE_URL,
+                auth_token=TURSO_AUTH_TOKEN
+            )
+
+        turso_client.execute(sql, args)
+        return True
+
+    except Exception as e:
+        print(f"[TURSO] Background candle write failed: {e}")
+
+        try:
+            if turso_client is not None:
+                turso_client.close()
+        except Exception:
+            pass
+
+        turso_client = None
+        return False
+
+
+def _run_turso_cleanup():
+    global turso_client
+
+    try:
+        if turso_client is None:
+            turso_client = create_client_sync(
+                TURSO_DATABASE_URL,
+                auth_token=TURSO_AUTH_TOKEN
+            )
+
+        cutoff = int(time.time() * 1000) - (3 * 24 * 60 * 60 * 1000)
+
+        turso_client.execute(
+            "DELETE FROM candles WHERE time < ?",
+            (cutoff,)
+        )
+
+        print("[TURSO] Cleanup completed")
+
+    except Exception as e:
+        print(f"[TURSO] Cleanup failed: {e}")
+
+        try:
+            if turso_client is not None:
+                turso_client.close()
+        except Exception:
+            pass
+
+        turso_client = None
+
+
+def _turso_worker_loop():
+    print("[TURSO] Background worker started")
+
+    while True:
+        job = None
+
+        try:
+            job = turso_write_queue.get()
+
+            if job is None:
+                turso_write_queue.task_done()
+                break
+
+            if job.get("cleanup"):
+                _run_turso_cleanup()
+            else:
+                _write_candle_to_turso(
+                    job["sql"],
+                    job["args"]
+                )
+
+        except Exception as e:
+            print(f"[TURSO] Worker error: {e}")
+
+        finally:
+            if job is not None:
+                try:
+                    turso_write_queue.task_done()
+                except Exception:
+                    pass
+
+def ensure_turso_worker_started():
+    global turso_worker_started
+
+    if turso_worker_started:
+        return
+
+    with turso_worker_lock:
+        if turso_worker_started:
+            return
+
+        worker = threading.Thread(
+            target=_turso_worker_loop,
+            name="turso-worker",
+            daemon=True
+        )
+
+        worker.start()
+        turso_worker_started = True
+
+        print("[TURSO] Background worker initialized")
+
+
 # ============================================================
 # TURSO CLEANUP
 # ============================================================
 
 def cleanup_old_turso_candles():
-    if not TURSO_DATABASE_URL:
+    global last_turso_cleanup
+
+    if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return
 
+    current_time = time.time()
+
+    # Cleanup maximum once every 5 minutes
+    if current_time - last_turso_cleanup < 300:
+        return
+
+    last_turso_cleanup = current_time
+
     try:
-        cutoff = int((time.time() - ROLLING_SECONDS) * 1000)
-        with create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as client:
-            client.execute("DELETE FROM candles WHERE time < ?", (cutoff,))
-        print("[TURSO] Old candles cleaned")
+        turso_write_queue.put({
+            "cleanup": True
+        })
+
     except Exception as e:
-        print(f"[TURSO] Cleanup failed: {e}")
+        print(f"[TURSO] Cleanup queue failed: {e}")
 
 # ============================================================
 # STORE FINISHED CANDLE
 # ============================================================
 
 def store_finished_candle(candle):
-
-    global last_turso_cleanup
 
     if candle is None:
         return
@@ -2617,8 +2736,10 @@ def store_finished_candle(candle):
             ][timeframe].popleft()
 
     # --------------------------------------------------------
-    # TURSO SAVE
+    # TURSO BACKGROUND SAVE
     # --------------------------------------------------------
+
+    ensure_turso_worker_started()
 
     save_candle_to_turso(
         finished
@@ -2629,17 +2750,9 @@ def store_finished_candle(candle):
     # Maximum once every 5 minutes
     # --------------------------------------------------------
 
-    now = time.time()
+    cleanup_old_turso_candles()
 
-    if (
-        now - last_turso_cleanup
-        >= 300
-    ):
-
-        cleanup_old_turso_candles()
-
-        last_turso_cleanup = now
-        # ============================================================
+# ============================================================
 # PROCESS TRADE
 # ============================================================
 
