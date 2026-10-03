@@ -721,25 +721,12 @@ def record_trade_for_execution_matching(
     """
     Recent aggressive trade ko execution matching ke liye store karta hai.
 
-    is_buyer_maker:
+    Matching performance optimization:
+        trade_index[(side, price)] -> recent trade records
+
+    Accounting semantics unchanged:
         True  -> aggressive SELL -> bid consume
         False -> aggressive BUY  -> ask consume
-
-    Trade ko:
-    1. expired liquidity reductions finalize karne ke baad
-       trade_history mein store karta hai
-    2. already recorded pending liquidity reductions ke saath match
-       karta hai
-    3. later-arriving execution ko FIFO consumption records mein
-       correctly attribute karta hai
-
-    Event orders:
-
-        depth reduction -> trade
-        trade -> depth reduction
-
-    Matching window:
-        1500 ms
     """
 
     state = orderbook[symbol]
@@ -758,7 +745,7 @@ def record_trade_for_execution_matching(
     )
 
     # ========================================================
-    # STORE TRADE
+    # TRADE RECORD
     # ========================================================
 
     trade_record = {
@@ -774,55 +761,157 @@ def record_trade_for_execution_matching(
     )
 
     # ========================================================
-    # MATCH TRADE AGAINST ALREADY RECORDED REDUCTIONS
+    # TRADE INDEX
+    #
+    # Key:
+    #     (aggressive side, normalized price)
+    #
+    # True  -> bid
+    # False -> ask
     # ========================================================
+
+    trade_index = state.setdefault(
+        "trade_match_index",
+        defaultdict(deque)
+    )
 
     expected_side = (
         "bid" if is_buyer_maker else "ask"
     )
 
-    for liquidity in state["liquidity_history"]:
+    price_key = round(
+        price,
+        12
+    )
+
+    trade_index[
+        (
+            expected_side,
+            price_key
+        )
+    ].append(
+        trade_record
+    )
+
+    # ========================================================
+    # MATCH TRADE AGAINST ALREADY RECORDED REDUCTIONS
+    #
+    # IMPORTANT:
+    # Ab poori liquidity_history scan nahi hogi.
+    # Sirf same side + same price ke reduction records dekhenge.
+    # ========================================================
+
+    liquidity_index = state.get(
+        "liquidity_match_index"
+    )
+
+    if liquidity_index is None:
+        liquidity_index = defaultdict(deque)
+
+        # Existing history ko sirf index initialize karne ke
+        # liye ek baar process karo.
+        for liquidity in state["liquidity_history"]:
+
+            if liquidity.get(
+                "finalized",
+                False
+            ):
+                continue
+
+            if float(
+                liquidity.get(
+                    "reduced_qty",
+                    0.0
+                )
+            ) <= 0.0:
+                continue
+
+            liquidity_side = liquidity.get(
+                "side"
+            )
+
+            if liquidity_side not in (
+                "bid",
+                "ask"
+            ):
+                continue
+
+            liquidity_price = round(
+                float(
+                    liquidity.get(
+                        "price",
+                        0.0
+                    )
+                ),
+                12
+            )
+
+            liquidity_index[
+                (
+                    liquidity_side,
+                    liquidity_price
+                )
+            ].append(
+                liquidity
+            )
+
+        state[
+            "liquidity_match_index"
+        ] = liquidity_index
+
+    matching_records = liquidity_index.get(
+        (
+            expected_side,
+            price_key
+        ),
+        ()
+    )
+
+    # ========================================================
+    # MATCH
+    # ========================================================
+
+    for liquidity in matching_records:
 
         if trade_record["remaining_qty"] <= 0.0:
             break
 
-        if liquidity.get("finalized", False):
-            continue
-
-        if liquidity.get("side") != expected_side:
-            continue
-
-        liquidity_price = float(
-            liquidity.get("price", 0.0)
-        )
-
-        # Same price level with small floating-point tolerance.
-        if abs(
-            liquidity_price - price
-        ) > 1e-6:
+        if liquidity.get(
+            "finalized",
+            False
+        ):
             continue
 
         reduced_qty = float(
-            liquidity.get("reduced_qty", 0.0)
+            liquidity.get(
+                "reduced_qty",
+                0.0
+            )
         )
 
         executed_qty = float(
-            liquidity.get("executed_qty", 0.0)
+            liquidity.get(
+                "executed_qty",
+                0.0
+            )
         )
 
         remaining_reduction = max(
-            reduced_qty - executed_qty,
+            reduced_qty
+            - executed_qty,
             0.0
         )
 
         if remaining_reduction <= 0.0:
             continue
 
-        # Trade and depth streams are independent,
-        # so either event may arrive first.
         time_difference = abs(
-            trade_time - int(
-                liquidity["time"]
+            trade_time
+            - int(
+                liquidity.get(
+                    "time",
+                    trade_time
+                )
             )
         )
 
@@ -860,7 +949,9 @@ def record_trade_for_execution_matching(
         # UPDATE FIFO EXECUTION ATTRIBUTION
         # ====================================================
 
-        remaining_fifo_execution = matched_qty
+        remaining_fifo_execution = (
+            matched_qty
+        )
 
         fifo_consumption = liquidity.get(
             "fifo_consumption",
@@ -893,7 +984,11 @@ def record_trade_for_execution_matching(
             )
 
             if fifo_available_qty <= 0.0:
-                consumption["unmatched_qty"] = 0.0
+
+                consumption[
+                    "unmatched_qty"
+                ] = 0.0
+
                 continue
 
             allocated_execution = min(
@@ -906,11 +1001,13 @@ def record_trade_for_execution_matching(
                 + allocated_execution
             )
 
-            consumption["execution_qty"] = (
-                new_fifo_execution_qty
-            )
+            consumption[
+                "execution_qty"
+            ] = new_fifo_execution_qty
 
-            consumption["unmatched_qty"] = max(
+            consumption[
+                "unmatched_qty"
+            ] = max(
                 consumed_qty
                 - new_fifo_execution_qty,
                 0.0
@@ -962,16 +1059,16 @@ def record_trade_for_execution_matching(
             for item in fifo_consumption
         )
 
-        liquidity["fifo_executed_qty"] = (
-            fifo_executed_qty
-        )
+        liquidity[
+            "fifo_executed_qty"
+        ] = fifo_executed_qty
 
-        liquidity["fifo_unmatched_qty"] = (
-            fifo_unmatched_qty
-        )
+        liquidity[
+            "fifo_unmatched_qty"
+        ] = fifo_unmatched_qty
 
         # ====================================================
-        # CONSUME THIS TRADE'S REMAINING QUANTITY
+        # CONSUME TRADE REMAINING QUANTITY
         # ====================================================
 
         trade_record["remaining_qty"] = max(
@@ -992,12 +1089,9 @@ def match_trade_to_liquidity_reduction(
     Existing aggressive trades ko newly observed liquidity reduction
     ke saath match karta hai.
 
-    Caller compatibility:
-        symbol
-        side
-        price
-        reduced_qty
-        reduction_time
+    Performance optimization:
+        trade_match_index[(side, price)] se sirf relevant
+        recent trades lookup kiye jaate hain.
 
     Matching rules:
         BID reduction -> aggressive SELL -> is_buyer_maker=True
@@ -1006,9 +1100,6 @@ def match_trade_to_liquidity_reduction(
     Timing:
         Trade maximum 300 ms reduction se pehle ho sakta hai.
         Trade maximum 1500 ms reduction ke baad ho sakta hai.
-
-    IMPORTANT:
-        Binance timestamps milliseconds mein hain.
     """
 
     if symbol not in orderbook:
@@ -1027,28 +1118,17 @@ def match_trade_to_liquidity_reduction(
     if price <= 0.0 or reduced_qty <= 0.0:
         return 0.0
 
-    # ------------------------------------------------------------
+    # ============================================================
     # AGGRESSIVE SIDE
-    #
-    # Bid liquidity reduction:
-    #   aggressive seller hits bid
-    #
-    # Ask liquidity reduction:
-    #   aggressive buyer hits ask
-    # ------------------------------------------------------------
+    # ============================================================
 
     expected_is_buyer_maker = (
         True if side == "bid" else False
     )
 
-    # ------------------------------------------------------------
+    # ============================================================
     # ASYMMETRIC TIMING WINDOW
-    #
-    # Exchange streams independent hain, isliye observed depth
-    # reduction aur trade timestamp mein small skew possible hai.
-    #
-    # Lekin bahut purana trade reduction ko explain nahi karega.
-    # ------------------------------------------------------------
+    # ============================================================
 
     MAX_TRADE_BEFORE_REDUCTION_MS = 300
     MAX_TRADE_AFTER_REDUCTION_MS = 1500
@@ -1068,23 +1148,51 @@ def match_trade_to_liquidity_reduction(
 
     state = orderbook[symbol]
 
-    # ------------------------------------------------------------
-    # RECENT TRADES SCAN
-    # ------------------------------------------------------------
+    # ============================================================
+    # TRADE INDEX
+    #
+    # Same side + same price ke trades hi dekho.
+    # ============================================================
 
-    for trade in list(
-        state["trade_history"]
-    ):
+    trade_index = state.get(
+        "trade_match_index"
+    )
+
+    if not trade_index:
+        return 0.0
+
+    price_key = round(
+        price,
+        12
+    )
+
+    matching_trades = trade_index.get(
+        (
+            side,
+            price_key
+        ),
+        ()
+    )
+
+    # ============================================================
+    # MATCH RECENT TRADES
+    # ============================================================
+
+    for trade in matching_trades:
 
         if remaining_reduction <= 0.0:
             break
 
-        trade_time = trade.get("time")
+        trade_time = trade.get(
+            "time"
+        )
 
         if trade_time is None:
             continue
 
-        trade_time = int(trade_time)
+        trade_time = int(
+            trade_time
+        )
 
         # --------------------------------------------------------
         # TIME FILTER
@@ -1101,17 +1209,26 @@ def match_trade_to_liquidity_reduction(
         # --------------------------------------------------------
 
         if bool(
-            trade.get("is_buyer_maker", False)
+            trade.get(
+                "is_buyer_maker",
+                False
+            )
         ) != expected_is_buyer_maker:
             continue
 
         # --------------------------------------------------------
         # PRICE FILTER
+        #
+        # Index already price-based hai, lekin defensive check
+        # preserve kar rahe hain.
         # --------------------------------------------------------
 
         try:
             trade_price = float(
-                trade.get("price", 0.0)
+                trade.get(
+                    "price",
+                    0.0
+                )
             )
         except (TypeError, ValueError):
             continue
@@ -1165,7 +1282,6 @@ def match_trade_to_liquidity_reduction(
         remaining_reduction -= execution_qty
 
     return matched_qty
-
 
 def apply_orderbook_event(symbol, event):
     """
@@ -1234,6 +1350,22 @@ def apply_orderbook_event(symbol, event):
     finalize_liquidity_records(
         symbol,
         event_time
+    )
+
+    # ============================================================
+    # LIQUIDITY MATCH INDEX
+    #
+    # Key:
+    #     (side, rounded_price)
+    #
+    # New reduction records isi index mein immediately add honge.
+    # Isse next aggressive trade ko poori liquidity_history scan
+    # karne ki zarurat nahi padegi.
+    # ============================================================
+
+    liquidity_index = state.setdefault(
+        "liquidity_match_index",
+        defaultdict(deque)
     )
 
     def process_side(
@@ -1519,9 +1651,7 @@ def apply_orderbook_event(symbol, event):
                 # FIFO evidence ko direct event mein preserve karo.
                 # ------------------------------------------------
 
-                state[
-                    "liquidity_history"
-                ].append({
+                liquidity_record = {
 
                     "time": event_time,
 
@@ -1605,7 +1735,39 @@ def apply_orderbook_event(symbol, event):
                         if reduced_qty > 0.0
                         else "liquidity_added"
                     ),
-                })
+                }
+
+                state[
+                    "liquidity_history"
+                ].append(
+                    liquidity_record
+                )
+
+                # =================================================
+                # INDEX NEW LIQUIDITY MOVEMENT
+                #
+                # Future aggressive trades ab poori
+                # liquidity_history scan nahi karenge.
+                #
+                # Sirf same side + same price ke pending
+                # reduction records dekhe jayenge.
+                # =================================================
+
+                if reduced_qty > 0.0:
+
+                    price_key = round(
+                        float(price),
+                        12
+                    )
+
+                    liquidity_index[
+                        (
+                            side,
+                            price_key
+                        )
+                    ].append(
+                        liquidity_record
+                    )
 
     # ============================================================
     # BIDS
