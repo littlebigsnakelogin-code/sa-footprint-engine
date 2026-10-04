@@ -386,12 +386,10 @@ def fetch_orderbook_snapshot_ws(symbol):
     started_at = time.time()
 
     try:
-        ws_url = "wss://ws-api.binance.com:443/ws-api/v3"
+        ws_url = "wss://ws-fapi.binance.com/ws-fapi/v1"
 
         print(f"[SNAPSHOT] REQUESTING LOCK {symbol}")
 
-        # Controlled test:
-        # Only ONE snapshot connection at a time.
         if not snapshot_ws_lock.acquire(timeout=LOCK_TIMEOUT):
             print(f"[SNAPSHOT] LOCK TIMEOUT {symbol}")
             return None
@@ -434,6 +432,7 @@ def fetch_orderbook_snapshot_ws(symbol):
         deadline = time.time() + SNAPSHOT_DEADLINE
 
         while time.time() < deadline:
+
             remaining = deadline - time.time()
 
             if remaining <= 0:
@@ -453,7 +452,9 @@ def fetch_orderbook_snapshot_ws(symbol):
                 raw = ws.recv()
 
             except websocket.WebSocketTimeoutException:
-                print(f"[SNAPSHOT] WAITING RESPONSE {symbol}")
+                print(
+                    f"[SNAPSHOT] WAITING RESPONSE {symbol}"
+                )
                 continue
 
             except Exception as e:
@@ -547,6 +548,7 @@ def fetch_orderbook_snapshot_ws(symbol):
         return None
 
     finally:
+
         if ws is not None:
             try:
                 ws.close()
