@@ -3900,11 +3900,17 @@ def api_liquidity_debug():
 
         state = orderbook[symbol]
 
-        # Finalize reduction records whose
-        # 1500 ms execution-matching window expired.
-        finalized_count = finalize_liquidity_records(
-            symbol
-        )
+        # Read-only snapshot of the CURRENT live state.
+        synchronized = state["initialized"]
+        resyncing = state["resyncing"]
+        last_update_id = state["last_update_id"]
+        last_depth_update_id = state["last_depth_update_id"]
+        last_depth_event_time = state["last_depth_event_time"]
+        sequence_errors = state["sequence_errors"]
+        resync_count = state["resync_count"]
+
+        bid_count = len(state["bids"])
+        ask_count = len(state["asks"])
 
         raw_history = list(
             state["liquidity_history"]
@@ -3916,74 +3922,6 @@ def api_liquidity_debug():
                 []
             )
         )[-10:]
-
-        def compact_record(record):
-
-            if not isinstance(
-                record,
-                dict
-            ):
-                return record
-
-            allowed_keys = (
-                "event",
-                "event_type",
-                "type",
-                "status",
-                "symbol",
-                "side",
-                "price",
-                "time",
-                "timestamp",
-                "created_at",
-                "updated_at",
-                "original_qty",
-                "initial_qty",
-                "reduced_qty",
-                "executed_qty",
-                "remaining_qty",
-                "pulled_qty",
-                "unmatched_qty",
-                "pull_pct",
-                "distance_pct",
-                "distance",
-                "reason",
-                "lot_id",
-                "update_id",
-            )
-
-            compact = {}
-
-            for key in allowed_keys:
-
-                if key not in record:
-                    continue
-
-                value = record[key]
-
-                if isinstance(
-                    value,
-                    (int, float)
-                ):
-                    compact[key] = value
-
-                elif isinstance(
-                    value,
-                    (str, bool)
-                ) or value is None:
-                    compact[key] = value
-
-            return compact
-
-        history = [
-            compact_record(record)
-            for record in raw_history
-        ]
-
-        match_diagnostics = [
-            compact_record(record)
-            for record in raw_diagnostics
-        ]
 
         bid_lot_count = sum(
             len(lots)
@@ -3999,65 +3937,148 @@ def api_liquidity_debug():
             ]["ask"].values()
         )
 
-        return jsonify({
+    # Finalize outside the live-state read section.
+    try:
 
-            "status":
-                "ok",
+        finalized_count = finalize_liquidity_records(
+            symbol
+        )
 
-            "symbol":
-                symbol,
+    except Exception as exc:
 
-            "finalized_count":
-                finalized_count,
+        finalized_count = 0
 
-            "orderbook": {
+        with lock:
 
-                "synchronized":
-                    state["initialized"],
+            collector_state["error"] = str(exc)
 
-                "resyncing":
-                    state["resyncing"],
+    def compact_record(record):
 
-                "last_update_id":
-                    state["last_update_id"],
+        if not isinstance(
+            record,
+            dict
+        ):
+            return record
 
-                "last_depth_update_id":
-                    state["last_depth_update_id"],
+        allowed_keys = (
+            "event",
+            "event_type",
+            "type",
+            "status",
+            "symbol",
+            "side",
+            "price",
+            "time",
+            "timestamp",
+            "created_at",
+            "updated_at",
+            "original_qty",
+            "initial_qty",
+            "reduced_qty",
+            "executed_qty",
+            "remaining_qty",
+            "pulled_qty",
+            "unmatched_qty",
+            "pull_pct",
+            "distance_pct",
+            "distance",
+            "reason",
+            "lot_id",
+            "update_id",
+        )
 
-                "last_depth_event_time":
-                    state["last_depth_event_time"],
+        compact = {}
 
-                "sequence_errors":
-                    state["sequence_errors"],
+        for key in allowed_keys:
 
-                "resync_count":
-                    state["resync_count"],
+            if key not in record:
+                continue
 
-                "bid_count":
-                    len(state["bids"]),
+            value = record[key]
 
-                "ask_count":
-                    len(state["asks"]),
+            if isinstance(
+                value,
+                (int, float)
+            ):
+                compact[key] = value
 
-            },
+            elif isinstance(
+                value,
+                (str, bool)
+            ) or value is None:
+                compact[key] = value
 
-            "fifo": {
+        return compact
 
-                "bid_lot_count":
-                    bid_lot_count,
+    history = [
+        compact_record(record)
+        for record in raw_history
+    ]
 
-                "ask_lot_count":
-                    ask_lot_count,
+    match_diagnostics = [
+        compact_record(record)
+        for record in raw_diagnostics
+    ]
 
-            },
+    return jsonify({
 
-            "liquidity_history":
-                history,
+        "status":
+            "ok",
 
-            "match_diagnostics":
-                match_diagnostics,
+        "symbol":
+            symbol,
 
-        })
+        "finalized_count":
+            finalized_count,
+
+        "orderbook": {
+
+            "synchronized":
+                synchronized,
+
+            "resyncing":
+                resyncing,
+
+            "last_update_id":
+                last_update_id,
+
+            "last_depth_update_id":
+                last_depth_update_id,
+
+            "last_depth_event_time":
+                last_depth_event_time,
+
+            "sequence_errors":
+                sequence_errors,
+
+            "resync_count":
+                resync_count,
+
+            "bid_count":
+                bid_count,
+
+            "ask_count":
+                ask_count,
+
+        },
+
+        "fifo": {
+
+            "bid_lot_count":
+                bid_lot_count,
+
+            "ask_lot_count":
+                ask_lot_count,
+
+        },
+
+        "liquidity_history":
+            history,
+
+        "match_diagnostics":
+            match_diagnostics,
+
+    })
 
 
 @app.route("/api/scan")
