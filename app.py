@@ -691,220 +691,224 @@ def record_trade_for_execution_matching(
     is_buyer_maker,
 ):
     """
-    Recent aggressive trade ko execution matching ke liye store karta hai.
+    Record an aggressive market trade and match it against
+    liquidity reductions at the same price/side.
 
-    Matching performance optimization:
-        trade_index[(side, price)] -> recent trade records
+    Accounting model:
+        bid reduction -> aggressive SELL (buyer_maker=True)
+        ask reduction -> aggressive BUY  (buyer_maker=False)
 
-    Accounting semantics unchanged:
-        True  -> aggressive SELL -> bid consume
-        False -> aggressive BUY  -> ask consume
+    Matching supports both directions:
+
+        1. trade happens before depth reduction
+        2. depth reduction happens before trade
+
+    A trade is matched only within the allowed execution window.
     """
 
+    if symbol not in orderbook:
+        return 0.0
+
+    try:
+        price = float(price)
+        quantity = float(quantity)
+        trade_time = int(trade_time)
+        is_buyer_maker = bool(is_buyer_maker)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if price <= 0.0 or quantity <= 0.0:
+        return 0.0
+
     state = orderbook[symbol]
-
-    trade_time = int(trade_time)
-    price = float(price)
-    quantity = float(quantity)
-
-    # ========================================================
-    # FINALIZE OLD REDUCTIONS FIRST
-    # ========================================================
-
-    finalize_liquidity_records(
-        symbol,
-        trade_time
-    )
-
-    # ========================================================
-    # TRADE RECORD
-    # ========================================================
 
     trade_record = {
         "time": trade_time,
         "price": price,
         "quantity": quantity,
         "remaining_qty": quantity,
-        "is_buyer_maker": bool(is_buyer_maker),
+        "is_buyer_maker": is_buyer_maker,
     }
 
-    state["trade_history"].append(
-        trade_record
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # TRADE INDEX
-    #
-    # Key:
-    #     (aggressive side, normalized price)
-    #
-    # True  -> bid
-    # False -> ask
-    # ========================================================
+    # --------------------------------------------------------
 
-    trade_index = state.setdefault(
+    trade_match_index = state.setdefault(
         "trade_match_index",
-        defaultdict(deque)
+        defaultdict(deque),
     )
 
     expected_side = (
-        "bid" if is_buyer_maker else "ask"
+        "bid"
+        if is_buyer_maker
+        else "ask"
     )
 
-    price_key = round(
-        price,
-        12
+    price_key = round(price, 12)
+
+    trade_match_index[
+        (expected_side, price_key)
+    ].append(trade_record)
+
+    # --------------------------------------------------------
+    # LIQUIDITY INDEX
+    # --------------------------------------------------------
+
+    liquidity_match_index = state.setdefault(
+        "liquidity_match_index",
+        defaultdict(deque),
     )
 
-    trade_index[
-        (
-            expected_side,
-            price_key
-        )
-    ].append(
-        trade_record
-    )
-
-    # ========================================================
-    # MATCH TRADE AGAINST ALREADY RECORDED REDUCTIONS
+    # Add every existing pending reduction to the index.
     #
-    # IMPORTANT:
-    # Ab poori liquidity_history scan nahi hogi.
-    # Sirf same side + same price ke reduction records dekhenge.
-    # ========================================================
+    # This is intentionally rebuilt incrementally here rather
+    # than relying on a single initialization point.
+    indexed_ids = {
+        id(record)
+        for records in liquidity_match_index.values()
+        for record in records
+    }
 
-    liquidity_index = state.get(
-        "liquidity_match_index"
+    for liquidity in state["liquidity_history"]:
+
+        if id(liquidity) in indexed_ids:
+            continue
+
+        if liquidity.get("finalized"):
+            continue
+
+        reduced_qty = float(
+            liquidity.get(
+                "reduced_qty",
+                0.0,
+            )
+        )
+
+        if reduced_qty <= 0.0:
+            continue
+
+        side = liquidity.get("side")
+
+        if side not in ("bid", "ask"):
+            continue
+
+        liquidity_price = liquidity.get("price")
+
+        try:
+            liquidity_price_key = round(
+                float(liquidity_price),
+                12,
+            )
+        except (TypeError, ValueError):
+            continue
+
+        liquidity_match_index[
+            (side, liquidity_price_key)
+        ].append(liquidity)
+
+        indexed_ids.add(id(liquidity))
+
+    # --------------------------------------------------------
+    # MATCH NEW TRADE AGAINST PENDING LIQUIDITY
+    # --------------------------------------------------------
+
+    matching_records = liquidity_match_index.get(
+        (expected_side, price_key),
+        (),
     )
 
-    if liquidity_index is None:
-        liquidity_index = defaultdict(deque)
-
-        # Existing history ko sirf index initialize karne ke
-        # liye ek baar process karo.
-        for liquidity in state["liquidity_history"]:
-
-            if liquidity.get(
-                "finalized",
-                False
-            ):
-                continue
-
-            if float(
-                liquidity.get(
-                    "reduced_qty",
-                    0.0
-                )
-            ) <= 0.0:
-                continue
-
-            liquidity_side = liquidity.get(
-                "side"
-            )
-
-            if liquidity_side not in (
-                "bid",
-                "ask"
-            ):
-                continue
-
-            liquidity_price = round(
-                float(
-                    liquidity.get(
-                        "price",
-                        0.0
-                    )
-                ),
-                12
-            )
-
-            liquidity_index[
-                (
-                    liquidity_side,
-                    liquidity_price
-                )
-            ].append(
-                liquidity
-            )
-
-        state[
-            "liquidity_match_index"
-        ] = liquidity_index
-
-    matching_records = liquidity_index.get(
-        (
-            expected_side,
-            price_key
-        ),
-        ()
-    )
-
-    # ========================================================
-    # MATCH
-    # ========================================================
+    matched_total = 0.0
 
     for liquidity in matching_records:
 
         if trade_record["remaining_qty"] <= 0.0:
             break
 
-        if liquidity.get(
-            "finalized",
-            False
-        ):
+        if liquidity.get("finalized"):
             continue
 
         reduced_qty = float(
             liquidity.get(
                 "reduced_qty",
-                0.0
+                0.0,
             )
         )
+
+        if reduced_qty <= 0.0:
+            continue
 
         executed_qty = float(
             liquidity.get(
                 "executed_qty",
-                0.0
+                0.0,
             )
         )
 
         remaining_reduction = max(
-            reduced_qty
-            - executed_qty,
-            0.0
+            0.0,
+            reduced_qty - executed_qty,
         )
 
         if remaining_reduction <= 0.0:
             continue
 
-        time_difference = abs(
-            trade_time
-            - int(
-                liquidity.get(
-                    "time",
-                    trade_time
-                )
+        liquidity_time = int(
+            liquidity.get(
+                "time",
+                trade_time,
             )
         )
+
+        time_difference = (
+            trade_time - liquidity_time
+        )
+
+        # Trade may occur shortly before the reduction
+        # or up to 1500 ms after the reduction.
+        if time_difference < -300:
+            continue
 
         if time_difference > 1500:
             continue
 
+        liquidity_price = float(
+            liquidity.get(
+                "price",
+                price,
+            )
+        )
+
+        if abs(
+            liquidity_price - price
+        ) > 1e-6:
+            continue
+
+        available_trade = max(
+            0.0,
+            float(
+                trade_record.get(
+                    "remaining_qty",
+                    0.0,
+                )
+            ),
+        )
+
         matched_qty = min(
-            trade_record["remaining_qty"],
+            available_trade,
             remaining_reduction,
         )
 
         if matched_qty <= 0.0:
             continue
 
-        # ====================================================
-        # UPDATE TOP-LEVEL EXECUTION
-        # ====================================================
+        # ----------------------------------------------------
+        # UPDATE LIQUIDITY ACCOUNTING
+        # ----------------------------------------------------
 
-        new_executed_qty = (
-            executed_qty
-            + matched_qty
+        new_executed_qty = min(
+            reduced_qty,
+            executed_qty + matched_qty,
         )
 
         liquidity["executed_qty"] = (
@@ -912,142 +916,136 @@ def record_trade_for_execution_matching(
         )
 
         liquidity["unmatched_qty"] = max(
-            reduced_qty
-            - new_executed_qty,
-            0.0
+            0.0,
+            reduced_qty - new_executed_qty,
         )
 
-        # ====================================================
-        # UPDATE FIFO EXECUTION ATTRIBUTION
-        # ====================================================
+        # Keep pull accounting provisional until the
+        # reduction's matching window expires.
+        liquidity["pulled_qty"] = 0.0
+        liquidity["pull_pct"] = 0.0
 
-        remaining_fifo_execution = (
-            matched_qty
+        liquidity["status"] = (
+            "reduction_pending"
         )
 
-        fifo_consumption = liquidity.get(
+        # ----------------------------------------------------
+        # FIFO ATTRIBUTION
+        # ----------------------------------------------------
+
+        fifo_consumption = liquidity.setdefault(
             "fifo_consumption",
-            []
+            [],
         )
 
-        for consumption in fifo_consumption:
+        fifo_remaining = matched_qty
 
-            if remaining_fifo_execution <= 0.0:
+        lots = state[
+            "liquidity_lots"
+        ][expected_side].get(
+            str(
+                liquidity_price
+            ),
+            deque(),
+        )
+
+        for lot in lots:
+
+            if fifo_remaining <= 0.0:
                 break
 
-            consumed_qty = float(
-                consumption.get(
-                    "consumed_qty",
-                    0.0
-                )
+            lot_remaining = max(
+                0.0,
+                float(
+                    lot.get(
+                        "remaining_qty",
+                        0.0,
+                    )
+                ),
             )
 
-            existing_execution_qty = float(
-                consumption.get(
-                    "execution_qty",
-                    0.0
-                )
-            )
-
-            fifo_available_qty = max(
-                consumed_qty
-                - existing_execution_qty,
-                0.0
-            )
-
-            if fifo_available_qty <= 0.0:
-
-                consumption[
-                    "unmatched_qty"
-                ] = 0.0
-
+            if lot_remaining <= 0.0:
                 continue
 
-            allocated_execution = min(
-                fifo_available_qty,
-                remaining_fifo_execution
+            consume_qty = min(
+                lot_remaining,
+                fifo_remaining,
             )
 
-            new_fifo_execution_qty = (
-                existing_execution_qty
-                + allocated_execution
+            lot["remaining_qty"] = max(
+                0.0,
+                lot_remaining - consume_qty,
             )
 
-            consumption[
-                "execution_qty"
-            ] = new_fifo_execution_qty
+            fifo_consumption.append({
+                "lot_id": lot.get("lot_id"),
+                "original_qty": float(
+                    lot.get(
+                        "original_qty",
+                        0.0,
+                    )
+                ),
+                "consumed_qty": consume_qty,
+                "execution_qty": consume_qty,
+                "unmatched_qty": 0.0,
+                "execution_time": trade_time,
+                "trade_price": price,
+            })
 
-            consumption[
-                "unmatched_qty"
-            ] = max(
-                consumed_qty
-                - new_fifo_execution_qty,
-                0.0
+            fifo_remaining -= consume_qty
+
+        # Any executed quantity that could not be attributed
+        # to an available FIFO lot remains explicitly tracked.
+        if fifo_remaining > 0.0:
+
+            liquidity["fifo_unattributed_execution_qty"] = (
+                float(
+                    liquidity.get(
+                        "fifo_unattributed_execution_qty",
+                        0.0,
+                    )
+                )
+                + fifo_remaining
             )
 
-            remaining_fifo_execution -= (
-                allocated_execution
-            )
-
-        # ====================================================
-        # EXECUTION NOT ATTRIBUTED TO FIFO LOTS
-        # ====================================================
-
-        previous_unattributed_execution = float(
-            liquidity.get(
-                "fifo_unattributed_execution_qty",
-                0.0
-            )
-        )
-
-        liquidity[
-            "fifo_unattributed_execution_qty"
-        ] = (
-            previous_unattributed_execution
-            + remaining_fifo_execution
-        )
-
-        # ====================================================
-        # RECALCULATE FIFO AGGREGATES
-        # ====================================================
-
-        fifo_executed_qty = sum(
+        liquidity["fifo_executed_qty"] = sum(
             float(
                 item.get(
                     "execution_qty",
-                    0.0
+                    0.0,
                 )
             )
             for item in fifo_consumption
         )
 
-        fifo_unmatched_qty = sum(
-            float(
-                item.get(
-                    "unmatched_qty",
-                    0.0
-                )
-            )
-            for item in fifo_consumption
+        liquidity["fifo_unmatched_qty"] = max(
+            0.0,
+            reduced_qty
+            - liquidity["fifo_executed_qty"],
         )
 
-        liquidity[
-            "fifo_executed_qty"
-        ] = fifo_executed_qty
-
-        liquidity[
-            "fifo_unmatched_qty"
-        ] = fifo_unmatched_qty
-
-        # ====================================================
-        # CONSUME TRADE REMAINING QUANTITY
-        # ====================================================
+        # ----------------------------------------------------
+        # UPDATE TRADE REMAINING QUANTITY
+        # ----------------------------------------------------
 
         trade_record["remaining_qty"] = max(
-            trade_record["remaining_qty"]
-            - matched_qty,
-            0.0
+            0.0,
+            float(
+                trade_record["remaining_qty"]
+            ) - matched_qty,
         )
+
+        matched_total += matched_qty
+
+    # --------------------------------------------------------
+    # STORE TRADE HISTORY
+    # --------------------------------------------------------
+
+    state["trade_history"].append(
+        trade_record
+    )
+
+    return matched_total
 
 
 def match_trade_to_liquidity_reduction(
@@ -3884,7 +3882,7 @@ def api_liquidity_debug():
             )
         )
 
-    except ValueError:
+    except (TypeError, ValueError):
 
         limit = 50
 
@@ -3896,21 +3894,62 @@ def api_liquidity_debug():
         )
     )
 
+    # --------------------------------------------------------
+    # FINALIZE FIRST
+    # --------------------------------------------------------
+
+    try:
+
+        finalized_count = finalize_liquidity_records(
+            symbol
+        )
+
+    except Exception as exc:
+
+        finalized_count = 0
+
+        with lock:
+
+            collector_state["error"] = str(exc)
+
+    # --------------------------------------------------------
+    # SNAPSHOT AFTER FINALIZATION
+    # --------------------------------------------------------
+
     with lock:
 
         state = orderbook[symbol]
 
-        # Read-only snapshot of the CURRENT live state.
         synchronized = state["initialized"]
         resyncing = state["resyncing"]
-        last_update_id = state["last_update_id"]
-        last_depth_update_id = state["last_depth_update_id"]
-        last_depth_event_time = state["last_depth_event_time"]
-        sequence_errors = state["sequence_errors"]
-        resync_count = state["resync_count"]
 
-        bid_count = len(state["bids"])
-        ask_count = len(state["asks"])
+        last_update_id = (
+            state["last_update_id"]
+        )
+
+        last_depth_update_id = (
+            state["last_depth_update_id"]
+        )
+
+        last_depth_event_time = (
+            state["last_depth_event_time"]
+        )
+
+        sequence_errors = (
+            state["sequence_errors"]
+        )
+
+        resync_count = (
+            state["resync_count"]
+        )
+
+        bid_count = len(
+            state["bids"]
+        )
+
+        ask_count = len(
+            state["asks"]
+        )
 
         raw_history = list(
             state["liquidity_history"]
@@ -3937,20 +3976,9 @@ def api_liquidity_debug():
             ]["ask"].values()
         )
 
-    # Finalize outside the live-state read section.
-    try:
-
-        finalized_count = finalize_liquidity_records(
-            symbol
-        )
-
-    except Exception as exc:
-
-        finalized_count = 0
-
-        with lock:
-
-            collector_state["error"] = str(exc)
+    # --------------------------------------------------------
+    # COMPACT OUTPUT
+    # --------------------------------------------------------
 
     def compact_record(record):
 
@@ -3974,12 +4002,18 @@ def api_liquidity_debug():
             "updated_at",
             "original_qty",
             "initial_qty",
+            "old_qty",
+            "new_qty",
+            "added_qty",
             "reduced_qty",
             "executed_qty",
             "remaining_qty",
             "pulled_qty",
             "unmatched_qty",
             "pull_pct",
+            "fifo_executed_qty",
+            "fifo_unmatched_qty",
+            "fifo_unattributed_execution_qty",
             "distance_pct",
             "distance",
             "reason",
@@ -4000,12 +4034,14 @@ def api_liquidity_debug():
                 value,
                 (int, float)
             ):
+
                 compact[key] = value
 
             elif isinstance(
                 value,
                 (str, bool)
             ) or value is None:
+
                 compact[key] = value
 
         return compact
