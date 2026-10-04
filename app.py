@@ -382,9 +382,9 @@ def fetch_orderbook_snapshot_ws(symbol):
     Important:
     - Snapshot WS connections serialized hain.
     - Ek time par sirf ek symbol snapshot request karega.
-    - Har stage par timing logs hain.
-    - Socket timeout + guaranteed cleanup.
-    - Failure par None return hota hai.
+    - Socket-level timeout + absolute response deadline.
+    - Har failure par socket aur lock guaranteed cleanup.
+    - Ek symbol ka stuck snapshot baaki symbols ko indefinitely block nahi karega.
     """
 
     ws_url = "wss://ws-fapi.binance.com/ws-fapi/v1"
@@ -392,6 +392,12 @@ def fetch_orderbook_snapshot_ws(symbol):
     ws = None
     lock_acquired = False
     started_at = time.time()
+
+    # Maximum time allowed for the complete snapshot operation.
+    SNAPSHOT_DEADLINE = 20
+
+    # Maximum time allowed for one websocket receive.
+    SOCKET_TIMEOUT = 5
 
     try:
 
@@ -435,8 +441,11 @@ def fetch_orderbook_snapshot_ws(symbol):
 
         ws = websocket.create_connection(
             ws_url,
-            timeout=10,
+            timeout=SOCKET_TIMEOUT,
         )
+
+        # Explicitly enforce the receive timeout as well.
+        ws.settimeout(SOCKET_TIMEOUT)
 
         print(
             f"[ORDERBOOK WS API] "
@@ -472,18 +481,58 @@ def fetch_orderbook_snapshot_ws(symbol):
         )
 
         recv_started = time.time()
+        deadline = time.time() + SNAPSHOT_DEADLINE
 
         while True:
+
+            remaining = deadline - time.time()
+
+            if remaining <= 0:
+
+                raise TimeoutError(
+                    f"snapshot response deadline exceeded "
+                    f"after {SNAPSHOT_DEADLINE}s"
+                )
+
+            # Never allow a single recv() to consume the
+            # entire remaining snapshot deadline.
+            ws.settimeout(
+                min(
+                    SOCKET_TIMEOUT,
+                    max(0.1, remaining),
+                )
+            )
 
             print(
                 f"[ORDERBOOK WS API] "
                 f"WAITING RESPONSE {symbol} "
-                f"elapsed={time.time() - recv_started:.2f}s"
+                f"elapsed={time.time() - recv_started:.2f}s "
+                f"remaining={remaining:.2f}s"
             )
 
-            raw_message = ws.recv()
+            try:
+
+                raw_message = ws.recv()
+
+            except websocket.WebSocketTimeoutException:
+
+                if time.time() >= deadline:
+
+                    raise TimeoutError(
+                        f"snapshot response deadline exceeded "
+                        f"after {SNAPSHOT_DEADLINE}s"
+                    )
+
+                print(
+                    f"[ORDERBOOK WS API] "
+                    f"RECV TIMEOUT {symbol} "
+                    f"elapsed={time.time() - recv_started:.2f}s"
+                )
+
+                continue
 
             if not raw_message:
+
                 continue
 
             response = json.loads(
