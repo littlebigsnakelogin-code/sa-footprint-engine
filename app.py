@@ -379,18 +379,28 @@ ORDERBOOK_SNAPSHOT_LIMIT = 1000
 def fetch_orderbook_snapshot_ws(symbol):
     SNAPSHOT_DEADLINE = 20
     SOCKET_TIMEOUT = 5
+    LOCK_TIMEOUT = 15
 
     ws = None
+    lock_acquired = False
     started_at = time.time()
 
     try:
         ws_url = "wss://ws-api.binance.com:443/ws-api/v3"
 
+        print(f"[SNAPSHOT] REQUESTING LOCK {symbol}")
+
+        # Controlled test:
+        # Only ONE snapshot connection at a time.
+        if not snapshot_ws_lock.acquire(timeout=LOCK_TIMEOUT):
+            print(f"[SNAPSHOT] LOCK TIMEOUT {symbol}")
+            return None
+
+        lock_acquired = True
+
+        print(f"[SNAPSHOT] LOCK ACQUIRED {symbol}")
         print(f"[SNAPSHOT] CONNECTING {symbol}")
 
-        # IMPORTANT:
-        # No global snapshot_ws_lock here.
-        # Each symbol gets its own independent snapshot connection.
         ws = websocket.create_connection(
             ws_url,
             timeout=SOCKET_TIMEOUT
@@ -401,7 +411,6 @@ def fetch_orderbook_snapshot_ws(symbol):
             f"({time.time() - started_at:.2f}s)"
         )
 
-        # Make sure recv() also has a bounded timeout.
         try:
             ws.settimeout(SOCKET_TIMEOUT)
         except Exception:
@@ -430,17 +439,23 @@ def fetch_orderbook_snapshot_ws(symbol):
             if remaining <= 0:
                 break
 
-            # Keep recv timeout bounded even near the final deadline.
             try:
-                ws.settimeout(min(SOCKET_TIMEOUT, max(0.5, remaining)))
+                ws.settimeout(
+                    min(
+                        SOCKET_TIMEOUT,
+                        max(0.5, remaining)
+                    )
+                )
             except Exception:
                 pass
 
             try:
                 raw = ws.recv()
+
             except websocket.WebSocketTimeoutException:
                 print(f"[SNAPSHOT] WAITING RESPONSE {symbol}")
                 continue
+
             except Exception as e:
                 print(
                     f"[SNAPSHOT] RECV ERROR {symbol}: "
@@ -453,6 +468,7 @@ def fetch_orderbook_snapshot_ws(symbol):
 
             try:
                 response = json.loads(raw)
+
             except Exception as e:
                 print(
                     f"[SNAPSHOT] JSON ERROR {symbol}: "
@@ -460,7 +476,6 @@ def fetch_orderbook_snapshot_ws(symbol):
                 )
                 continue
 
-            # Ignore unrelated messages.
             if response.get("id") != request_id:
                 continue
 
@@ -514,6 +529,7 @@ def fetch_orderbook_snapshot_ws(symbol):
             f"[SNAPSHOT] TIMEOUT {symbol} "
             f"after {time.time() - started_at:.2f}s"
         )
+
         return None
 
     except websocket.WebSocketTimeoutException:
@@ -535,6 +551,13 @@ def fetch_orderbook_snapshot_ws(symbol):
             try:
                 ws.close()
                 print(f"[SNAPSHOT] CLOSED {symbol}")
+            except Exception:
+                pass
+
+        if lock_acquired:
+            try:
+                snapshot_ws_lock.release()
+                print(f"[SNAPSHOT] LOCK RELEASED {symbol}")
             except Exception:
                 pass
 
