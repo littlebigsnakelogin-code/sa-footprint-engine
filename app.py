@@ -375,270 +375,168 @@ BINANCE_FUTURES_DEPTH_URL = (
 
 ORDERBOOK_SNAPSHOT_LIMIT = 1000
 
+
 def fetch_orderbook_snapshot_ws(symbol):
-    """
-    Binance Futures WebSocket API se orderbook snapshot fetch karta hai.
-
-    Important:
-    - Snapshot WS connections serialized hain.
-    - Ek time par sirf ek symbol snapshot request karega.
-    - Socket-level timeout + absolute response deadline.
-    - Har failure par socket aur lock guaranteed cleanup.
-    - Ek symbol ka stuck snapshot baaki symbols ko indefinitely block nahi karega.
-    """
-
-    ws_url = "wss://ws-fapi.binance.com/ws-fapi/v1"
-
-    ws = None
-    lock_acquired = False
-    started_at = time.time()
-
-    # Maximum time allowed for the complete snapshot operation.
     SNAPSHOT_DEADLINE = 20
-
-    # Maximum time allowed for one websocket receive.
     SOCKET_TIMEOUT = 5
 
+    ws = None
+    started_at = time.time()
+
     try:
+        ws_url = "wss://ws-api.binance.com:443/ws-api/v3"
 
-        print(
-            f"[ORDERBOOK WS API] "
-            f"SNAPSHOT START {symbol}"
-        )
+        print(f"[SNAPSHOT] CONNECTING {symbol}")
 
-        print(
-            f"[ORDERBOOK WS API] "
-            f"WAITING SNAPSHOT LOCK {symbol}"
-        )
-
-        lock_acquired = snapshot_ws_lock.acquire(
-            timeout=15
-        )
-
-        if not lock_acquired:
-
-            print(
-                f"[ORDERBOOK WS API] "
-                f"SNAPSHOT LOCK TIMEOUT {symbol} "
-                f"after {time.time() - started_at:.2f}s"
-            )
-
-            return None
-
-        print(
-            f"[ORDERBOOK WS API] "
-            f"SNAPSHOT LOCK ACQUIRED {symbol}"
-        )
-
-        request_id = str(uuid.uuid4())
-
-        print(
-            f"[ORDERBOOK WS API] "
-            f"CONNECTING {symbol}"
-        )
-
-        connect_started = time.time()
-
+        # IMPORTANT:
+        # No global snapshot_ws_lock here.
+        # Each symbol gets its own independent snapshot connection.
         ws = websocket.create_connection(
             ws_url,
-            timeout=SOCKET_TIMEOUT,
+            timeout=SOCKET_TIMEOUT
         )
-
-        # Explicitly enforce the receive timeout as well.
-        ws.settimeout(SOCKET_TIMEOUT)
 
         print(
-            f"[ORDERBOOK WS API] "
-            f"CONNECTED {symbol} "
-            f"in {time.time() - connect_started:.2f}s"
+            f"[SNAPSHOT] CONNECTED {symbol} "
+            f"({time.time() - started_at:.2f}s)"
         )
+
+        # Make sure recv() also has a bounded timeout.
+        try:
+            ws.settimeout(SOCKET_TIMEOUT)
+        except Exception:
+            pass
+
+        request_id = int(time.time() * 1000) % 1000000000
 
         request = {
             "id": request_id,
             "method": "depth",
             "params": {
                 "symbol": symbol,
-                "limit": ORDERBOOK_SNAPSHOT_LIMIT,
-            },
+                "limit": ORDERBOOK_SNAPSHOT_LIMIT
+            }
         }
 
-        print(
-            f"[ORDERBOOK WS API] "
-            f"SENDING DEPTH REQUEST {symbol}"
-        )
+        ws.send(json.dumps(request))
 
-        send_started = time.time()
+        print(f"[SNAPSHOT] REQUEST SENT {symbol}")
 
-        ws.send(
-            json.dumps(request)
-        )
-
-        print(
-            f"[ORDERBOOK WS API] "
-            f"REQUEST SENT {symbol} "
-            f"in {time.time() - send_started:.2f}s "
-            f"id={request_id}"
-        )
-
-        recv_started = time.time()
         deadline = time.time() + SNAPSHOT_DEADLINE
 
-        while True:
-
+        while time.time() < deadline:
             remaining = deadline - time.time()
 
             if remaining <= 0:
+                break
 
-                raise TimeoutError(
-                    f"snapshot response deadline exceeded "
-                    f"after {SNAPSHOT_DEADLINE}s"
-                )
-
-            # Never allow a single recv() to consume the
-            # entire remaining snapshot deadline.
-            ws.settimeout(
-                min(
-                    SOCKET_TIMEOUT,
-                    max(0.1, remaining),
-                )
-            )
-
-            print(
-                f"[ORDERBOOK WS API] "
-                f"WAITING RESPONSE {symbol} "
-                f"elapsed={time.time() - recv_started:.2f}s "
-                f"remaining={remaining:.2f}s"
-            )
+            # Keep recv timeout bounded even near the final deadline.
+            try:
+                ws.settimeout(min(SOCKET_TIMEOUT, max(0.5, remaining)))
+            except Exception:
+                pass
 
             try:
-
-                raw_message = ws.recv()
-
+                raw = ws.recv()
             except websocket.WebSocketTimeoutException:
-
-                if time.time() >= deadline:
-
-                    raise TimeoutError(
-                        f"snapshot response deadline exceeded "
-                        f"after {SNAPSHOT_DEADLINE}s"
-                    )
-
+                print(f"[SNAPSHOT] WAITING RESPONSE {symbol}")
+                continue
+            except Exception as e:
                 print(
-                    f"[ORDERBOOK WS API] "
-                    f"RECV TIMEOUT {symbol} "
-                    f"elapsed={time.time() - recv_started:.2f}s"
+                    f"[SNAPSHOT] RECV ERROR {symbol}: "
+                    f"{type(e).__name__}: {e}"
                 )
+                return None
 
+            if not raw:
                 continue
 
-            if not raw_message:
-
+            try:
+                response = json.loads(raw)
+            except Exception as e:
+                print(
+                    f"[SNAPSHOT] JSON ERROR {symbol}: "
+                    f"{type(e).__name__}: {e}"
+                )
                 continue
 
-            response = json.loads(
-                raw_message
-            )
-
-            print(
-                f"[ORDERBOOK WS API] "
-                f"RESPONSE RECEIVED {symbol} "
-                f"elapsed={time.time() - recv_started:.2f}s"
-            )
-
+            # Ignore unrelated messages.
             if response.get("id") != request_id:
-
-                print(
-                    f"[ORDERBOOK WS API] "
-                    f"IGNORING OTHER RESPONSE {symbol} "
-                    f"response_id={response.get('id')}"
-                )
-
                 continue
 
-            if response.get("status") != 200:
+            status = response.get("status")
 
-                raise RuntimeError(
-                    f"WS API error: {response}"
+            if status != 200:
+                print(
+                    f"[SNAPSHOT] API ERROR {symbol}: "
+                    f"status={status} response={response}"
                 )
+                return None
 
             result = response.get("result")
 
-            if not result:
-
-                raise RuntimeError(
-                    f"WS API missing result: {response}"
-                )
-
-            if (
-                "lastUpdateId" not in result
-                or "bids" not in result
-                or "asks" not in result
-            ):
-
-                raise RuntimeError(
-                    f"Invalid WS orderbook snapshot: "
+            if not isinstance(result, dict):
+                print(
+                    f"[SNAPSHOT] INVALID RESULT {symbol}: "
                     f"{response}"
                 )
+                return None
+
+            last_update_id = result.get("lastUpdateId")
+            bids = result.get("bids")
+            asks = result.get("asks")
+
+            if (
+                last_update_id is None
+                or not isinstance(bids, list)
+                or not isinstance(asks, list)
+            ):
+                print(
+                    f"[SNAPSHOT] INVALID SNAPSHOT {symbol}: "
+                    f"lastUpdateId={last_update_id} "
+                    f"bids={type(bids).__name__} "
+                    f"asks={type(asks).__name__}"
+                )
+                return None
+
+            elapsed = time.time() - started_at
 
             print(
-                f"[ORDERBOOK WS API] "
-                f"SNAPSHOT SUCCESS {symbol} "
-                f"lastUpdateId={result['lastUpdateId']} "
-                f"bids={len(result.get('bids', []))} "
-                f"asks={len(result.get('asks', []))} "
-                f"total={time.time() - started_at:.2f}s"
+                f"[SNAPSHOT] RESPONSE OK {symbol} "
+                f"lastUpdateId={last_update_id} "
+                f"bids={len(bids)} asks={len(asks)} "
+                f"({elapsed:.2f}s)"
             )
 
             return result
 
-    except Exception as exc:
-
         print(
-            f"[ORDERBOOK WS API] "
-            f"SNAPSHOT FAILED {symbol}: "
-            f"{type(exc).__name__}: {exc} "
+            f"[SNAPSHOT] TIMEOUT {symbol} "
             f"after {time.time() - started_at:.2f}s"
         )
+        return None
 
+    except websocket.WebSocketTimeoutException:
+        print(
+            f"[SNAPSHOT] CONNECTION/RECV TIMEOUT {symbol} "
+            f"after {time.time() - started_at:.2f}s"
+        )
+        return None
+
+    except Exception as e:
+        print(
+            f"[SNAPSHOT] ERROR {symbol}: "
+            f"{type(e).__name__}: {e}"
+        )
         return None
 
     finally:
-
         if ws is not None:
-
             try:
                 ws.close()
-
-                print(
-                    f"[ORDERBOOK WS API] "
-                    f"SOCKET CLOSED {symbol}"
-                )
-
-            except Exception as close_exc:
-
-                print(
-                    f"[ORDERBOOK WS API] "
-                    f"SOCKET CLOSE ERROR {symbol}: "
-                    f"{close_exc}"
-                )
-
-        if lock_acquired:
-
-            try:
-                snapshot_ws_lock.release()
-
-                print(
-                    f"[ORDERBOOK WS API] "
-                    f"SNAPSHOT LOCK RELEASED {symbol}"
-                )
-
-            except Exception as release_exc:
-
-                print(
-                    f"[ORDERBOOK WS API] "
-                    f"SNAPSHOT LOCK RELEASE ERROR {symbol}: "
-                    f"{release_exc}"
-                )
+                print(f"[SNAPSHOT] CLOSED {symbol}")
+            except Exception:
+                pass
 
 
 def fetch_orderbook_snapshot(symbol):
