@@ -1507,273 +1507,445 @@ def match_trade_to_liquidity_reduction(
 
 
 def apply_orderbook_event(symbol, event):
-    """
-    Validated Binance depth event ko local orderbook par apply karta hai
-    aur har price-level liquidity movement ko record karta hai.
+"""
+Validated Binance depth event ko local orderbook par apply karta hai
+aur har price-level liquidity movement ko record karta hai.
 
-    FIFO evidence model:
+```
+FIFO evidence model:
 
-        - Snapshot liquidity = oldest observed baseline lot
-        - New liquidity addition = new FIFO lot
-        - Liquidity reduction = oldest available lots se consume
-        - reduced_qty = LIVE orderbook se immediately removed quantity
+    - Snapshot liquidity = oldest observed baseline lot
+    - New liquidity addition = new FIFO lot
+    - Liquidity reduction = oldest available lots se consume
+    - reduced_qty = LIVE orderbook se immediately removed quantity
 
-    Liquidity lifecycle evidence:
+Lifecycle evidence:
 
-        ADD
-          -> PERSIST
-          -> MARKET APPROACH
-          -> FLOW PRESSURE
-          -> REDUCE
-          -> EXECUTION MATCH
-          -> PULL / ABSORPTION
+    ADD
+      -> PERSIST
+      -> MARKET APPROACH
+      -> FLOW PRESSURE
+      -> REDUCE
+      -> EXECUTION MATCH
+      -> PULL / ABSORPTION
 
-    IMPORTANT:
+IMPORTANT:
 
-        - LIVE reduction ko kabhi delay nahi kiya jata.
-        - Trade matching sirf attribution/evidence ke liye hai.
-        - FIFO modeled evidence hai, exchange queue ka exact proof nahi.
-        - Market/flow context abhi DIAGNOSTIC ONLY hai.
-        - Lifecycle data abhi LIQUIDITY_PULLED classification ko affect nahi karta.
-        - Koi fixed BTC / dollar / distance threshold use nahi hota.
-    """
+    - LIVE reduction ko kabhi delay nahi kiya jata.
+    - Trade matching sirf attribution/evidence ke liye hai.
+    - FIFO modeled evidence hai, exchange queue ka exact proof nahi.
+    - Market/flow context diagnostic evidence hai.
+    - Lifecycle data abhi LIQUIDITY_PULLED classification ko affect nahi
+      karta.
+    - Koi fixed BTC / dollar / distance threshold use nahi hota.
+    - Approach flow actual market approach ke baad accumulate hota hai.
+    - Lifecycle scan sirf market-reference change par hota hai.
+"""
 
-    state = orderbook[symbol]
+state = orderbook[symbol]
 
-    event_update_id = int(event["u"])
-    event_time = int(
-        event.get("E", now_ms())
-    )
+event_update_id = int(event["u"])
+event_time = int(
+    event.get("E", now_ms())
+)
 
-    # ============================================================
-    # FINALIZE EXPIRED LIQUIDITY REDUCTIONS
-    # ============================================================
+# ============================================================
+# FINALIZE EXPIRED LIQUIDITY REDUCTIONS
+# ============================================================
 
-    finalize_liquidity_records(
-        symbol,
-        event_time
-    )
+finalize_liquidity_records(
+    symbol,
+    event_time
+)
 
-    # ============================================================
-    # LIQUIDITY MATCH INDEX
-    #
-    # Key:
-    #     (side, rounded_price)
-    # ============================================================
+# ============================================================
+# LIQUIDITY MATCH INDEX
+# ============================================================
 
-    liquidity_index = state.setdefault(
-        "liquidity_match_index",
-        defaultdict(deque)
-    )
+liquidity_index = state.setdefault(
+    "liquidity_match_index",
+    defaultdict(deque)
+)
 
-    # ============================================================
-    # CURRENT MARKET REFERENCE
-    #
-    # Existing live book se current best bid/ask nikaalte hain.
-    # Lifecycle tracking ke liye ise reduction se pehle capture
-    # karna zaroori hai.
-    # ============================================================
+# ============================================================
+# MARKET REFERENCE
+#
+# Cached per depth event.
+# Book mutation ke baad cache invalidate hota hai.
+# ============================================================
 
-    def get_current_market_reference():
+market_cache = {
+    "valid": False,
+    "best_bid": None,
+    "best_ask": None,
+    "market_reference": None,
+}
 
-        bid_prices = []
+def get_current_market_reference():
 
-        for p, q in state.get(
-            "bids",
-            {}
-        ).items():
-
-            try:
-
-                if float(q) > 0.0:
-                    bid_prices.append(
-                        float(p)
-                    )
-
-            except Exception:
-
-                continue
-
-        ask_prices = []
-
-        for p, q in state.get(
-            "asks",
-            {}
-        ).items():
-
-            try:
-
-                if float(q) > 0.0:
-                    ask_prices.append(
-                        float(p)
-                    )
-
-            except Exception:
-
-                continue
-
-        best_bid = (
-            max(bid_prices)
-            if bid_prices
-            else None
-        )
-
-        best_ask = (
-            min(ask_prices)
-            if ask_prices
-            else None
-        )
-
-        if (
-            best_bid is not None
-            and best_ask is not None
-        ):
-
-            market_reference = (
-                best_bid + best_ask
-            ) / 2.0
-
-        elif best_bid is not None:
-
-            market_reference = best_bid
-
-        elif best_ask is not None:
-
-            market_reference = best_ask
-
-        else:
-
-            market_reference = None
+    if market_cache["valid"]:
 
         return (
-            best_bid,
-            best_ask,
-            market_reference
+            market_cache["best_bid"],
+            market_cache["best_ask"],
+            market_cache["market_reference"],
         )
 
-    # ============================================================
-    # UPDATE EXISTING LOT LIFECYCLE
-    #
-    # Har depth event par active lots ko current market ke against
-    # observe karte hain.
-    #
-    # IMPORTANT:
-    #
-    # Yahan koi threshold nahi hai.
-    # Sirf actual closest distance capture hoti hai.
-    # ============================================================
+    best_bid = None
+    best_ask = None
 
-    (
-        current_best_bid,
-        current_best_ask,
-        current_market_reference
-    ) = get_current_market_reference()
+    for p, q in state.get(
+        "bids",
+        {}
+    ).items():
 
-    if current_market_reference is not None:
+        try:
 
-        for lifecycle_side in (
-            "bid",
-            "ask",
-        ):
+            if float(q) <= 0.0:
+                continue
 
-            side_lots = state[
-                "liquidity_lots"
-            ].get(
-                lifecycle_side,
-                {}
-            )
+            price_float = float(p)
 
-            for price_key, lots in list(
-                side_lots.items()
+            if (
+                best_bid is None
+                or price_float > best_bid
             ):
 
-                try:
-                    level_price = float(
-                        price_key
-                    )
-                except Exception:
-                    continue
+                best_bid = price_float
 
-                current_distance = abs(
-                    level_price
-                    - current_market_reference
+        except Exception:
+
+            continue
+
+    for p, q in state.get(
+        "asks",
+        {}
+    ).items():
+
+        try:
+
+            if float(q) <= 0.0:
+                continue
+
+            price_float = float(p)
+
+            if (
+                best_ask is None
+                or price_float < best_ask
+            ):
+
+                best_ask = price_float
+
+        except Exception:
+
+            continue
+
+    if (
+        best_bid is not None
+        and best_ask is not None
+    ):
+
+        market_reference = (
+            best_bid + best_ask
+        ) / 2.0
+
+    elif best_bid is not None:
+
+        market_reference = best_bid
+
+    elif best_ask is not None:
+
+        market_reference = best_ask
+
+    else:
+
+        market_reference = None
+
+    market_cache["best_bid"] = best_bid
+    market_cache["best_ask"] = best_ask
+    market_cache["market_reference"] = market_reference
+    market_cache["valid"] = True
+
+    return (
+        best_bid,
+        best_ask,
+        market_reference,
+    )
+
+# ============================================================
+# CONTINUOUS TRADE-FLOW ACCOUNTING
+# ============================================================
+
+lifecycle_flow_totals = state.setdefault(
+    "lifecycle_flow_totals",
+    {
+        "aggressive_buy_qty": 0.0,
+        "aggressive_sell_qty": 0.0,
+        "total_aggressive_qty": 0.0,
+        "net_aggressive_delta": 0.0,
+        "trade_count": 0,
+    }
+)
+
+lifecycle_seen_trade_ids = state.setdefault(
+    "lifecycle_seen_trade_ids",
+    set()
+)
+
+lifecycle_seen_trade_queue = state.setdefault(
+    "lifecycle_seen_trade_queue",
+    deque(maxlen=5000)
+)
+
+trades_for_lifecycle = state.get(
+    "trade_history",
+    []
+)
+
+# ------------------------------------------------------------
+# New trades ko cumulative lifecycle flow mein absorb karo.
+#
+# IMPORTANT:
+# Har inspected trade ko seen mark karte hain, including
+# malformed/unsupported records, taaki same record baar-baar
+# scan na ho.
+# ------------------------------------------------------------
+
+for trade in reversed(
+    trades_for_lifecycle
+):
+
+    trade_identity = id(trade)
+
+    if trade_identity in lifecycle_seen_trade_ids:
+        break
+
+    # Seen queue bounded hai.
+    # deque maxlen se eviction hone se pehle manually old ID
+    # set se remove karte hain.
+    if len(
+        lifecycle_seen_trade_queue
+    ) >= lifecycle_seen_trade_queue.maxlen:
+
+        old_trade_identity = (
+            lifecycle_seen_trade_queue.popleft()
+        )
+
+        lifecycle_seen_trade_ids.discard(
+            old_trade_identity
+        )
+
+    lifecycle_seen_trade_ids.add(
+        trade_identity
+    )
+
+    lifecycle_seen_trade_queue.append(
+        trade_identity
+    )
+
+    try:
+
+        qty = float(
+            trade.get(
+                "qty",
+                trade.get(
+                    "quantity",
+                    0.0
+                )
+            )
+        )
+
+    except Exception:
+
+        continue
+
+    if qty <= 0.0:
+        continue
+
+    is_buyer_maker = trade.get(
+        "is_buyer_maker"
+    )
+
+    if is_buyer_maker is False:
+
+        lifecycle_flow_totals[
+            "aggressive_buy_qty"
+        ] += qty
+
+        lifecycle_flow_totals[
+            "net_aggressive_delta"
+        ] += qty
+
+    elif is_buyer_maker is True:
+
+        lifecycle_flow_totals[
+            "aggressive_sell_qty"
+        ] += qty
+
+        lifecycle_flow_totals[
+            "net_aggressive_delta"
+        ] -= qty
+
+    else:
+
+        continue
+
+    lifecycle_flow_totals[
+        "total_aggressive_qty"
+    ] += qty
+
+    lifecycle_flow_totals[
+        "trade_count"
+    ] += 1
+
+# ============================================================
+# CURRENT MARKET REFERENCE BEFORE EVENT
+# ============================================================
+
+(
+    current_best_bid,
+    current_best_ask,
+    current_market_reference
+) = get_current_market_reference()
+
+previous_lifecycle_market_reference = state.get(
+    "lifecycle_last_market_reference"
+)
+
+market_reference_changed = (
+    current_market_reference is not None
+    and (
+        previous_lifecycle_market_reference is None
+        or current_market_reference
+        != previous_lifecycle_market_reference
+    )
+)
+
+# ============================================================
+# UPDATE EXISTING LOT LIFECYCLE
+#
+# Optimization:
+#
+# Agar best bid/ask / market reference change nahi hua,
+# to 3000+ lots ko dobara scan karne ki zarurat nahi.
+#
+# Market reference change hone par hi lifecycle state refresh.
+# ============================================================
+
+if (
+    current_market_reference is not None
+    and market_reference_changed
+):
+
+    for lifecycle_side in (
+        "bid",
+        "ask",
+    ):
+
+        side_lots = state[
+            "liquidity_lots"
+        ].get(
+            lifecycle_side,
+            {}
+        )
+
+        for price_key, lots in side_lots.items():
+
+            try:
+
+                level_price = float(
+                    price_key
                 )
 
-                for lot in list(lots):
+            except Exception:
 
-                    try:
+                continue
 
-                        first_seen_time = int(
+            current_distance = abs(
+                level_price
+                - current_market_reference
+            )
+
+            for lot in lots:
+
+                try:
+
+                    first_seen_time = int(
+                        lot.get(
+                            "first_seen_time",
                             lot.get(
-                                "first_seen_time",
-                                lot.get(
-                                    "time",
-                                    event_time
-                                )
+                                "time",
+                                event_time
                             )
                         )
+                    )
 
-                    except Exception:
+                except Exception:
 
-                        first_seen_time = event_time
+                    first_seen_time = event_time
 
-                    # --------------------------------------------
-                    # Lifetime
-                    # --------------------------------------------
+                # --------------------------------------------
+                # Lifetime
+                # --------------------------------------------
+
+                lot[
+                    "time_alive_ms"
+                ] = max(
+                    event_time
+                    - first_seen_time,
+                    0
+                )
+
+                # --------------------------------------------
+                # Closest market distance
+                # --------------------------------------------
+
+                previous_closest = lot.get(
+                    "closest_market_distance"
+                )
+
+                if (
+                    previous_closest is None
+                    or current_distance
+                    < float(previous_closest)
+                ):
 
                     lot[
-                        "time_alive_ms"
-                    ] = max(
-                        event_time
-                        - first_seen_time,
-                        0
-                    )
-
-                    # --------------------------------------------
-                    # Closest market distance
-                    # --------------------------------------------
-
-                    previous_closest = lot.get(
                         "closest_market_distance"
-                    )
+                    ] = current_distance
 
-                    if (
-                        previous_closest is None
-                        or current_distance
-                        < float(previous_closest)
-                    ):
+                    lot[
+                        "closest_market_price"
+                    ] = current_market_reference
 
-                        lot[
-                            "closest_market_distance"
-                        ] = current_distance
+                    lot[
+                        "closest_market_time"
+                    ] = event_time
 
-                        lot[
-                            "closest_market_price"
-                        ] = current_market_reference
+                # --------------------------------------------
+                # Initial observed distance
+                #
+                # Snapshot lots ke case mein
+                # first_seen_market_price None ho sakta hai.
+                # Unke liye first lifecycle observation ko
+                # baseline nahi banate; original snapshot
+                # semantics preserve karte hain.
+                # --------------------------------------------
 
-                        lot[
-                            "closest_market_time"
-                        ] = event_time
+                first_seen_market_price = lot.get(
+                    "first_seen_market_price"
+                )
 
-                    # --------------------------------------------
-                    # Market approach
-                    #
-                    # No fixed threshold.
-                    #
-                    # Agar market kabhi bhi previous observed
-                    # reference ke comparison mein closer hua,
-                    # lifecycle mein actual approach evidence
-                    # preserve hoga.
-                    # --------------------------------------------
+                initial_distance = lot.get(
+                    "first_seen_distance"
+                )
 
-                    first_seen_market_price = lot.get(
-                        "first_seen_market_price"
-                    )
+                if (
+                    initial_distance is None
+                    and first_seen_market_price is not None
+                ):
 
-                    if (
-                        first_seen_market_price
-                        is not None
-                    ):
+                    try:
 
                         initial_distance = abs(
                             level_price
@@ -1782,948 +1954,1442 @@ def apply_orderbook_event(symbol, event):
                             )
                         )
 
-                        if current_distance < initial_distance:
-
-                            lot[
-                                "market_approached"
-                            ] = True
-
-    # ============================================================
-    # MARKET / FLOW DIAGNOSTIC CONTEXT
-    # ============================================================
-
-    def get_market_flow_context(
-        reduction_price,
-        reduction_qty,
-        reduction_side,
-    ):
-        try:
-
-            reduction_price_float = float(
-                reduction_price
-            )
-
-            (
-                best_bid,
-                best_ask,
-                market_reference
-            ) = get_current_market_reference()
-
-            if market_reference is not None:
-
-                distance_from_market = (
-                    reduction_price_float
-                    - market_reference
-                )
-
-                abs_distance_from_market = abs(
-                    distance_from_market
-                )
-
-            else:
-
-                distance_from_market = None
-                abs_distance_from_market = None
-
-            trades = list(
-                state.get(
-                    "trade_history",
-                    []
-                )
-            )
-
-            context = {
-                "reduction_price": reduction_price_float,
-
-                "reduction_qty": float(
-                    reduction_qty
-                ),
-
-                "reduction_side": reduction_side,
-
-                "event_time": event_time,
-
-                "depth_update_id": event_update_id,
-
-                "best_bid": best_bid,
-
-                "best_ask": best_ask,
-
-                "market_reference": market_reference,
-
-                "distance_from_market": (
-                    distance_from_market
-                ),
-
-                "abs_distance_from_market": (
-                    abs_distance_from_market
-                ),
-
-                "windows": {},
-            }
-
-            for window_ms in (
-                1000,
-                3000,
-                10000,
-            ):
-
-                window_start = (
-                    event_time
-                    - window_ms
-                )
-
-                buy_qty = 0.0
-                sell_qty = 0.0
-                total_qty = 0.0
-
-                trade_prices = []
-
-                trade_count = 0
-
-                for trade in trades:
-
-                    try:
-
-                        trade_time = int(
-                            trade.get(
-                                "time",
-                                trade.get(
-                                    "event_time",
-                                    0
-                                )
-                            )
-                        )
+                        lot[
+                            "first_seen_distance"
+                        ] = initial_distance
 
                     except Exception:
 
-                        continue
+                        initial_distance = None
 
-                    if (
-                        trade_time < window_start
-                        or trade_time > event_time
-                    ):
-                        continue
+                # --------------------------------------------
+                # MARKET APPROACH
+                #
+                # No fixed distance threshold.
+                #
+                # Market ko lot ke observed initial distance
+                # ke comparison mein actually closer aana hai.
+                # --------------------------------------------
 
-                    try:
+                approach_started_now = False
 
-                        qty = float(
-                            trade.get(
-                                "qty",
-                                trade.get(
-                                    "quantity",
+                if (
+                    initial_distance is not None
+                    and current_distance
+                    < float(initial_distance)
+                    and not lot.get(
+                        "market_approached",
+                        False
+                    )
+                ):
+
+                    lot[
+                        "market_approached"
+                    ] = True
+
+                    approach_started_now = True
+
+                # --------------------------------------------
+                # APPROACH FLOW BASELINE
+                # --------------------------------------------
+
+                if approach_started_now:
+
+                    lot[
+                        "approach_flow_baseline"
+                    ] = {
+
+                        "aggressive_buy_qty": (
+                            float(
+                                lifecycle_flow_totals.get(
+                                    "aggressive_buy_qty",
+                                    0.0
+                                )
+                            )
+                        ),
+
+                        "aggressive_sell_qty": (
+                            float(
+                                lifecycle_flow_totals.get(
+                                    "aggressive_sell_qty",
+                                    0.0
+                                )
+                            )
+                        ),
+
+                        "total_aggressive_qty": (
+                            float(
+                                lifecycle_flow_totals.get(
+                                    "total_aggressive_qty",
+                                    0.0
+                                )
+                            )
+                        ),
+
+                        "net_aggressive_delta": (
+                            float(
+                                lifecycle_flow_totals.get(
+                                    "net_aggressive_delta",
+                                    0.0
+                                )
+                            )
+                        ),
+
+                        "trade_count": (
+                            int(
+                                lifecycle_flow_totals.get(
+                                    "trade_count",
+                                    0
+                                )
+                            )
+                        ),
+
+                        "time": event_time,
+                    }
+
+                    lot[
+                        "approach_flow_start_time"
+                    ] = event_time
+
+                # --------------------------------------------
+                # CONTINUOUS APPROACH FLOW
+                # --------------------------------------------
+
+                if lot.get(
+                    "market_approached",
+                    False
+                ):
+
+                    baseline = lot.get(
+                        "approach_flow_baseline"
+                    )
+
+                    if baseline is not None:
+
+                        buy_qty = max(
+                            float(
+                                lifecycle_flow_totals.get(
+                                    "aggressive_buy_qty",
+                                    0.0
+                                )
+                            )
+                            - float(
+                                baseline.get(
+                                    "aggressive_buy_qty",
+                                    0.0
+                                )
+                            ),
+                            0.0
+                        )
+
+                        sell_qty = max(
+                            float(
+                                lifecycle_flow_totals.get(
+                                    "aggressive_sell_qty",
+                                    0.0
+                                )
+                            )
+                            - float(
+                                baseline.get(
+                                    "aggressive_sell_qty",
+                                    0.0
+                                )
+                            ),
+                            0.0
+                        )
+
+                        total_qty = max(
+                            float(
+                                lifecycle_flow_totals.get(
+                                    "total_aggressive_qty",
+                                    0.0
+                                )
+                            )
+                            - float(
+                                baseline.get(
+                                    "total_aggressive_qty",
+                                    0.0
+                                )
+                            ),
+                            0.0
+                        )
+
+                        net_delta = (
+                            float(
+                                lifecycle_flow_totals.get(
+                                    "net_aggressive_delta",
+                                    0.0
+                                )
+                            )
+                            - float(
+                                baseline.get(
+                                    "net_aggressive_delta",
                                     0.0
                                 )
                             )
                         )
 
-                    except Exception:
+                        trade_count = max(
+                            int(
+                                lifecycle_flow_totals.get(
+                                    "trade_count",
+                                    0
+                                )
+                            )
+                            - int(
+                                baseline.get(
+                                    "trade_count",
+                                    0
+                                )
+                            ),
+                            0
+                        )
 
-                        continue
+                        if lifecycle_side == "ask":
 
-                    if qty <= 0.0:
-                        continue
+                            relevant_pressure = (
+                                buy_qty
+                            )
 
-                    try:
+                            opposite_pressure = (
+                                sell_qty
+                            )
 
-                        price = float(
+                            relevant_side = (
+                                "aggressive_buy"
+                            )
+
+                        else:
+
+                            relevant_pressure = (
+                                sell_qty
+                            )
+
+                            opposite_pressure = (
+                                buy_qty
+                            )
+
+                            relevant_side = (
+                                "aggressive_sell"
+                            )
+
+                        lot[
+                            "approach_flow"
+                        ] = {
+
+                            "aggressive_buy_qty": (
+                                buy_qty
+                            ),
+
+                            "aggressive_sell_qty": (
+                                sell_qty
+                            ),
+
+                            "total_aggressive_qty": (
+                                total_qty
+                            ),
+
+                            "net_aggressive_delta": (
+                                net_delta
+                            ),
+
+                            "trade_count": (
+                                trade_count
+                            ),
+
+                            "relevant_pressure_qty": (
+                                relevant_pressure
+                            ),
+
+                            "opposite_pressure_qty": (
+                                opposite_pressure
+                            ),
+
+                            "relevant_side": (
+                                relevant_side
+                            ),
+
+                            "approach_started_time": (
+                                lot.get(
+                                    "approach_flow_start_time"
+                                )
+                            ),
+                        }
+
+                # --------------------------------------------
+                # Explicit zero state for non-approached lots
+                # --------------------------------------------
+
+                if not lot.get(
+                    "market_approached",
+                    False
+                ):
+
+                    if not lot.get(
+                        "approach_flow"
+                    ):
+
+                        lot[
+                            "approach_flow"
+                        ] = {
+
+                            "aggressive_buy_qty": 0.0,
+                            "aggressive_sell_qty": 0.0,
+                            "total_aggressive_qty": 0.0,
+                            "net_aggressive_delta": 0.0,
+                            "trade_count": 0,
+                            "relevant_pressure_qty": 0.0,
+                            "opposite_pressure_qty": 0.0,
+                            "relevant_side": (
+                                "aggressive_buy"
+                                if lifecycle_side == "ask"
+                                else "aggressive_sell"
+                            ),
+                            "approach_started_time": None,
+                        }
+
+    state[
+        "lifecycle_last_market_reference"
+    ] = current_market_reference
+
+# ============================================================
+# MARKET / FLOW DIAGNOSTIC CONTEXT
+# ============================================================
+
+def get_market_flow_context(
+    reduction_price,
+    reduction_qty,
+    reduction_side,
+):
+    try:
+
+        reduction_price_float = float(
+            reduction_price
+        )
+
+        (
+            best_bid,
+            best_ask,
+            market_reference
+        ) = get_current_market_reference()
+
+        if market_reference is not None:
+
+            distance_from_market = (
+                reduction_price_float
+                - market_reference
+            )
+
+            abs_distance_from_market = abs(
+                distance_from_market
+            )
+
+        else:
+
+            distance_from_market = None
+            abs_distance_from_market = None
+
+        trades = state.get(
+            "trade_history",
+            []
+        )
+
+        context = {
+            "reduction_price": reduction_price_float,
+
+            "reduction_qty": float(
+                reduction_qty
+            ),
+
+            "reduction_side": reduction_side,
+
+            "event_time": event_time,
+
+            "depth_update_id": event_update_id,
+
+            "best_bid": best_bid,
+
+            "best_ask": best_ask,
+
+            "market_reference": market_reference,
+
+            "distance_from_market": (
+                distance_from_market
+            ),
+
+            "abs_distance_from_market": (
+                abs_distance_from_market
+            ),
+
+            "windows": {},
+        }
+
+        for window_ms in (
+            1000,
+            3000,
+            10000,
+        ):
+
+            window_start = (
+                event_time
+                - window_ms
+            )
+
+            buy_qty = 0.0
+            sell_qty = 0.0
+            total_qty = 0.0
+
+            trade_prices = []
+
+            trade_count = 0
+
+            for trade in trades:
+
+                try:
+
+                    trade_time = int(
+                        trade.get(
+                            "time",
                             trade.get(
-                                "price"
+                                "event_time",
+                                0
                             )
                         )
-
-                    except Exception:
-
-                        price = None
-
-                    is_buyer_maker = trade.get(
-                        "is_buyer_maker"
                     )
 
-                    if is_buyer_maker is False:
+                except Exception:
 
-                        buy_qty += qty
+                    continue
 
-                    elif is_buyer_maker is True:
+                if (
+                    trade_time < window_start
+                    or trade_time > event_time
+                ):
+                    continue
 
-                        sell_qty += qty
+                try:
 
-                    else:
-
-                        continue
-
-                    total_qty += qty
-                    trade_count += 1
-
-                    if price is not None:
-                        trade_prices.append(
-                            price
+                    qty = float(
+                        trade.get(
+                            "qty",
+                            trade.get(
+                                "quantity",
+                                0.0
+                            )
                         )
+                    )
 
-                net_delta = (
-                    buy_qty
-                    - sell_qty
+                except Exception:
+
+                    continue
+
+                if qty <= 0.0:
+                    continue
+
+                try:
+
+                    price = float(
+                        trade.get(
+                            "price"
+                        )
+                    )
+
+                except Exception:
+
+                    price = None
+
+                is_buyer_maker = trade.get(
+                    "is_buyer_maker"
                 )
 
-                if total_qty > 0.0:
+                if is_buyer_maker is False:
 
-                    flow_imbalance = (
-                        net_delta
-                        / total_qty
-                    )
+                    buy_qty += qty
+
+                elif is_buyer_maker is True:
+
+                    sell_qty += qty
 
                 else:
 
-                    flow_imbalance = 0.0
+                    continue
 
-                if trade_prices:
+                total_qty += qty
+                trade_count += 1
 
-                    observed_low = min(
-                        trade_prices
+                if price is not None:
+
+                    trade_prices.append(
+                        price
                     )
 
-                    observed_high = max(
-                        trade_prices
-                    )
-
-                    observed_range = (
-                        observed_high
-                        - observed_low
-                    )
-
-                    first_trade_price = (
-                        trade_prices[0]
-                    )
-
-                    last_trade_price = (
-                        trade_prices[-1]
-                    )
-
-                    observed_displacement = (
-                        last_trade_price
-                        - first_trade_price
-                    )
-
-                    observed_abs_displacement = abs(
-                        observed_displacement
-                    )
-
-                    distance_to_range_ratio = None
-
-                    if observed_range > 0.0:
-
-                        distance_to_range_ratio = (
-                            abs_distance_from_market
-                            / observed_range
-                        )
-
-                else:
-
-                    observed_low = None
-                    observed_high = None
-                    observed_range = 0.0
-
-                    first_trade_price = None
-                    last_trade_price = None
-
-                    observed_displacement = 0.0
-                    observed_abs_displacement = 0.0
-
-                    distance_to_range_ratio = None
-
-                context["windows"][
-                    str(window_ms)
-                ] = {
-
-                    "window_ms": window_ms,
-
-                    "trade_count": trade_count,
-
-                    "aggressive_buy_qty": (
-                        buy_qty
-                    ),
-
-                    "aggressive_sell_qty": (
-                        sell_qty
-                    ),
-
-                    "total_aggressive_qty": (
-                        total_qty
-                    ),
-
-                    "net_aggressive_delta": (
-                        net_delta
-                    ),
-
-                    "flow_imbalance": (
-                        flow_imbalance
-                    ),
-
-                    "observed_low": (
-                        observed_low
-                    ),
-
-                    "observed_high": (
-                        observed_high
-                    ),
-
-                    "observed_range": (
-                        observed_range
-                    ),
-
-                    "first_trade_price": (
-                        first_trade_price
-                    ),
-
-                    "last_trade_price": (
-                        last_trade_price
-                    ),
-
-                    "observed_displacement": (
-                        observed_displacement
-                    ),
-
-                    "observed_abs_displacement": (
-                        observed_abs_displacement
-                    ),
-
-                    "distance_to_observed_range_ratio": (
-                        distance_to_range_ratio
-                    ),
-                }
-
-            return context
-
-        except Exception as exc:
-
-            return {
-                "error": (
-                    "market_flow_context_failed"
-                ),
-
-                "message": str(exc),
-
-                "event_time": event_time,
-
-                "depth_update_id": (
-                    event_update_id
-                ),
-
-                "reduction_price": (
-                    str(reduction_price)
-                ),
-
-                "reduction_qty": (
-                    float(reduction_qty)
-                ),
-
-                "reduction_side": (
-                    reduction_side
-                ),
-            }
-
-    # ============================================================
-    # PROCESS ONE SIDE
-    # ============================================================
-
-    def process_side(
-        side,
-        event_levels,
-        book,
-    ):
-        for price, quantity in event_levels:
-
-            price = str(price)
-            new_quantity = float(quantity)
-
-            old_quantity = float(
-                book.get(price, 0.0)
+            net_delta = (
+                buy_qty
+                - sell_qty
             )
 
-            added_qty = max(
-                new_quantity - old_quantity,
-                0.0
-            )
+            if total_qty > 0.0:
 
-            reduced_qty = max(
-                old_quantity - new_quantity,
-                0.0
-            )
-
-            # ====================================================
-            # REDUCTION CONTEXT
-            # ====================================================
-
-            market_flow_context = None
-
-            if reduced_qty > 0.0:
-
-                market_flow_context = (
-                    get_market_flow_context(
-                        price,
-                        reduced_qty,
-                        side,
-                    )
-                )
-
-            # ====================================================
-            # UPDATE LIVE ORDERBOOK
-            # ====================================================
-
-            if new_quantity == 0.0:
-
-                book.pop(
-                    price,
-                    None
+                flow_imbalance = (
+                    net_delta
+                    / total_qty
                 )
 
             else:
 
-                book[price] = new_quantity
+                flow_imbalance = 0.0
 
-            # ====================================================
-            # FIFO LIQUIDITY LEDGER
-            # ====================================================
+            if trade_prices:
 
-            lots = state[
-                "liquidity_lots"
-            ][side][price]
+                observed_low = min(
+                    trade_prices
+                )
 
-            # ====================================================
-            # NEW LIQUIDITY
-            # ====================================================
+                observed_high = max(
+                    trade_prices
+                )
 
-            if added_qty > 0.0:
+                observed_range = (
+                    observed_high
+                    - observed_low
+                )
 
-                (
-                    add_best_bid,
-                    add_best_ask,
+                first_trade_price = (
+                    trade_prices[0]
+                )
+
+                last_trade_price = (
+                    trade_prices[-1]
+                )
+
+                observed_displacement = (
+                    last_trade_price
+                    - first_trade_price
+                )
+
+                observed_abs_displacement = abs(
+                    observed_displacement
+                )
+
+                distance_to_range_ratio = None
+
+                if observed_range > 0.0:
+
+                    distance_to_range_ratio = (
+                        abs_distance_from_market
+                        / observed_range
+                    )
+
+            else:
+
+                observed_low = None
+                observed_high = None
+                observed_range = 0.0
+
+                first_trade_price = None
+                last_trade_price = None
+
+                observed_displacement = 0.0
+                observed_abs_displacement = 0.0
+
+                distance_to_range_ratio = None
+
+            context["windows"][
+                str(window_ms)
+            ] = {
+
+                "window_ms": window_ms,
+
+                "trade_count": trade_count,
+
+                "aggressive_buy_qty": (
+                    buy_qty
+                ),
+
+                "aggressive_sell_qty": (
+                    sell_qty
+                ),
+
+                "total_aggressive_qty": (
+                    total_qty
+                ),
+
+                "net_aggressive_delta": (
+                    net_delta
+                ),
+
+                "flow_imbalance": (
+                    flow_imbalance
+                ),
+
+                "observed_low": (
+                    observed_low
+                ),
+
+                "observed_high": (
+                    observed_high
+                ),
+
+                "observed_range": (
+                    observed_range
+                ),
+
+                "first_trade_price": (
+                    first_trade_price
+                ),
+
+                "last_trade_price": (
+                    last_trade_price
+                ),
+
+                "observed_displacement": (
+                    observed_displacement
+                ),
+
+                "observed_abs_displacement": (
+                    observed_abs_displacement
+                ),
+
+                "distance_to_observed_range_ratio": (
+                    distance_to_range_ratio
+                ),
+            }
+
+        return context
+
+    except Exception as exc:
+
+        return {
+            "error": (
+                "market_flow_context_failed"
+            ),
+
+            "message": str(exc),
+
+            "event_time": event_time,
+
+            "depth_update_id": (
+                event_update_id
+            ),
+
+            "reduction_price": (
+                str(reduction_price)
+            ),
+
+            "reduction_qty": (
+                float(reduction_qty)
+            ),
+
+            "reduction_side": (
+                reduction_side
+            ),
+        }
+
+# ============================================================
+# PROCESS ONE SIDE
+# ============================================================
+
+def process_side(
+    side,
+    event_levels,
+    book,
+):
+
+    for price, quantity in event_levels:
+
+        price = str(price)
+
+        new_quantity = float(
+            quantity
+        )
+
+        old_quantity = float(
+            book.get(
+                price,
+                0.0
+            )
+        )
+
+        added_qty = max(
+            new_quantity
+            - old_quantity,
+            0.0
+        )
+
+        reduced_qty = max(
+            old_quantity
+            - new_quantity,
+            0.0
+        )
+
+        # ====================================================
+        # REDUCTION CONTEXT
+        # ====================================================
+
+        market_flow_context = None
+
+        if reduced_qty > 0.0:
+
+            market_flow_context = (
+                get_market_flow_context(
+                    price,
+                    reduced_qty,
+                    side,
+                )
+            )
+
+        # ====================================================
+        # UPDATE LIVE ORDERBOOK
+        # ====================================================
+
+        if new_quantity == 0.0:
+
+            book.pop(
+                price,
+                None
+            )
+
+        else:
+
+            book[price] = new_quantity
+
+        # Book changed, so next market-reference request must
+        # recalculate from the live book.
+        market_cache["valid"] = False
+
+        # ====================================================
+        # FIFO LIQUIDITY LEDGER
+        # ====================================================
+
+        lots = state[
+            "liquidity_lots"
+        ][side][price]
+
+        # ====================================================
+        # NEW LIQUIDITY
+        # ====================================================
+
+        if added_qty > 0.0:
+
+            (
+                add_best_bid,
+                add_best_ask,
+                add_market_reference
+            ) = get_current_market_reference()
+
+            if add_market_reference is not None:
+
+                add_initial_distance = abs(
+                    float(price)
+                    - add_market_reference
+                )
+
+            else:
+
+                add_initial_distance = None
+
+            new_lot = {
+
+                "lot_id": str(
+                    uuid.uuid4()
+                ),
+
+                "original_qty": float(
+                    added_qty
+                ),
+
+                "remaining_qty": float(
+                    added_qty
+                ),
+
+                "time": event_time,
+
+                "origin": "depth_add",
+
+                "update_id": event_update_id,
+
+                # ==========================================
+                # LIFECYCLE EVIDENCE
+                # ==========================================
+
+                "first_seen_time": (
+                    event_time
+                ),
+
+                "first_seen_market_price": (
                     add_market_reference
-                ) = get_current_market_reference()
+                ),
 
-                if add_market_reference is not None:
+                "first_seen_distance": (
+                    add_initial_distance
+                ),
 
-                    add_initial_distance = abs(
-                        float(price)
-                        - add_market_reference
+                "closest_market_distance": (
+                    add_initial_distance
+                ),
+
+                "closest_market_price": (
+                    add_market_reference
+                ),
+
+                "closest_market_time": (
+                    event_time
+                ),
+
+                "time_alive_ms": 0,
+
+                "market_approached": False,
+
+                # ==========================================
+                # APPROACH FLOW
+                # ==========================================
+
+                "approach_flow_baseline": None,
+
+                "approach_flow_start_time": None,
+
+                "approach_flow": {
+
+                    "aggressive_buy_qty": 0.0,
+
+                    "aggressive_sell_qty": 0.0,
+
+                    "total_aggressive_qty": 0.0,
+
+                    "net_aggressive_delta": 0.0,
+
+                    "trade_count": 0,
+
+                    "relevant_pressure_qty": 0.0,
+
+                    "opposite_pressure_qty": 0.0,
+
+                    "relevant_side": (
+                        "aggressive_buy"
+                        if side == "ask"
+                        else "aggressive_sell"
+                    ),
+
+                    "approach_started_time": None,
+                },
+            }
+
+            lots.append(
+                new_lot
+            )
+
+        # ====================================================
+        # FIFO REDUCTION
+        # ====================================================
+
+        fifo_consumption = []
+
+        fifo_unattributed_qty = 0.0
+
+        if reduced_qty > 0.0:
+
+            remaining_reduction = float(
+                reduced_qty
+            )
+
+            while (
+                remaining_reduction > 0.0
+                and lots
+            ):
+
+                oldest_lot = lots[0]
+
+                lot_remaining = float(
+                    oldest_lot.get(
+                        "remaining_qty",
+                        0.0
                     )
-
-                else:
-
-                    add_initial_distance = None
-
-                new_lot = {
-
-                    "lot_id": str(
-                        uuid.uuid4()
-                    ),
-
-                    "original_qty": float(
-                        added_qty
-                    ),
-
-                    "remaining_qty": float(
-                        added_qty
-                    ),
-
-                    "time": event_time,
-
-                    "origin": "depth_add",
-
-                    "update_id": event_update_id,
-
-                    # ==========================================
-                    # LIFECYCLE EVIDENCE
-                    # ==========================================
-
-                    "first_seen_time": (
-                        event_time
-                    ),
-
-                    "first_seen_market_price": (
-                        add_market_reference
-                    ),
-
-                    "first_seen_distance": (
-                        add_initial_distance
-                    ),
-
-                    "closest_market_distance": (
-                        add_initial_distance
-                    ),
-
-                    "closest_market_price": (
-                        add_market_reference
-                    ),
-
-                    "closest_market_time": (
-                        event_time
-                    ),
-
-                    "time_alive_ms": 0,
-
-                    "market_approached": False,
-
-                    # Future flow accumulation container.
-                    # Abhi classifier mein use nahi hota.
-                    "approach_flow": {
-                        "aggressive_buy_qty": 0.0,
-                        "aggressive_sell_qty": 0.0,
-                        "total_aggressive_qty": 0.0,
-                        "net_aggressive_delta": 0.0,
-                    },
-                }
-
-                lots.append(
-                    new_lot
                 )
 
-            # ====================================================
-            # FIFO REDUCTION
-            # ====================================================
+                if lot_remaining <= 0.0:
 
-            fifo_consumption = []
+                    lots.popleft()
 
-            fifo_unattributed_qty = 0.0
+                    continue
 
-            if reduced_qty > 0.0:
-
-                remaining_reduction = float(
-                    reduced_qty
+                consumed_qty = min(
+                    lot_remaining,
+                    remaining_reduction
                 )
 
-                while (
-                    remaining_reduction > 0.0
-                    and lots
-                ):
+                remaining_after = (
+                    lot_remaining
+                    - consumed_qty
+                )
 
-                    oldest_lot = lots[0]
+                oldest_lot[
+                    "remaining_qty"
+                ] = remaining_after
 
-                    lot_remaining = float(
+                # --------------------------------------------
+                # FINAL LIFECYCLE SNAPSHOT
+                # --------------------------------------------
+
+                try:
+
+                    first_seen_time = int(
                         oldest_lot.get(
-                            "remaining_qty",
-                            0.0
-                        )
-                    )
-
-                    if lot_remaining <= 0.0:
-
-                        lots.popleft()
-
-                        continue
-
-                    consumed_qty = min(
-                        lot_remaining,
-                        remaining_reduction
-                    )
-
-                    remaining_after = (
-                        lot_remaining
-                        - consumed_qty
-                    )
-
-                    oldest_lot[
-                        "remaining_qty"
-                    ] = remaining_after
-
-                    # --------------------------------------------
-                    # FINAL LIFECYCLE SNAPSHOT
-                    # --------------------------------------------
-
-                    try:
-
-                        first_seen_time = int(
-                            oldest_lot.get(
-                                "first_seen_time",
-                                oldest_lot.get(
-                                    "time",
-                                    event_time
-                                )
-                            )
-                        )
-
-                    except Exception:
-
-                        first_seen_time = event_time
-
-                    lifecycle_time_alive = max(
-                        event_time
-                        - first_seen_time,
-                        0
-                    )
-
-                    # --------------------------------------------
-                    # FIFO CONSUMPTION RECORD
-                    # --------------------------------------------
-
-                    fifo_consumption.append({
-
-                        "lot_id": oldest_lot.get(
-                            "lot_id"
-                        ),
-
-                        "origin": oldest_lot.get(
-                            "origin"
-                        ),
-
-                        "origin_time": int(
+                            "first_seen_time",
                             oldest_lot.get(
                                 "time",
                                 event_time
                             )
-                        ),
-
-                        "origin_update_id": (
-                            oldest_lot.get(
-                                "update_id"
-                            )
-                        ),
-
-                        "original_qty": float(
-                            oldest_lot.get(
-                                "original_qty",
-                                0.0
-                            )
-                        ),
-
-                        "consumed_qty": float(
-                            consumed_qty
-                        ),
-
-                        "remaining_qty_after": float(
-                            remaining_after
-                        ),
-
-                        "execution_qty": 0.0,
-
-                        "unmatched_qty": 0.0,
-
-                        # ----------------------------------------
-                        # LIFECYCLE EVIDENCE
-                        # ----------------------------------------
-
-                        "first_seen_time": (
-                            oldest_lot.get(
-                                "first_seen_time"
-                            )
-                        ),
-
-                        "first_seen_market_price": (
-                            oldest_lot.get(
-                                "first_seen_market_price"
-                            )
-                        ),
-
-                        "first_seen_distance": (
-                            oldest_lot.get(
-                                "first_seen_distance"
-                            )
-                        ),
-
-                        "closest_market_distance": (
-                            oldest_lot.get(
-                                "closest_market_distance"
-                            )
-                        ),
-
-                        "closest_market_price": (
-                            oldest_lot.get(
-                                "closest_market_price"
-                            )
-                        ),
-
-                        "closest_market_time": (
-                            oldest_lot.get(
-                                "closest_market_time"
-                            )
-                        ),
-
-                        "time_alive_ms": (
-                            lifecycle_time_alive
-                        ),
-
-                        "market_approached": bool(
-                            oldest_lot.get(
-                                "market_approached",
-                                False
-                            )
-                        ),
-
-                        "approach_flow": dict(
-                            oldest_lot.get(
-                                "approach_flow",
-                                {}
-                            )
-                        ),
-                    })
-
-                    remaining_reduction -= (
-                        consumed_qty
-                    )
-
-                    if (
-                        oldest_lot[
-                            "remaining_qty"
-                        ] <= 0.0
-                    ):
-
-                        lots.popleft()
-
-                fifo_unattributed_qty = max(
-                    remaining_reduction,
-                    0.0
-                )
-
-            # ====================================================
-            # EMPTY FIFO PRICE LEVEL CLEANUP
-            # ====================================================
-
-            if not lots:
-
-                state[
-                    "liquidity_lots"
-                ][side].pop(
-                    price,
-                    None
-                )
-
-            # ====================================================
-            # RECORD LIQUIDITY MOVEMENT
-            # ====================================================
-
-            if old_quantity != new_quantity:
-
-                executed_qty = 0.0
-
-                # ------------------------------------------------
-                # EXISTING TRADE KO REDUCTION SE MATCH KARO
-                # ------------------------------------------------
-
-                if reduced_qty > 0.0:
-
-                    executed_qty = (
-                        match_trade_to_liquidity_reduction(
-                            symbol,
-                            side,
-                            price,
-                            reduced_qty,
-                            event_time,
                         )
                     )
 
-                executed_qty = min(
-                    max(
-                        float(executed_qty),
-                        0.0
-                    ),
-                    float(reduced_qty)
+                except Exception:
+
+                    first_seen_time = event_time
+
+                lifecycle_time_alive = max(
+                    event_time
+                    - first_seen_time,
+                    0
                 )
 
-                unmatched_qty = max(
-                    reduced_qty
-                    - executed_qty,
+                # --------------------------------------------
+                # Refresh approach flow immediately before
+                # recording the reduction.
+                # --------------------------------------------
+
+                if (
+                    oldest_lot.get(
+                        "market_approached",
+                        False
+                    )
+                    and oldest_lot.get(
+                        "approach_flow_baseline"
+                    ) is not None
+                ):
+
+                    baseline = oldest_lot.get(
+                        "approach_flow_baseline"
+                    )
+
+                    buy_qty = max(
+                        float(
+                            lifecycle_flow_totals.get(
+                                "aggressive_buy_qty",
+                                0.0
+                            )
+                        )
+                        - float(
+                            baseline.get(
+                                "aggressive_buy_qty",
+                                0.0
+                            )
+                        ),
+                        0.0
+                    )
+
+                    sell_qty = max(
+                        float(
+                            lifecycle_flow_totals.get(
+                                "aggressive_sell_qty",
+                                0.0
+                            )
+                        )
+                        - float(
+                            baseline.get(
+                                "aggressive_sell_qty",
+                                0.0
+                            )
+                        ),
+                        0.0
+                    )
+
+                    total_flow_qty = max(
+                        float(
+                            lifecycle_flow_totals.get(
+                                "total_aggressive_qty",
+                                0.0
+                            )
+                        )
+                        - float(
+                            baseline.get(
+                                "total_aggressive_qty",
+                                0.0
+                            )
+                        ),
+                        0.0
+                    )
+
+                    net_flow_delta = (
+                        float(
+                            lifecycle_flow_totals.get(
+                                "net_aggressive_delta",
+                                0.0
+                            )
+                        )
+                        - float(
+                            baseline.get(
+                                "net_aggressive_delta",
+                                0.0
+                            )
+                        )
+                    )
+
+                    flow_trade_count = max(
+                        int(
+                            lifecycle_flow_totals.get(
+                                "trade_count",
+                                0
+                            )
+                        )
+                        - int(
+                            baseline.get(
+                                "trade_count",
+                                0
+                            )
+                        ),
+                        0
+                    )
+
+                    if side == "ask":
+
+                        relevant_pressure = (
+                            buy_qty
+                        )
+
+                        opposite_pressure = (
+                            sell_qty
+                        )
+
+                        relevant_side = (
+                            "aggressive_buy"
+                        )
+
+                    else:
+
+                        relevant_pressure = (
+                            sell_qty
+                        )
+
+                        opposite_pressure = (
+                            buy_qty
+                        )
+
+                        relevant_side = (
+                            "aggressive_sell"
+                        )
+
+                    oldest_lot[
+                        "approach_flow"
+                    ] = {
+
+                        "aggressive_buy_qty": (
+                            buy_qty
+                        ),
+
+                        "aggressive_sell_qty": (
+                            sell_qty
+                        ),
+
+                        "total_aggressive_qty": (
+                            total_flow_qty
+                        ),
+
+                        "net_aggressive_delta": (
+                            net_flow_delta
+                        ),
+
+                        "trade_count": (
+                            flow_trade_count
+                        ),
+
+                        "relevant_pressure_qty": (
+                            relevant_pressure
+                        ),
+
+                        "opposite_pressure_qty": (
+                            opposite_pressure
+                        ),
+
+                        "relevant_side": (
+                            relevant_side
+                        ),
+
+                        "approach_started_time": (
+                            oldest_lot.get(
+                                "approach_flow_start_time"
+                            )
+                        ),
+                    }
+
+                # --------------------------------------------
+                # FIFO CONSUMPTION RECORD
+                # --------------------------------------------
+
+                fifo_consumption.append({
+
+                    "lot_id": oldest_lot.get(
+                        "lot_id"
+                    ),
+
+                    "origin": oldest_lot.get(
+                        "origin"
+                    ),
+
+                    "origin_time": int(
+                        oldest_lot.get(
+                            "time",
+                            event_time
+                        )
+                    ),
+
+                    "origin_update_id": (
+                        oldest_lot.get(
+                            "update_id"
+                        )
+                    ),
+
+                    "original_qty": float(
+                        oldest_lot.get(
+                            "original_qty",
+                            0.0
+                        )
+                    ),
+
+                    "consumed_qty": float(
+                        consumed_qty
+                    ),
+
+                    "remaining_qty_after": float(
+                        remaining_after
+                    ),
+
+                    "execution_qty": 0.0,
+
+                    "unmatched_qty": 0.0,
+
+                    # ----------------------------------------
+                    # LIFECYCLE EVIDENCE
+                    # ----------------------------------------
+
+                    "first_seen_time": (
+                        oldest_lot.get(
+                            "first_seen_time"
+                        )
+                    ),
+
+                    "first_seen_market_price": (
+                        oldest_lot.get(
+                            "first_seen_market_price"
+                        )
+                    ),
+
+                    "first_seen_distance": (
+                        oldest_lot.get(
+                            "first_seen_distance"
+                        )
+                    ),
+
+                    "closest_market_distance": (
+                        oldest_lot.get(
+                            "closest_market_distance"
+                        )
+                    ),
+
+                    "closest_market_price": (
+                        oldest_lot.get(
+                            "closest_market_price"
+                        )
+                    ),
+
+                    "closest_market_time": (
+                        oldest_lot.get(
+                            "closest_market_time"
+                        )
+                    ),
+
+                    "time_alive_ms": (
+                        lifecycle_time_alive
+                    ),
+
+                    "market_approached": bool(
+                        oldest_lot.get(
+                            "market_approached",
+                            False
+                        )
+                    ),
+
+                    "approach_flow": dict(
+                        oldest_lot.get(
+                            "approach_flow",
+                            {}
+                        )
+                    ),
+                })
+
+                remaining_reduction -= (
+                    consumed_qty
+                )
+
+                if (
+                    oldest_lot[
+                        "remaining_qty"
+                    ] <= 0.0
+                ):
+
+                    lots.popleft()
+
+            fifo_unattributed_qty = max(
+                remaining_reduction,
+                0.0
+            )
+
+        # ====================================================
+        # EMPTY FIFO PRICE LEVEL CLEANUP
+        # ====================================================
+
+        if not lots:
+
+            state[
+                "liquidity_lots"
+            ][side].pop(
+                price,
+                None
+            )
+
+        # ====================================================
+        # RECORD LIQUIDITY MOVEMENT
+        # ====================================================
+
+        if old_quantity != new_quantity:
+
+            executed_qty = 0.0
+
+            if reduced_qty > 0.0:
+
+                executed_qty = (
+                    match_trade_to_liquidity_reduction(
+                        symbol,
+                        side,
+                        price,
+                        reduced_qty,
+                        event_time,
+                    )
+                )
+
+            executed_qty = min(
+                max(
+                    float(executed_qty),
+                    0.0
+                ),
+                float(reduced_qty)
+            )
+
+            unmatched_qty = max(
+                reduced_qty
+                - executed_qty,
+                0.0
+            )
+
+            # ------------------------------------------------
+            # FIFO EXECUTION ATTRIBUTION
+            # ------------------------------------------------
+
+            remaining_execution = (
+                executed_qty
+            )
+
+            for consumption in fifo_consumption:
+
+                if remaining_execution <= 0.0:
+                    break
+
+                consumed_qty = float(
+                    consumption.get(
+                        "consumed_qty",
+                        0.0
+                    )
+                )
+
+                allocated_execution = min(
+                    consumed_qty,
+                    remaining_execution
+                )
+
+                consumption[
+                    "execution_qty"
+                ] = allocated_execution
+
+                consumption[
+                    "unmatched_qty"
+                ] = max(
+                    consumed_qty
+                    - allocated_execution,
                     0.0
                 )
 
-                # ------------------------------------------------
-                # FIFO EXECUTION ATTRIBUTION
-                # ------------------------------------------------
-
-                remaining_execution = (
-                    executed_qty
+                remaining_execution -= (
+                    allocated_execution
                 )
 
-                for consumption in fifo_consumption:
+            # ------------------------------------------------
+            # LIQUIDITY RECORD
+            # ------------------------------------------------
 
-                    if remaining_execution <= 0.0:
-                        break
+            liquidity_record = {
 
-                    consumed_qty = float(
-                        consumption.get(
+                "time": event_time,
+
+                "update_id": event_update_id,
+
+                "side": side,
+
+                "price": price,
+
+                "old_qty": old_quantity,
+
+                "new_qty": new_quantity,
+
+                "added_qty": added_qty,
+
+                "reduced_qty": reduced_qty,
+
+                "executed_qty": executed_qty,
+
+                "unmatched_qty": unmatched_qty,
+
+                "pulled_qty": 0.0,
+
+                "pull_pct": 0.0,
+
+                "finalized": False,
+
+                # --------------------------------------------
+                # FIFO EVIDENCE
+                # --------------------------------------------
+
+                "fifo_reduction": (
+                    reduced_qty > 0.0
+                ),
+
+                "fifo_consumption": (
+                    fifo_consumption
+                ),
+
+                "fifo_consumed_qty": sum(
+                    float(
+                        item.get(
                             "consumed_qty",
                             0.0
                         )
                     )
+                    for item in fifo_consumption
+                ),
 
-                    allocated_execution = min(
-                        consumed_qty,
-                        remaining_execution
-                    )
+                "fifo_unattributed_qty": (
+                    fifo_unattributed_qty
+                ),
 
-                    consumption[
-                        "execution_qty"
-                    ] = allocated_execution
-
-                    consumption[
-                        "unmatched_qty"
-                    ] = max(
-                        consumed_qty
-                        - allocated_execution,
-                        0.0
-                    )
-
-                    remaining_execution -= (
-                        allocated_execution
-                    )
-
-                # ------------------------------------------------
-                # LIQUIDITY RECORD
-                # ------------------------------------------------
-
-                liquidity_record = {
-
-                    "time": event_time,
-
-                    "update_id": event_update_id,
-
-                    "side": side,
-
-                    "price": price,
-
-                    "old_qty": old_quantity,
-
-                    "new_qty": new_quantity,
-
-                    "added_qty": added_qty,
-
-                    "reduced_qty": reduced_qty,
-
-                    "executed_qty": executed_qty,
-
-                    "unmatched_qty": unmatched_qty,
-
-                    "pulled_qty": 0.0,
-
-                    "pull_pct": 0.0,
-
-                    "finalized": False,
-
-                    # --------------------------------------------
-                    # FIFO EVIDENCE
-                    # --------------------------------------------
-
-                    "fifo_reduction": (
-                        reduced_qty > 0.0
-                    ),
-
-                    "fifo_consumption": (
-                        fifo_consumption
-                    ),
-
-                    "fifo_consumed_qty": sum(
-                        float(
-                            item.get(
-                                "consumed_qty",
-                                0.0
-                            )
+                "fifo_executed_qty": sum(
+                    float(
+                        item.get(
+                            "execution_qty",
+                            0.0
                         )
-                        for item in fifo_consumption
-                    ),
+                    )
+                    for item in fifo_consumption
+                ),
 
-                    "fifo_unattributed_qty": (
-                        fifo_unattributed_qty
-                    ),
-
-                    "fifo_executed_qty": sum(
-                        float(
-                            item.get(
-                                "execution_qty",
-                                0.0
-                            )
+                "fifo_unmatched_qty": sum(
+                    float(
+                        item.get(
+                            "unmatched_qty",
+                            0.0
                         )
-                        for item in fifo_consumption
-                    ),
+                    )
+                    for item in fifo_consumption
+                ),
 
-                    "fifo_unmatched_qty": sum(
-                        float(
-                            item.get(
-                                "unmatched_qty",
-                                0.0
-                            )
-                        )
-                        for item in fifo_consumption
-                    ),
+                # --------------------------------------------
+                # MARKET / FLOW DIAGNOSTIC EVIDENCE
+                # --------------------------------------------
 
-                    # --------------------------------------------
-                    # MARKET / FLOW DIAGNOSTIC EVIDENCE
-                    # --------------------------------------------
+                "market_context": (
+                    market_flow_context
+                ),
 
-                    "market_context": (
-                        market_flow_context
-                    ),
+                # --------------------------------------------
+                # LIVE STATE
+                # --------------------------------------------
 
-                    # --------------------------------------------
-                    # LIVE STATE
-                    # --------------------------------------------
+                "status": (
+                    "reduction_pending"
+                    if reduced_qty > 0.0
+                    else "liquidity_added"
+                ),
+            }
 
-                    "status": (
-                        "reduction_pending"
-                        if reduced_qty > 0.0
-                        else "liquidity_added"
-                    ),
-                }
+            state[
+                "liquidity_history"
+            ].append(
+                liquidity_record
+            )
 
-                state[
-                    "liquidity_history"
+            # =================================================
+            # INDEX NEW LIQUIDITY MOVEMENT
+            # =================================================
+
+            if reduced_qty > 0.0:
+
+                price_key = round(
+                    float(price),
+                    12
+                )
+
+                liquidity_index[
+                    (
+                        side,
+                        price_key
+                    )
                 ].append(
                     liquidity_record
                 )
 
-                # =================================================
-                # INDEX NEW LIQUIDITY MOVEMENT
-                # =================================================
+# ============================================================
+# BIDS
+# ============================================================
 
-                if reduced_qty > 0.0:
+process_side(
+    "bid",
+    event.get("b", []),
+    state["bids"],
+)
 
-                    price_key = round(
-                        float(price),
-                        12
-                    )
+# ============================================================
+# ASKS
+# ============================================================
 
-                    liquidity_index[
-                        (
-                            side,
-                            price_key
-                        )
-                    ].append(
-                        liquidity_record
-                    )
+process_side(
+    "ask",
+    event.get("a", []),
+    state["asks"],
+)
 
-    # ============================================================
-    # BIDS
-    # ============================================================
+# ============================================================
+# UPDATE SYNC STATE
+# ============================================================
 
-    process_side(
-        "bid",
-        event.get("b", []),
-        state["bids"],
-    )
+state["last_update_id"] = (
+    event_update_id
+)
 
-    # ============================================================
-    # ASKS
-    # ============================================================
+state["last_depth_update_id"] = (
+    event_update_id
+)
 
-    process_side(
-        "ask",
-        event.get("a", []),
-        state["asks"],
-    )
+state["last_depth_event_time"] = (
+    now_ms()
+)
 
-    # ============================================================
-    # UPDATE SYNC STATE
-    # ============================================================
-
-    state["last_update_id"] = (
-        event_update_id
-    )
-
-    state["last_depth_update_id"] = (
-        event_update_id
-    )
-
-    state["last_depth_event_time"] = (
-        now_ms()
-    )
 
 
 def initialize_orderbook(symbol):
