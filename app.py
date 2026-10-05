@@ -4110,129 +4110,150 @@ def api_orderbook():
 @app.route("/api/liquidity-debug")
 def liquidity_debug():
     symbol = request.args.get("symbol", "BTCUSDT").upper()
+
     try:
-        limit = max(1, min(int(request.args.get("limit", 20)), 100))
+        limit = max(
+            1,
+            min(
+                int(request.args.get("limit", 20)),
+                100
+            )
+        )
     except Exception:
         limit = 20
 
     if symbol not in orderbook:
-        return jsonify({"error": "invalid_symbol", "symbol": symbol}), 400
+        return jsonify({
+            "error": "invalid_symbol",
+            "symbol": symbol
+        }), 400
 
     try:
         finalize_liquidity_records(symbol)
 
         state = orderbook[symbol]
 
-        with orderbook_lock:
-            bids = dict(state.get("bids", {}))
-            asks = dict(state.get("asks", {}))
+        bids = dict(state.get("bids", {}))
+        asks = dict(state.get("asks", {}))
 
-            fifo = state.get("liquidity_lots", {})
-            bid_lots = fifo.get("bid", {})
-            ask_lots = fifo.get("ask", {})
+        fifo = state.get("liquidity_lots", {})
+        bid_lots = fifo.get("bid", {})
+        ask_lots = fifo.get("ask", {})
 
-            liquidity_history = list(
-                state.get("liquidity_history", deque())
-            )
+        liquidity_history = list(
+            state.get("liquidity_history", [])
+        )
 
-            match_diagnostics = list(
-                state.get("match_diagnostics", deque())
-            )
+        match_diagnostics = list(
+            state.get("match_diagnostics", [])
+        )
 
-            trade_flow_diagnostics = list(
-                state.get("trade_flow_diagnostics", deque())
-            )
+        trade_flow_diagnostics = list(
+            state.get("trade_flow_diagnostics", [])
+        )
 
-            trade_match_index = state.get(
-                "trade_match_index",
-                {}
-            )
+        trade_match_index = state.get(
+            "trade_match_index",
+            {}
+        )
 
-            liquidity_match_index = state.get(
-                "liquidity_match_index",
-                {}
-            )
+        liquidity_match_index = state.get(
+            "liquidity_match_index",
+            {}
+        )
 
-            finalized_count = sum(
-                1
-                for record in liquidity_history
-                if isinstance(record, dict)
-                and record.get("finalized") is True
-            )
+        finalized_count = sum(
+            1
+            for record in liquidity_history
+            if isinstance(record, dict)
+            and record.get("finalized") is True
+        )
 
-            history_tail = liquidity_history[-limit:]
-            diagnostics_tail = match_diagnostics[-limit:]
-            trade_flow_tail = trade_flow_diagnostics[-limit:]
+        bid_lot_count = sum(
+            len(lots)
+            for lots in bid_lots.values()
+        )
 
-            bid_lot_count = sum(
-                len(lots)
-                for lots in bid_lots.values()
-            )
+        ask_lot_count = sum(
+            len(lots)
+            for lots in ask_lots.values()
+        )
 
-            ask_lot_count = sum(
-                len(lots)
-                for lots in ask_lots.values()
-            )
+        history_tail = liquidity_history[-limit:]
 
-            trade_index_keys = [
-                str(key)
-                for key in trade_match_index.keys()
-            ]
+        diagnostics_tail = match_diagnostics[-limit:]
 
-            liquidity_index_keys = [
-                str(key)
-                for key in liquidity_match_index.keys()
-            ]
+        trade_flow_tail = trade_flow_diagnostics[-limit:]
 
-            response = {
-                "symbol": symbol,
+        trade_index_keys = [
+            str(key)
+            for key in trade_match_index.keys()
+        ]
 
-                "orderbook": {
-                    "initialized": state.get("initialized"),
-                    "synchronized": state.get("synchronized"),
-                    "resyncing": state.get("resyncing"),
-                    "last_update_id": state.get("last_update_id"),
-                    "last_depth_update_id": state.get(
-                        "last_depth_update_id"
-                    ),
-                    "last_depth_event_time": state.get(
-                        "last_depth_event_time"
-                    ),
-                    "sequence_errors": state.get(
-                        "sequence_errors", 0
-                    ),
-                    "resync_count": state.get(
-                        "resync_count", 0
-                    ),
-                    "bid_levels": len(bids),
-                    "ask_levels": len(asks),
-                },
+        liquidity_index_keys = [
+            str(key)
+            for key in liquidity_match_index.keys()
+        ]
 
-                "fifo": {
-                    "bid_lot_count": bid_lot_count,
-                    "ask_lot_count": ask_lot_count,
-                },
+        response = {
+            "symbol": symbol,
 
-                "indexes": {
-                    "trade_match_index_keys": len(
-                        trade_index_keys
-                    ),
-                    "liquidity_match_index_keys": len(
-                        liquidity_index_keys
-                    ),
-                    "trade_flow_diagnostics_count": len(
-                        trade_flow_diagnostics
-                    ),
-                },
+            "orderbook": {
+                "initialized": state.get(
+                    "initialized"
+                ),
+                "synchronized": state.get(
+                    "synchronized"
+                ),
+                "resyncing": state.get(
+                    "resyncing"
+                ),
+                "last_update_id": state.get(
+                    "last_update_id"
+                ),
+                "last_depth_update_id": state.get(
+                    "last_depth_update_id"
+                ),
+                "last_depth_event_time": state.get(
+                    "last_depth_event_time"
+                ),
+                "sequence_errors": state.get(
+                    "sequence_errors",
+                    0
+                ),
+                "resync_count": state.get(
+                    "resync_count",
+                    0
+                ),
+                "bid_levels": len(bids),
+                "ask_levels": len(asks)
+            },
 
-                "finalized_count": finalized_count,
+            "fifo": {
+                "bid_lot_count": bid_lot_count,
+                "ask_lot_count": ask_lot_count
+            },
 
-                "liquidity_history": history_tail,
+            "indexes": {
+                "trade_match_index_keys": len(
+                    trade_index_keys
+                ),
+                "liquidity_match_index_keys": len(
+                    liquidity_index_keys
+                ),
+                "trade_flow_diagnostics_count": len(
+                    trade_flow_diagnostics
+                )
+            },
 
-                "match_diagnostics": diagnostics_tail,
+            "finalized_count": finalized_count,
 
-                "trade_flow_diagnostics": trade_flow_tail,
-            }
+            "liquidity_history": history_tail,
+
+            "match_diagnostics": diagnostics_tail,
+
+            "trade_flow_diagnostics": trade_flow_tail
+        }
 
         return jsonify(response)
 
@@ -4245,7 +4266,7 @@ def liquidity_debug():
         return jsonify({
             "error": "liquidity_debug_failed",
             "symbol": symbol,
-            "message": str(e),
+            "message": str(e)
         }), 500
 
 
