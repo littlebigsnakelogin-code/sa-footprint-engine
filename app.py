@@ -1518,19 +1518,15 @@ def apply_orderbook_event(symbol, event):
         - Liquidity reduction = oldest available lots se consume
         - reduced_qty = LIVE orderbook se immediately removed quantity
 
-    Evidence model:
+    Liquidity lifecycle evidence:
 
-        reduced_qty
-            = orderbook se LIVE quantity jo gayi
-
-        executed_qty
-            = aggressive trade matching se attributed quantity
-
-        unmatched_qty
-            = reduction ka abhi unattributed portion
-
-        pulled_qty
-            = finalization ke baad non-executed quantity
+        ADD
+          -> PERSIST
+          -> MARKET APPROACH
+          -> FLOW PRESSURE
+          -> REDUCE
+          -> EXECUTION MATCH
+          -> PULL / ABSORPTION
 
     IMPORTANT:
 
@@ -1538,7 +1534,8 @@ def apply_orderbook_event(symbol, event):
         - Trade matching sirf attribution/evidence ke liye hai.
         - FIFO modeled evidence hai, exchange queue ka exact proof nahi.
         - Market/flow context abhi DIAGNOSTIC ONLY hai.
-        - Context abhi LIQUIDITY_PULLED classification ko affect nahi karta.
+        - Lifecycle data abhi LIQUIDITY_PULLED classification ko affect nahi karta.
+        - Koi fixed BTC / dollar / distance threshold use nahi hota.
     """
 
     state = orderbook[symbol]
@@ -1570,28 +1567,229 @@ def apply_orderbook_event(symbol, event):
     )
 
     # ============================================================
-    # MARKET / FLOW DIAGNOSTIC CONTEXT
+    # CURRENT MARKET REFERENCE
+    #
+    # Existing live book se current best bid/ask nikaalte hain.
+    # Lifecycle tracking ke liye ise reduction se pehle capture
+    # karna zaroori hai.
+    # ============================================================
+
+    def get_current_market_reference():
+
+        bid_prices = []
+
+        for p, q in state.get(
+            "bids",
+            {}
+        ).items():
+
+            try:
+
+                if float(q) > 0.0:
+                    bid_prices.append(
+                        float(p)
+                    )
+
+            except Exception:
+
+                continue
+
+        ask_prices = []
+
+        for p, q in state.get(
+            "asks",
+            {}
+        ).items():
+
+            try:
+
+                if float(q) > 0.0:
+                    ask_prices.append(
+                        float(p)
+                    )
+
+            except Exception:
+
+                continue
+
+        best_bid = (
+            max(bid_prices)
+            if bid_prices
+            else None
+        )
+
+        best_ask = (
+            min(ask_prices)
+            if ask_prices
+            else None
+        )
+
+        if (
+            best_bid is not None
+            and best_ask is not None
+        ):
+
+            market_reference = (
+                best_bid + best_ask
+            ) / 2.0
+
+        elif best_bid is not None:
+
+            market_reference = best_bid
+
+        elif best_ask is not None:
+
+            market_reference = best_ask
+
+        else:
+
+            market_reference = None
+
+        return (
+            best_bid,
+            best_ask,
+            market_reference
+        )
+
+    # ============================================================
+    # UPDATE EXISTING LOT LIFECYCLE
+    #
+    # Har depth event par active lots ko current market ke against
+    # observe karte hain.
     #
     # IMPORTANT:
     #
-    # Ye function sirf evidence capture karta hai.
-    # Iska output abhi matcher ya final classifier ko
-    # affect nahi karta.
-    #
-    # Trade history se recent aggressive flow calculate hota hai:
-    #
-    #   is_buyer_maker=False -> aggressive BUY
-    #   is_buyer_maker=True  -> aggressive SELL
-    #
-    # Windows:
-    #
-    #   1000 ms
-    #   3000 ms
-    #   10000 ms
-    #
-    # Saath mein actual traded-price range/displacement bhi
-    # capture hota hai. Isse future adaptive-distance model
-    # fixed $ distance par dependent nahi rahega.
+    # Yahan koi threshold nahi hai.
+    # Sirf actual closest distance capture hoti hai.
+    # ============================================================
+
+    (
+        current_best_bid,
+        current_best_ask,
+        current_market_reference
+    ) = get_current_market_reference()
+
+    if current_market_reference is not None:
+
+        for lifecycle_side in (
+            "bid",
+            "ask",
+        ):
+
+            side_lots = state[
+                "liquidity_lots"
+            ].get(
+                lifecycle_side,
+                {}
+            )
+
+            for price_key, lots in list(
+                side_lots.items()
+            ):
+
+                try:
+                    level_price = float(
+                        price_key
+                    )
+                except Exception:
+                    continue
+
+                current_distance = abs(
+                    level_price
+                    - current_market_reference
+                )
+
+                for lot in list(lots):
+
+                    try:
+
+                        first_seen_time = int(
+                            lot.get(
+                                "first_seen_time",
+                                lot.get(
+                                    "time",
+                                    event_time
+                                )
+                            )
+                        )
+
+                    except Exception:
+
+                        first_seen_time = event_time
+
+                    # --------------------------------------------
+                    # Lifetime
+                    # --------------------------------------------
+
+                    lot[
+                        "time_alive_ms"
+                    ] = max(
+                        event_time
+                        - first_seen_time,
+                        0
+                    )
+
+                    # --------------------------------------------
+                    # Closest market distance
+                    # --------------------------------------------
+
+                    previous_closest = lot.get(
+                        "closest_market_distance"
+                    )
+
+                    if (
+                        previous_closest is None
+                        or current_distance
+                        < float(previous_closest)
+                    ):
+
+                        lot[
+                            "closest_market_distance"
+                        ] = current_distance
+
+                        lot[
+                            "closest_market_price"
+                        ] = current_market_reference
+
+                        lot[
+                            "closest_market_time"
+                        ] = event_time
+
+                    # --------------------------------------------
+                    # Market approach
+                    #
+                    # No fixed threshold.
+                    #
+                    # Agar market kabhi bhi previous observed
+                    # reference ke comparison mein closer hua,
+                    # lifecycle mein actual approach evidence
+                    # preserve hoga.
+                    # --------------------------------------------
+
+                    first_seen_market_price = lot.get(
+                        "first_seen_market_price"
+                    )
+
+                    if (
+                        first_seen_market_price
+                        is not None
+                    ):
+
+                        initial_distance = abs(
+                            level_price
+                            - float(
+                                first_seen_market_price
+                            )
+                        )
+
+                        if current_distance < initial_distance:
+
+                            lot[
+                                "market_approached"
+                            ] = True
+
+    # ============================================================
+    # MARKET / FLOW DIAGNOSTIC CONTEXT
     # ============================================================
 
     def get_market_flow_context(
@@ -1605,82 +1803,11 @@ def apply_orderbook_event(symbol, event):
                 reduction_price
             )
 
-            # ----------------------------------------------------
-            # Current visible market BEFORE this depth event
-            #
-            # Book mein event apply hone se pehle best bid/ask
-            # capture kar rahe hain.
-            # ----------------------------------------------------
-
-            bid_prices = []
-
-            for p, q in state.get(
-                "bids",
-                {}
-            ).items():
-
-                try:
-                    if float(q) > 0.0:
-                        bid_prices.append(
-                            float(p)
-                        )
-                except Exception:
-                    continue
-
-            ask_prices = []
-
-            for p, q in state.get(
-                "asks",
-                {}
-            ).items():
-
-                try:
-                    if float(q) > 0.0:
-                        ask_prices.append(
-                            float(p)
-                        )
-                except Exception:
-                    continue
-
-            best_bid = (
-                max(bid_prices)
-                if bid_prices
-                else None
-            )
-
-            best_ask = (
-                min(ask_prices)
-                if ask_prices
-                else None
-            )
-
-            # ----------------------------------------------------
-            # Market reference
-            #
-            # Midpoint preferred.
-            # Agar ek side missing ho to available side use karo.
-            # ----------------------------------------------------
-
-            if (
-                best_bid is not None
-                and best_ask is not None
-            ):
-
-                market_reference = (
-                    best_bid + best_ask
-                ) / 2.0
-
-            elif best_bid is not None:
-
-                market_reference = best_bid
-
-            elif best_ask is not None:
-
-                market_reference = best_ask
-
-            else:
-
-                market_reference = None
+            (
+                best_bid,
+                best_ask,
+                market_reference
+            ) = get_current_market_reference()
 
             if market_reference is not None:
 
@@ -1697,13 +1824,6 @@ def apply_orderbook_event(symbol, event):
 
                 distance_from_market = None
                 abs_distance_from_market = None
-
-            # ----------------------------------------------------
-            # Trade history
-            #
-            # Different historical records ko tolerate karne ke
-            # liye common key variants handle kiye gaye hain.
-            # ----------------------------------------------------
 
             trades = list(
                 state.get(
@@ -1741,10 +1861,6 @@ def apply_orderbook_event(symbol, event):
 
                 "windows": {},
             }
-
-            # ----------------------------------------------------
-            # Rolling flow windows
-            # ----------------------------------------------------
 
             for window_ms in (
                 1000,
@@ -1824,18 +1940,6 @@ def apply_orderbook_event(symbol, event):
                         "is_buyer_maker"
                     )
 
-                    # ------------------------------------------------
-                    # Binance Futures aggressive-side definition
-                    #
-                    # buyer_maker=True
-                    #     -> seller was aggressive
-                    #     -> aggressive SELL
-                    #
-                    # buyer_maker=False
-                    #     -> buyer was aggressive
-                    #     -> aggressive BUY
-                    # ------------------------------------------------
-
                     if is_buyer_maker is False:
 
                         buy_qty += qty
@@ -1872,16 +1976,6 @@ def apply_orderbook_event(symbol, event):
 
                     flow_imbalance = 0.0
 
-                # ------------------------------------------------
-                # Actual observed price movement
-                #
-                # Raw flow quantity ko directly dollar distance
-                # mein convert nahi kar rahe.
-                #
-                # Actual market displacement/range capture karna
-                # future adaptive regime ke liye important hai.
-                # ------------------------------------------------
-
                 if trade_prices:
 
                     observed_low = min(
@@ -1917,6 +2011,7 @@ def apply_orderbook_event(symbol, event):
                     distance_to_range_ratio = None
 
                     if observed_range > 0.0:
+
                         distance_to_range_ratio = (
                             abs_distance_from_market
                             / observed_range
@@ -2057,10 +2152,6 @@ def apply_orderbook_event(symbol, event):
 
             # ====================================================
             # REDUCTION CONTEXT
-            #
-            # IMPORTANT:
-            # Capture BEFORE live book update so best bid/ask
-            # reduction se pehle ka market represent kare.
             # ====================================================
 
             market_flow_context = None
@@ -2104,7 +2195,25 @@ def apply_orderbook_event(symbol, event):
 
             if added_qty > 0.0:
 
-                lots.append({
+                (
+                    add_best_bid,
+                    add_best_ask,
+                    add_market_reference
+                ) = get_current_market_reference()
+
+                if add_market_reference is not None:
+
+                    add_initial_distance = abs(
+                        float(price)
+                        - add_market_reference
+                    )
+
+                else:
+
+                    add_initial_distance = None
+
+                new_lot = {
+
                     "lot_id": str(
                         uuid.uuid4()
                     ),
@@ -2122,7 +2231,52 @@ def apply_orderbook_event(symbol, event):
                     "origin": "depth_add",
 
                     "update_id": event_update_id,
-                })
+
+                    # ==========================================
+                    # LIFECYCLE EVIDENCE
+                    # ==========================================
+
+                    "first_seen_time": (
+                        event_time
+                    ),
+
+                    "first_seen_market_price": (
+                        add_market_reference
+                    ),
+
+                    "first_seen_distance": (
+                        add_initial_distance
+                    ),
+
+                    "closest_market_distance": (
+                        add_initial_distance
+                    ),
+
+                    "closest_market_price": (
+                        add_market_reference
+                    ),
+
+                    "closest_market_time": (
+                        event_time
+                    ),
+
+                    "time_alive_ms": 0,
+
+                    "market_approached": False,
+
+                    # Future flow accumulation container.
+                    # Abhi classifier mein use nahi hota.
+                    "approach_flow": {
+                        "aggressive_buy_qty": 0.0,
+                        "aggressive_sell_qty": 0.0,
+                        "total_aggressive_qty": 0.0,
+                        "net_aggressive_delta": 0.0,
+                    },
+                }
+
+                lots.append(
+                    new_lot
+                )
 
             # ====================================================
             # FIFO REDUCTION
@@ -2173,10 +2327,37 @@ def apply_orderbook_event(symbol, event):
                     ] = remaining_after
 
                     # --------------------------------------------
+                    # FINAL LIFECYCLE SNAPSHOT
+                    # --------------------------------------------
+
+                    try:
+
+                        first_seen_time = int(
+                            oldest_lot.get(
+                                "first_seen_time",
+                                oldest_lot.get(
+                                    "time",
+                                    event_time
+                                )
+                            )
+                        )
+
+                    except Exception:
+
+                        first_seen_time = event_time
+
+                    lifecycle_time_alive = max(
+                        event_time
+                        - first_seen_time,
+                        0
+                    )
+
+                    # --------------------------------------------
                     # FIFO CONSUMPTION RECORD
                     # --------------------------------------------
 
                     fifo_consumption.append({
+
                         "lot_id": oldest_lot.get(
                             "lot_id"
                         ),
@@ -2216,6 +2397,64 @@ def apply_orderbook_event(symbol, event):
                         "execution_qty": 0.0,
 
                         "unmatched_qty": 0.0,
+
+                        # ----------------------------------------
+                        # LIFECYCLE EVIDENCE
+                        # ----------------------------------------
+
+                        "first_seen_time": (
+                            oldest_lot.get(
+                                "first_seen_time"
+                            )
+                        ),
+
+                        "first_seen_market_price": (
+                            oldest_lot.get(
+                                "first_seen_market_price"
+                            )
+                        ),
+
+                        "first_seen_distance": (
+                            oldest_lot.get(
+                                "first_seen_distance"
+                            )
+                        ),
+
+                        "closest_market_distance": (
+                            oldest_lot.get(
+                                "closest_market_distance"
+                            )
+                        ),
+
+                        "closest_market_price": (
+                            oldest_lot.get(
+                                "closest_market_price"
+                            )
+                        ),
+
+                        "closest_market_time": (
+                            oldest_lot.get(
+                                "closest_market_time"
+                            )
+                        ),
+
+                        "time_alive_ms": (
+                            lifecycle_time_alive
+                        ),
+
+                        "market_approached": bool(
+                            oldest_lot.get(
+                                "market_approached",
+                                False
+                            )
+                        ),
+
+                        "approach_flow": dict(
+                            oldest_lot.get(
+                                "approach_flow",
+                                {}
+                            )
+                        ),
                     })
 
                     remaining_reduction -= (
@@ -2353,7 +2592,6 @@ def apply_orderbook_event(symbol, event):
 
                     "unmatched_qty": unmatched_qty,
 
-                    # Final pull abhi declare nahi kar rahe.
                     "pulled_qty": 0.0,
 
                     "pull_pct": 0.0,
@@ -2408,9 +2646,6 @@ def apply_orderbook_event(symbol, event):
 
                     # --------------------------------------------
                     # MARKET / FLOW DIAGNOSTIC EVIDENCE
-                    #
-                    # Diagnostic only.
-                    # Classifier abhi is data ko use nahi karta.
                     # --------------------------------------------
 
                     "market_context": (
