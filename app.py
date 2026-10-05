@@ -4109,294 +4109,144 @@ def api_orderbook():
 
 @app.route("/api/liquidity-debug")
 def liquidity_debug():
-    symbol = request.args.get("symbol", "").upper().strip()
-
-    if symbol not in SYMBOLS:
-        return jsonify({
-            "status": "error",
-            "error": "invalid_symbol",
-            "symbol": symbol,
-        }), 400
-
+    symbol = request.args.get("symbol", "BTCUSDT").upper()
     try:
-        limit = int(request.args.get("limit", "20"))
-    except (TypeError, ValueError):
+        limit = max(1, min(int(request.args.get("limit", 20)), 100))
+    except Exception:
         limit = 20
 
-    limit = max(1, min(limit, 100))
+    if symbol not in orderbook:
+        return jsonify({"error": "invalid_symbol", "symbol": symbol}), 400
 
-    # Finalize pending reductions BEFORE taking the debug snapshot.
     try:
         finalize_liquidity_records(symbol)
-    except Exception as e:
-        print(f"[LIQUIDITY DEBUG] finalize error {symbol}: {e}")
 
-    with lock:
         state = orderbook[symbol]
 
-        liquidity_history = list(
-            state.get("liquidity_history", [])
-        )
+        with orderbook_lock:
+            bids = dict(state.get("bids", {}))
+            asks = dict(state.get("asks", {}))
 
-        diagnostics = list(
-            state.get("match_diagnostics", [])
-        )
+            fifo = state.get("liquidity_lots", {})
+            bid_lots = fifo.get("bid", {})
+            ask_lots = fifo.get("ask", {})
 
-        trade_flow_diagnostics = list(
-            state.get("trade_flow_diagnostics", [])
-        )
-
-        fifo = state.get("liquidity_lots", {})
-
-        bid_lots = fifo.get("bid", {})
-        ask_lots = fifo.get("ask", {})
-
-        bid_lot_count = sum(
-            len(lots)
-            for lots in bid_lots.values()
-        )
-
-        ask_lot_count = sum(
-            len(lots)
-            for lots in ask_lots.values()
-        )
-
-        trade_match_index = state.get(
-            "trade_match_index",
-            {}
-        )
-
-        liquidity_match_index = state.get(
-            "liquidity_match_index",
-            {}
-        )
-
-        trade_index_key_count = len(
-            trade_match_index
-        )
-
-        liquidity_index_key_count = len(
-            liquidity_match_index
-        )
-
-        orderbook_state = {
-            "bid_count": len(
-                state.get("bids", {})
-            ),
-            "ask_count": len(
-                state.get("asks", {})
-            ),
-            "last_depth_event_time": state.get(
-                "last_depth_event_time"
-            ),
-            "last_depth_update_id": state.get(
-                "last_depth_update_id"
-            ),
-            "last_update_id": state.get(
-                "last_update_id"
-            ),
-            "synchronized": bool(
-                state.get("initialized", False)
-            ),
-            "resyncing": bool(
-                state.get("resyncing", False)
-            ),
-            "sequence_errors": state.get(
-                "sequence_errors",
-                0
-            ),
-            "resync_count": state.get(
-                "resync_count",
-                0
-            ),
-        }
-
-        # Snapshot finalized history after finalization.
-        recent_history = liquidity_history[-limit:]
-
-        history_output = []
-
-        for record in recent_history:
-
-            if not isinstance(record, dict):
-                continue
-
-            history_output.append({
-                "time": record.get("time"),
-                "update_id": record.get("update_id"),
-                "side": record.get("side"),
-                "price": record.get("price"),
-
-                "old_qty": record.get(
-                    "old_qty",
-                    0.0
-                ),
-                "new_qty": record.get(
-                    "new_qty",
-                    0.0
-                ),
-                "added_qty": record.get(
-                    "added_qty",
-                    0.0
-                ),
-                "reduced_qty": record.get(
-                    "reduced_qty",
-                    0.0
-                ),
-
-                "executed_qty": record.get(
-                    "executed_qty",
-                    0.0
-                ),
-                "remaining_qty": record.get(
-                    "remaining_qty",
-                    0.0
-                ),
-
-                "unmatched_qty": record.get(
-                    "unmatched_qty",
-                    0.0
-                ),
-                "pulled_qty": record.get(
-                    "pulled_qty",
-                    0.0
-                ),
-                "pull_pct": record.get(
-                    "pull_pct",
-                    0.0
-                ),
-
-                "fifo_executed_qty": record.get(
-                    "fifo_executed_qty",
-                    0.0
-                ),
-                "fifo_unmatched_qty": record.get(
-                    "fifo_unmatched_qty",
-                    0.0
-                ),
-                "fifo_attributed_execution_qty": record.get(
-                    "fifo_attributed_execution_qty",
-                    0.0
-                ),
-                "fifo_unattributed_execution_qty": record.get(
-                    "fifo_unattributed_execution_qty",
-                    0.0
-                ),
-
-                "fifo_consumed_qty": record.get(
-                    "fifo_consumed_qty",
-                    0.0
-                ),
-                "fifo_unattributed_qty": record.get(
-                    "fifo_unattributed_qty",
-                    0.0
-                ),
-
-                "fifo_reduction": bool(
-                    record.get(
-                        "fifo_reduction",
-                        False
-                    )
-                ),
-
-                "finalized": bool(
-                    record.get(
-                        "finalized",
-                        False
-                    )
-                ),
-
-                "status": record.get(
-                    "status"
-                ),
-            })
-
-        # ----------------------------------------------------
-        # MATCHER DIAGNOSTICS
-        # ----------------------------------------------------
-
-        diagnostics_output = []
-
-        for diagnostic in diagnostics[-limit:]:
-
-            if not isinstance(
-                diagnostic,
-                dict
-            ):
-                continue
-
-            diagnostics_output.append(
-                dict(diagnostic)
+            liquidity_history = list(
+                state.get("liquidity_history", deque())
             )
 
-        # ----------------------------------------------------
-        # TRADE FLOW DIAGNOSTICS
-        # ----------------------------------------------------
-        #
-        # These records are generated at the exact moment a
-        # trade enters the matcher.
-        #
-        # They let us determine what the engine could actually
-        # see at trade-arrival time:
-        #
-        #   - existing same-price trades
-        #   - pending same-price liquidity
-        #   - trade index state
-        #   - liquidity index state
-        #   - depth timing
-        #
-        # This is observation-only and does not affect matching.
-        # ----------------------------------------------------
-
-        trade_flow_diagnostics_output = []
-
-        for diagnostic in trade_flow_diagnostics[-limit:]:
-
-            if not isinstance(
-                diagnostic,
-                dict
-            ):
-                continue
-
-            trade_flow_diagnostics_output.append(
-                dict(diagnostic)
+            match_diagnostics = list(
+                state.get("match_diagnostics", deque())
             )
+
+            trade_flow_diagnostics = list(
+                state.get("trade_flow_diagnostics", deque())
+            )
+
+            trade_match_index = state.get(
+                "trade_match_index",
+                {}
+            )
+
+            liquidity_match_index = state.get(
+                "liquidity_match_index",
+                {}
+            )
+
+            finalized_count = sum(
+                1
+                for record in liquidity_history
+                if isinstance(record, dict)
+                and record.get("finalized") is True
+            )
+
+            history_tail = liquidity_history[-limit:]
+            diagnostics_tail = match_diagnostics[-limit:]
+            trade_flow_tail = trade_flow_diagnostics[-limit:]
+
+            bid_lot_count = sum(
+                len(lots)
+                for lots in bid_lots.values()
+            )
+
+            ask_lot_count = sum(
+                len(lots)
+                for lots in ask_lots.values()
+            )
+
+            trade_index_keys = [
+                str(key)
+                for key in trade_match_index.keys()
+            ]
+
+            liquidity_index_keys = [
+                str(key)
+                for key in liquidity_match_index.keys()
+            ]
+
+            response = {
+                "symbol": symbol,
+
+                "orderbook": {
+                    "initialized": state.get("initialized"),
+                    "synchronized": state.get("synchronized"),
+                    "resyncing": state.get("resyncing"),
+                    "last_update_id": state.get("last_update_id"),
+                    "last_depth_update_id": state.get(
+                        "last_depth_update_id"
+                    ),
+                    "last_depth_event_time": state.get(
+                        "last_depth_event_time"
+                    ),
+                    "sequence_errors": state.get(
+                        "sequence_errors", 0
+                    ),
+                    "resync_count": state.get(
+                        "resync_count", 0
+                    ),
+                    "bid_levels": len(bids),
+                    "ask_levels": len(asks),
+                },
+
+                "fifo": {
+                    "bid_lot_count": bid_lot_count,
+                    "ask_lot_count": ask_lot_count,
+                },
+
+                "indexes": {
+                    "trade_match_index_keys": len(
+                        trade_index_keys
+                    ),
+                    "liquidity_match_index_keys": len(
+                        liquidity_index_keys
+                    ),
+                    "trade_flow_diagnostics_count": len(
+                        trade_flow_diagnostics
+                    ),
+                },
+
+                "finalized_count": finalized_count,
+
+                "liquidity_history": history_tail,
+
+                "match_diagnostics": diagnostics_tail,
+
+                "trade_flow_diagnostics": trade_flow_tail,
+            }
+
+        return jsonify(response)
+
+    except Exception as e:
+        app.logger.exception(
+            "liquidity_debug failed for %s",
+            symbol
+        )
 
         return jsonify({
-            "status": "ok",
+            "error": "liquidity_debug_failed",
             "symbol": symbol,
-
-            "orderbook": orderbook_state,
-
-            "fifo": {
-                "bid_lot_count": bid_lot_count,
-                "ask_lot_count": ask_lot_count,
-            },
-
-            "indexes": {
-                "trade_match_index_keys": (
-                    trade_index_key_count
-                ),
-                "liquidity_match_index_keys": (
-                    liquidity_index_key_count
-                ),
-                "trade_flow_diagnostics_count": len(
-                    trade_flow_diagnostics
-                ),
-            },
-
-            "finalized_count": finalized_count,
-
-            "liquidity_history": history_output,
-
-            # Existing matcher diagnostics.
-            "match_diagnostics": diagnostics_output,
-
-            # New event-flow diagnostics.
-            "trade_flow_diagnostics": (
-                trade_flow_diagnostics_output
-            ),
-        })
+            "message": str(e),
+        }), 500
 
 
 @app.route("/api/scan")
