@@ -1056,13 +1056,12 @@ def match_trade_to_liquidity_reduction(
     reduction_time,
 ):
     """
-    Match an orderbook liquidity reduction against previously observed
-    aggressive trades.
+    Match aggressive trades to a liquidity reduction.
 
-    bid liquidity  -> aggressive SELL -> is_buyer_maker=True
-    ask liquidity  -> aggressive BUY  -> is_buyer_maker=False
-
-    Also records diagnostics when no exact trade is found.
+    IMPORTANT:
+    - Exact-price matching remains unchanged.
+    - Nearby trades are diagnostic-only.
+    - Nearby trades MUST NOT increase executed_qty.
     """
 
     if symbol not in orderbook:
@@ -1078,352 +1077,259 @@ def match_trade_to_liquidity_reduction(
     if liquidity_price_float <= 0 or reduced_qty_float <= 0:
         return 0.0
 
-    MAX_TRADE_BEFORE_REDUCTION_MS = 300
-    MAX_TRADE_AFTER_REDUCTION_MS = 1500
+    if liquidity_side not in ("bid", "ask"):
+        return 0.0
 
-    expected_is_buyer_maker = (
-        liquidity_side == "bid"
-    )
-
+    # Bid liquidity is hit by aggressive SELL.
+    # Ask liquidity is hit by aggressive BUY.
+    expected_is_buyer_maker = liquidity_side == "bid"
     expected_side = liquidity_side
 
-    price_key = round(
-        liquidity_price_float,
-        12,
-    )
+    price_key = round(liquidity_price_float, 12)
 
-    with lock:
-        state = orderbook[symbol]
+    state = orderbook[symbol]
 
-        diagnostics = state.setdefault(
-            "match_diagnostics",
-            deque(maxlen=200),
-        )
+    # Keep the existing exact-price index model.
+    trade_index = state.setdefault("trade_match_index", {})
 
-        def add_diagnostic(reason, extra=None):
-            item = {
-                "time": now_ms(),
-                "symbol": symbol,
-                "side": liquidity_side,
-                "price": str(liquidity_price),
-                "reduced_qty": reduced_qty_float,
-                "reduction_time": reduction_time_int,
-                "reason": reason,
-            }
+    index_key = (expected_side, price_key)
+    trades_at_price = trade_index.get(index_key, [])
 
-            if extra:
-                item.update(extra)
+    matched_qty = 0.0
 
-            diagnostics.append(item)
+    # ---------------------------------------------------------
+    # 1. EXACT-PRICE MATCHING
+    # ---------------------------------------------------------
+    if not trades_at_price:
+        reason = "NO_TRADES_AT_PRICE"
 
-        trade_index = state.get(
-            "trade_match_index",
-            {},
-        )
+        # -----------------------------------------------------
+        # 2. DIAGNOSTIC ONLY:
+        #    Find same-side trades near the reduction price
+        #    inside the existing time window.
+        #
+        #    These trades are NOT matched.
+        # -----------------------------------------------------
+        nearby_trades = []
 
-        if not trade_index:
-            add_diagnostic(
-                "NO_TRADE_INDEX",
-                {
-                    "trade_history_count": len(
-                        state.get(
-                            "trade_history",
-                            [],
-                        )
-                    ),
-                },
-            )
-            return 0.0
-
-        index_key = (
-            expected_side,
-            price_key,
-        )
-
-        indexed_trades = trade_index.get(
-            index_key
-        )
-
-        if not indexed_trades:
-            recent_same_side = []
-
-            for trade in reversed(
-                list(
-                    state.get(
-                        "trade_history",
-                        [],
-                    )
-                )
-            ):
-                if len(recent_same_side) >= 5:
-                    break
-
-                if (
-                    trade.get("is_buyer_maker")
-                    != expected_is_buyer_maker
-                ):
-                    continue
-
-                try:
-                    trade_price_float = float(
-                        trade.get("price")
-                    )
-                    trade_time_int = int(
-                        trade.get("time")
-                    )
-                    trade_remaining_float = float(
-                        trade.get(
-                            "remaining_qty",
-                            0.0,
-                        )
-                    )
-                except (TypeError, ValueError):
-                    continue
-
-                recent_same_side.append(
-                    {
-                        "price": trade_price_float,
-                        "price_key": round(
-                            trade_price_float,
-                            12,
-                        ),
-                        "time": trade_time_int,
-                        "remaining_qty":
-                            trade_remaining_float,
-                        "time_diff_ms":
-                            trade_time_int
-                            - reduction_time_int,
-                    }
-                )
-
-            add_diagnostic(
-                "NO_TRADES_AT_PRICE",
-                {
-                    "expected_is_buyer_maker":
-                        expected_is_buyer_maker,
-                    "price_key": price_key,
-                    "trade_index_keys":
-                        len(trade_index),
-                    "recent_same_side_trades":
-                        recent_same_side,
-                },
-            )
-
-            return 0.0
-
-        matched_total = 0.0
-        remaining_reduction = reduced_qty_float
-
-        for trade in list(indexed_trades):
-            if remaining_reduction <= 0:
-                break
-
-            if (
-                trade.get(
-                    "remaining_qty",
-                    0.0,
-                )
-                <= 0
-            ):
+        for key, indexed_trades in trade_index.items():
+            if not isinstance(key, tuple) or len(key) != 2:
                 continue
 
-            trade_time = trade.get("time")
-            trade_price = trade.get("price")
-            trade_quantity = trade.get(
-                "quantity",
-                0.0,
-            )
-            trade_remaining = trade.get(
-                "remaining_qty",
-                0.0,
-            )
-            trade_is_buyer_maker = trade.get(
-                "is_buyer_maker"
-            )
+            indexed_side, indexed_price_key = key
 
-            if trade_time is None:
-                add_diagnostic(
-                    "TRADE_TIME_MISSING",
-                    {
-                        "trade": trade,
-                    },
-                )
+            if indexed_side != expected_side:
                 continue
 
             try:
-                trade_time_int = int(
-                    trade_time
-                )
-                trade_price_float = float(
-                    trade_price
-                )
-                trade_quantity_float = float(
-                    trade_quantity
-                )
-                trade_remaining_float = float(
-                    trade_remaining
-                )
+                indexed_price = float(indexed_price_key)
             except (TypeError, ValueError):
-                add_diagnostic(
-                    "TRADE_DATA_INVALID",
-                    {
-                        "trade": trade,
-                    },
+                continue
+
+            price_diff = indexed_price - liquidity_price_float
+
+            # Diagnostic price window.
+            # This does NOT affect actual matching.
+            try:
+                diagnostic_price_steps = 10
+                price_step = PRICE_STEP[symbol]
+                max_price_distance = (
+                    float(price_step) * diagnostic_price_steps
                 )
+            except Exception:
+                max_price_distance = 10.0
+
+            if abs(price_diff) > max_price_distance:
                 continue
 
-            time_diff = (
-                trade_time_int
-                - reduction_time_int
-            )
+            for trade in indexed_trades:
+                if not isinstance(trade, dict):
+                    continue
 
-            if (
-                time_diff
-                < -MAX_TRADE_BEFORE_REDUCTION_MS
-            ):
-                add_diagnostic(
-                    "TRADE_TOO_OLD",
-                    {
-                        "trade_time":
-                            trade_time_int,
-                        "trade_price":
-                            trade_price_float,
-                        "trade_qty":
-                            trade_quantity_float,
-                        "time_diff_ms":
-                            time_diff,
-                    },
+                trade_time = trade.get("time")
+                trade_price = trade.get("price")
+                trade_qty = trade.get("quantity", 0.0)
+                remaining_qty = trade.get(
+                    "remaining_qty",
+                    trade_qty,
                 )
-                continue
 
-            if (
-                time_diff
-                > MAX_TRADE_AFTER_REDUCTION_MS
-            ):
-                add_diagnostic(
-                    "TRADE_TOO_NEW",
-                    {
-                        "trade_time":
-                            trade_time_int,
-                        "trade_price":
-                            trade_price_float,
-                        "trade_qty":
-                            trade_quantity_float,
-                        "time_diff_ms":
-                            time_diff,
-                    },
+                if trade_time is None:
+                    continue
+
+                try:
+                    trade_time_int = int(trade_time)
+                    trade_price_float = float(trade_price)
+                    trade_qty_float = float(trade_qty)
+                    remaining_qty_float = float(remaining_qty)
+                except (TypeError, ValueError):
+                    continue
+
+                time_diff_ms = (
+                    trade_time_int - reduction_time_int
                 )
-                continue
 
-            if (
-                trade_is_buyer_maker
-                != expected_is_buyer_maker
-            ):
-                add_diagnostic(
-                    "WRONG_AGGRESSIVE_SIDE",
-                    {
-                        "trade_time":
-                            trade_time_int,
-                        "trade_price":
-                            trade_price_float,
-                        "trade_qty":
-                            trade_quantity_float,
-                        "trade_is_buyer_maker":
-                            trade_is_buyer_maker,
-                        "expected_is_buyer_maker":
-                            expected_is_buyer_maker,
-                    },
-                )
-                continue
+                # Same existing matching time window.
+                if time_diff_ms < -300:
+                    continue
 
-            trade_price_key = round(
-                trade_price_float,
-                12,
-            )
+                if time_diff_ms > 1500:
+                    continue
 
-            if trade_price_key != price_key:
-                add_diagnostic(
-                    "PRICE_MISMATCH",
-                    {
-                        "trade_time":
-                            trade_time_int,
-                        "trade_price":
-                            trade_price_float,
-                        "trade_price_key":
-                            trade_price_key,
-                        "liquidity_price":
-                            liquidity_price_float,
-                        "liquidity_price_key":
-                            price_key,
-                        "time_diff_ms":
-                            time_diff,
-                    },
-                )
-                continue
+                if remaining_qty_float <= 0:
+                    continue
 
-            if trade_remaining_float <= 0:
-                add_diagnostic(
-                    "TRADE_QTY_EXHAUSTED",
-                    {
-                        "trade_time":
-                            trade_time_int,
-                        "trade_price":
-                            trade_price_float,
-                        "trade_qty":
-                            trade_quantity_float,
-                    },
-                )
-                continue
-
-            match_qty = min(
-                remaining_reduction,
-                trade_remaining_float,
-            )
-
-            if match_qty <= 0:
-                continue
-
-            trade["remaining_qty"] = max(
-                0.0,
-                trade_remaining_float
-                - match_qty,
-            )
-
-            remaining_reduction = max(
-                0.0,
-                remaining_reduction
-                - match_qty,
-            )
-
-            matched_total += match_qty
-
-            add_diagnostic(
-                "MATCH_SUCCESS",
-                {
-                    "trade_time":
-                        trade_time_int,
-                    "trade_price":
+                nearby_trades.append({
+                    "price": trade_price_float,
+                    "price_key": round(
                         trade_price_float,
-                    "trade_qty":
-                        trade_quantity_float,
-                    "matched_qty":
-                        match_qty,
-                    "remaining_trade_qty":
-                        trade["remaining_qty"],
-                    "remaining_reduction_qty":
-                        remaining_reduction,
-                    "time_diff_ms":
-                        time_diff,
-                },
+                        12,
+                    ),
+                    "price_diff": price_diff,
+                    "abs_price_diff": abs(price_diff),
+                    "quantity": trade_qty_float,
+                    "remaining_qty": remaining_qty_float,
+                    "time": trade_time_int,
+                    "time_diff_ms": time_diff_ms,
+                    "is_buyer_maker": trade.get(
+                        "is_buyer_maker"
+                    ),
+                })
+
+        nearby_trades.sort(
+            key=lambda item: (
+                item["abs_price_diff"],
+                abs(item["time_diff_ms"]),
             )
-
-        if matched_total <= 0:
-            return 0.0
-
-        return min(
-            matched_total,
-            reduced_qty_float,
         )
+
+        nearby_trades = nearby_trades[:20]
+
+        state.setdefault(
+            "match_diagnostics",
+            deque(maxlen=500),
+        ).append({
+            "symbol": symbol,
+            "side": liquidity_side,
+            "price": str(liquidity_price),
+            "price_key": price_key,
+            "reduced_qty": reduced_qty_float,
+            "reduction_time": reduction_time_int,
+            "expected_is_buyer_maker": (
+                expected_is_buyer_maker
+            ),
+            "reason": reason,
+            "trade_index_keys": len(trade_index),
+            "recent_same_side_trades": [
+                {
+                    "price": float(t.get("price", 0.0)),
+                    "price_key": t.get("price_key"),
+                    "remaining_qty": float(
+                        t.get("remaining_qty", 0.0)
+                    ),
+                    "time": t.get("time"),
+                    "time_diff_ms": t.get(
+                        "time_diff_ms"
+                    ),
+                }
+                for t in nearby_trades
+            ],
+            "nearby_trades": nearby_trades,
+        })
+
+        return 0.0
+
+    # ---------------------------------------------------------
+    # EXACT-PRICE MATCH EXISTS
+    # ---------------------------------------------------------
+    for trade in trades_at_price:
+        if matched_qty >= reduced_qty_float:
+            break
+
+        if not isinstance(trade, dict):
+            continue
+
+        trade_time = trade.get("time")
+        trade_price = trade.get("price")
+        trade_remaining = trade.get(
+            "remaining_qty",
+            trade.get("quantity", 0.0),
+        )
+
+        if trade_time is None:
+            continue
+
+        try:
+            trade_time_int = int(trade_time)
+            trade_price_float = float(trade_price)
+            trade_remaining_float = float(
+                trade_remaining
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if trade_remaining_float <= 0:
+            continue
+
+        # Defensive aggressive-side check.
+        if trade.get("is_buyer_maker") != (
+            expected_is_buyer_maker
+        ):
+            continue
+
+        time_diff_ms = (
+            trade_time_int - reduction_time_int
+        )
+
+        if time_diff_ms < -300:
+            continue
+
+        if time_diff_ms > 1500:
+            continue
+
+        if round(trade_price_float, 12) != price_key:
+            continue
+
+        available_reduction = (
+            reduced_qty_float - matched_qty
+        )
+
+        qty_to_match = min(
+            trade_remaining_float,
+            available_reduction,
+        )
+
+        if qty_to_match <= 0:
+            continue
+
+        trade["remaining_qty"] = (
+            trade_remaining_float - qty_to_match
+        )
+
+        matched_qty += qty_to_match
+
+    # ---------------------------------------------------------
+    # Diagnostic for exact-price path
+    # ---------------------------------------------------------
+    if matched_qty > 0:
+        state.setdefault(
+            "match_diagnostics",
+            deque(maxlen=500),
+        ).append({
+            "symbol": symbol,
+            "side": liquidity_side,
+            "price": str(liquidity_price),
+            "price_key": price_key,
+            "reduced_qty": reduced_qty_float,
+            "matched_qty": matched_qty,
+            "reduction_time": reduction_time_int,
+            "expected_is_buyer_maker": (
+                expected_is_buyer_maker
+            ),
+            "reason": "MATCH_SUCCESS",
+        })
+
+    return matched_qty
 
 
 def apply_orderbook_event(symbol, event):
