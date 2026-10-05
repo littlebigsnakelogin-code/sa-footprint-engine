@@ -1047,6 +1047,7 @@ def record_trade_for_execution_matching(
 
     return matched_total
 
+
 def match_trade_to_liquidity_reduction(
     symbol,
     liquidity_side,
@@ -1058,14 +1059,10 @@ def match_trade_to_liquidity_reduction(
     Match an orderbook liquidity reduction against previously observed
     aggressive trades.
 
-    IMPORTANT:
-    - bid liquidity can only be executed by aggressive SELL trades
-      (is_buyer_maker=True)
-    - ask liquidity can only be executed by aggressive BUY trades
-      (is_buyer_maker=False)
+    bid liquidity  -> aggressive SELL -> is_buyer_maker=True
+    ask liquidity  -> aggressive BUY  -> is_buyer_maker=False
 
-    This function also records diagnostics so we can determine why
-    a reduction did or did not match an aggressive trade.
+    Also records diagnostics when no exact trade is found.
     """
 
     if symbol not in orderbook:
@@ -1090,14 +1087,17 @@ def match_trade_to_liquidity_reduction(
 
     expected_side = liquidity_side
 
-    price_key = round(liquidity_price_float, 12)
+    price_key = round(
+        liquidity_price_float,
+        12,
+    )
 
     with lock:
         state = orderbook[symbol]
 
         diagnostics = state.setdefault(
             "match_diagnostics",
-            deque(maxlen=200)
+            deque(maxlen=200),
         )
 
         def add_diagnostic(reason, extra=None):
@@ -1116,15 +1116,21 @@ def match_trade_to_liquidity_reduction(
 
             diagnostics.append(item)
 
-        trade_index = state.get("trade_match_index", {})
+        trade_index = state.get(
+            "trade_match_index",
+            {},
+        )
 
         if not trade_index:
             add_diagnostic(
                 "NO_TRADE_INDEX",
                 {
                     "trade_history_count": len(
-                        state.get("trade_history", [])
-                    )
+                        state.get(
+                            "trade_history",
+                            [],
+                        )
+                    ),
                 },
             )
             return 0.0
@@ -1134,17 +1140,75 @@ def match_trade_to_liquidity_reduction(
             price_key,
         )
 
-        indexed_trades = trade_index.get(index_key)
+        indexed_trades = trade_index.get(
+            index_key
+        )
 
         if not indexed_trades:
+            recent_same_side = []
+
+            for trade in reversed(
+                list(
+                    state.get(
+                        "trade_history",
+                        [],
+                    )
+                )
+            ):
+                if len(recent_same_side) >= 5:
+                    break
+
+                if (
+                    trade.get("is_buyer_maker")
+                    != expected_is_buyer_maker
+                ):
+                    continue
+
+                try:
+                    trade_price_float = float(
+                        trade.get("price")
+                    )
+                    trade_time_int = int(
+                        trade.get("time")
+                    )
+                    trade_remaining_float = float(
+                        trade.get(
+                            "remaining_qty",
+                            0.0,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+                recent_same_side.append(
+                    {
+                        "price": trade_price_float,
+                        "price_key": round(
+                            trade_price_float,
+                            12,
+                        ),
+                        "time": trade_time_int,
+                        "remaining_qty":
+                            trade_remaining_float,
+                        "time_diff_ms":
+                            trade_time_int
+                            - reduction_time_int,
+                    }
+                )
+
             add_diagnostic(
                 "NO_TRADES_AT_PRICE",
                 {
-                    "expected_is_buyer_maker": expected_is_buyer_maker,
+                    "expected_is_buyer_maker":
+                        expected_is_buyer_maker,
                     "price_key": price_key,
-                    "trade_index_keys": len(trade_index),
+                    "trade_index_keys":
+                        len(trade_index),
+                    "recent_same_side_trades":
+                        recent_same_side,
                 },
             )
+
             return 0.0
 
         matched_total = 0.0
@@ -1154,14 +1218,28 @@ def match_trade_to_liquidity_reduction(
             if remaining_reduction <= 0:
                 break
 
-            if trade.get("remaining_qty", 0.0) <= 0:
+            if (
+                trade.get(
+                    "remaining_qty",
+                    0.0,
+                )
+                <= 0
+            ):
                 continue
 
             trade_time = trade.get("time")
             trade_price = trade.get("price")
-            trade_quantity = trade.get("quantity", 0.0)
-            trade_remaining = trade.get("remaining_qty", 0.0)
-            trade_is_buyer_maker = trade.get("is_buyer_maker")
+            trade_quantity = trade.get(
+                "quantity",
+                0.0,
+            )
+            trade_remaining = trade.get(
+                "remaining_qty",
+                0.0,
+            )
+            trade_is_buyer_maker = trade.get(
+                "is_buyer_maker"
+            )
 
             if trade_time is None:
                 add_diagnostic(
@@ -1173,10 +1251,18 @@ def match_trade_to_liquidity_reduction(
                 continue
 
             try:
-                trade_time_int = int(trade_time)
-                trade_price_float = float(trade_price)
-                trade_quantity_float = float(trade_quantity)
-                trade_remaining_float = float(trade_remaining)
+                trade_time_int = int(
+                    trade_time
+                )
+                trade_price_float = float(
+                    trade_price
+                )
+                trade_quantity_float = float(
+                    trade_quantity
+                )
+                trade_remaining_float = float(
+                    trade_remaining
+                )
             except (TypeError, ValueError):
                 add_diagnostic(
                     "TRADE_DATA_INVALID",
@@ -1186,58 +1272,91 @@ def match_trade_to_liquidity_reduction(
                 )
                 continue
 
-            time_diff = trade_time_int - reduction_time_int
+            time_diff = (
+                trade_time_int
+                - reduction_time_int
+            )
 
-            if time_diff < -MAX_TRADE_BEFORE_REDUCTION_MS:
+            if (
+                time_diff
+                < -MAX_TRADE_BEFORE_REDUCTION_MS
+            ):
                 add_diagnostic(
                     "TRADE_TOO_OLD",
                     {
-                        "trade_time": trade_time_int,
-                        "trade_price": trade_price_float,
-                        "trade_qty": trade_quantity_float,
-                        "time_diff_ms": time_diff,
+                        "trade_time":
+                            trade_time_int,
+                        "trade_price":
+                            trade_price_float,
+                        "trade_qty":
+                            trade_quantity_float,
+                        "time_diff_ms":
+                            time_diff,
                     },
                 )
                 continue
 
-            if time_diff > MAX_TRADE_AFTER_REDUCTION_MS:
+            if (
+                time_diff
+                > MAX_TRADE_AFTER_REDUCTION_MS
+            ):
                 add_diagnostic(
                     "TRADE_TOO_NEW",
                     {
-                        "trade_time": trade_time_int,
-                        "trade_price": trade_price_float,
-                        "trade_qty": trade_quantity_float,
-                        "time_diff_ms": time_diff,
+                        "trade_time":
+                            trade_time_int,
+                        "trade_price":
+                            trade_price_float,
+                        "trade_qty":
+                            trade_quantity_float,
+                        "time_diff_ms":
+                            time_diff,
                     },
                 )
                 continue
 
-            if trade_is_buyer_maker != expected_is_buyer_maker:
+            if (
+                trade_is_buyer_maker
+                != expected_is_buyer_maker
+            ):
                 add_diagnostic(
                     "WRONG_AGGRESSIVE_SIDE",
                     {
-                        "trade_time": trade_time_int,
-                        "trade_price": trade_price_float,
-                        "trade_qty": trade_quantity_float,
-                        "trade_is_buyer_maker": trade_is_buyer_maker,
+                        "trade_time":
+                            trade_time_int,
+                        "trade_price":
+                            trade_price_float,
+                        "trade_qty":
+                            trade_quantity_float,
+                        "trade_is_buyer_maker":
+                            trade_is_buyer_maker,
                         "expected_is_buyer_maker":
                             expected_is_buyer_maker,
                     },
                 )
                 continue
 
-            trade_price_key = round(trade_price_float, 12)
+            trade_price_key = round(
+                trade_price_float,
+                12,
+            )
 
             if trade_price_key != price_key:
                 add_diagnostic(
                     "PRICE_MISMATCH",
                     {
-                        "trade_time": trade_time_int,
-                        "trade_price": trade_price_float,
-                        "trade_price_key": trade_price_key,
-                        "liquidity_price": liquidity_price_float,
-                        "liquidity_price_key": price_key,
-                        "time_diff_ms": time_diff,
+                        "trade_time":
+                            trade_time_int,
+                        "trade_price":
+                            trade_price_float,
+                        "trade_price_key":
+                            trade_price_key,
+                        "liquidity_price":
+                            liquidity_price_float,
+                        "liquidity_price_key":
+                            price_key,
+                        "time_diff_ms":
+                            time_diff,
                     },
                 )
                 continue
@@ -1246,9 +1365,12 @@ def match_trade_to_liquidity_reduction(
                 add_diagnostic(
                     "TRADE_QTY_EXHAUSTED",
                     {
-                        "trade_time": trade_time_int,
-                        "trade_price": trade_price_float,
-                        "trade_qty": trade_quantity_float,
+                        "trade_time":
+                            trade_time_int,
+                        "trade_price":
+                            trade_price_float,
+                        "trade_qty":
+                            trade_quantity_float,
                     },
                 )
                 continue
@@ -1263,12 +1385,14 @@ def match_trade_to_liquidity_reduction(
 
             trade["remaining_qty"] = max(
                 0.0,
-                trade_remaining_float - match_qty,
+                trade_remaining_float
+                - match_qty,
             )
 
             remaining_reduction = max(
                 0.0,
-                remaining_reduction - match_qty,
+                remaining_reduction
+                - match_qty,
             )
 
             matched_total += match_qty
@@ -1276,15 +1400,20 @@ def match_trade_to_liquidity_reduction(
             add_diagnostic(
                 "MATCH_SUCCESS",
                 {
-                    "trade_time": trade_time_int,
-                    "trade_price": trade_price_float,
-                    "trade_qty": trade_quantity_float,
-                    "matched_qty": match_qty,
+                    "trade_time":
+                        trade_time_int,
+                    "trade_price":
+                        trade_price_float,
+                    "trade_qty":
+                        trade_quantity_float,
+                    "matched_qty":
+                        match_qty,
                     "remaining_trade_qty":
                         trade["remaining_qty"],
                     "remaining_reduction_qty":
                         remaining_reduction,
-                    "time_diff_ms": time_diff,
+                    "time_diff_ms":
+                        time_diff,
                 },
             )
 
