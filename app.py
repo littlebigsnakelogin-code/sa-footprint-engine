@@ -4028,265 +4028,173 @@ def api_orderbook():
 
 
 @app.route("/api/liquidity-debug")
-def api_liquidity_debug():
-
-    symbol = (
-        request.args
-        .get(
-            "symbol",
-            "BTCUSDT"
-        )
-        .upper()
-    )
+def liquidity_debug():
+    symbol = request.args.get("symbol", "").upper().strip()
 
     if symbol not in SYMBOLS:
-
         return jsonify({
             "status": "error",
-            "message": "Invalid symbol",
+            "error": "invalid_symbol",
+            "symbol": symbol,
         }), 400
 
     try:
-
-        limit = int(
-            request.args.get(
-                "limit",
-                50
-            )
-        )
-
+        limit = int(request.args.get("limit", "20"))
     except (TypeError, ValueError):
+        limit = 20
 
-        limit = 50
+    limit = max(1, min(limit, 100))
 
-    limit = max(
-        1,
-        min(
-            limit,
-            100
-        )
-    )
-
-    # --------------------------------------------------------
-    # FINALIZE FIRST
-    # --------------------------------------------------------
-
+    # Finalize pending reductions BEFORE taking the debug snapshot.
     try:
-
-        finalized_count = finalize_liquidity_records(
-            symbol
-        )
-
-    except Exception as exc:
-
-        finalized_count = 0
-
-        with lock:
-
-            collector_state["error"] = str(exc)
-
-    # --------------------------------------------------------
-    # SNAPSHOT AFTER FINALIZATION
-    # --------------------------------------------------------
+        finalize_liquidity_records(symbol)
+    except Exception as e:
+        print(f"[LIQUIDITY DEBUG] finalize error {symbol}: {e}")
 
     with lock:
-
         state = orderbook[symbol]
 
-        synchronized = state["initialized"]
-        resyncing = state["resyncing"]
+        liquidity_history = list(state.get("liquidity_history", []))
+        diagnostics = list(state.get("match_diagnostics", []))
 
-        last_update_id = (
-            state["last_update_id"]
-        )
+        fifo = state.get("liquidity_lots", {})
 
-        last_depth_update_id = (
-            state["last_depth_update_id"]
-        )
-
-        last_depth_event_time = (
-            state["last_depth_event_time"]
-        )
-
-        sequence_errors = (
-            state["sequence_errors"]
-        )
-
-        resync_count = (
-            state["resync_count"]
-        )
-
-        bid_count = len(
-            state["bids"]
-        )
-
-        ask_count = len(
-            state["asks"]
-        )
-
-        raw_history = list(
-            state["liquidity_history"]
-        )[-limit:]
-
-        raw_diagnostics = list(
-            state.get(
-                "match_diagnostics",
-                []
-            )
-        )[-10:]
+        bid_lots = fifo.get("bid", {})
+        ask_lots = fifo.get("ask", {})
 
         bid_lot_count = sum(
             len(lots)
-            for lots in state[
-                "liquidity_lots"
-            ]["bid"].values()
+            for lots in bid_lots.values()
         )
 
         ask_lot_count = sum(
             len(lots)
-            for lots in state[
-                "liquidity_lots"
-            ]["ask"].values()
+            for lots in ask_lots.values()
         )
 
-    # --------------------------------------------------------
-    # COMPACT OUTPUT
-    # --------------------------------------------------------
+        orderbook_state = {
+            "bid_count": len(state.get("bids", {})),
+            "ask_count": len(state.get("asks", {})),
+            "last_depth_event_time": state.get("last_depth_event_time"),
+            "last_depth_update_id": state.get("last_depth_update_id"),
+            "last_update_id": state.get("last_update_id"),
+            "synchronized": bool(state.get("initialized", False)),
+            "resyncing": bool(state.get("resyncing", False)),
+            "sequence_errors": state.get("sequence_errors", 0),
+            "resync_count": state.get("resync_count", 0),
+        }
 
-    def compact_record(record):
+        # Snapshot finalized history after finalization.
+        recent_history = liquidity_history[-limit:]
 
-        if not isinstance(
-            record,
-            dict
-        ):
-            return record
+        history_output = []
 
-        allowed_keys = (
-            "event",
-            "event_type",
-            "type",
-            "status",
-            "symbol",
-            "side",
-            "price",
-            "time",
-            "timestamp",
-            "created_at",
-            "updated_at",
-            "original_qty",
-            "initial_qty",
-            "old_qty",
-            "new_qty",
-            "added_qty",
-            "reduced_qty",
-            "executed_qty",
-            "remaining_qty",
-            "pulled_qty",
-            "unmatched_qty",
-            "pull_pct",
-            "fifo_executed_qty",
-            "fifo_unmatched_qty",
-            "fifo_unattributed_execution_qty",
-            "distance_pct",
-            "distance",
-            "reason",
-            "lot_id",
-            "update_id",
-        )
-
-        compact = {}
-
-        for key in allowed_keys:
-
-            if key not in record:
+        for record in recent_history:
+            if not isinstance(record, dict):
                 continue
 
-            value = record[key]
+            history_output.append({
+                "time": record.get("time"),
+                "update_id": record.get("update_id"),
+                "side": record.get("side"),
+                "price": record.get("price"),
 
-            if isinstance(
-                value,
-                (int, float)
-            ):
+                "old_qty": record.get("old_qty", 0.0),
+                "new_qty": record.get("new_qty", 0.0),
+                "added_qty": record.get("added_qty", 0.0),
+                "reduced_qty": record.get("reduced_qty", 0.0),
 
-                compact[key] = value
+                "executed_qty": record.get("executed_qty", 0.0),
+                "remaining_qty": record.get("remaining_qty", 0.0),
 
-            elif isinstance(
-                value,
-                (str, bool)
-            ) or value is None:
+                "unmatched_qty": record.get("unmatched_qty", 0.0),
+                "pulled_qty": record.get("pulled_qty", 0.0),
+                "pull_pct": record.get("pull_pct", 0.0),
 
-                compact[key] = value
+                "fifo_executed_qty": record.get(
+                    "fifo_executed_qty",
+                    0.0
+                ),
+                "fifo_unmatched_qty": record.get(
+                    "fifo_unmatched_qty",
+                    0.0
+                ),
+                "fifo_attributed_execution_qty": record.get(
+                    "fifo_attributed_execution_qty",
+                    0.0
+                ),
+                "fifo_unattributed_execution_qty": record.get(
+                    "fifo_unattributed_execution_qty",
+                    0.0
+                ),
 
-        return compact
+                "fifo_consumed_qty": record.get(
+                    "fifo_consumed_qty",
+                    0.0
+                ),
+                "fifo_unattributed_qty": record.get(
+                    "fifo_unattributed_qty",
+                    0.0
+                ),
 
-    history = [
-        compact_record(record)
-        for record in raw_history
-    ]
+                "fifo_reduction": bool(
+                    record.get("fifo_reduction", False)
+                ),
 
-    match_diagnostics = [
-        compact_record(record)
-        for record in raw_diagnostics
-    ]
+                "finalized": bool(
+                    record.get("finalized", False)
+                ),
+
+                "status": record.get("status"),
+            })
+
+        # IMPORTANT:
+        # Do NOT filter diagnostic fields here.
+        # The matcher now writes extra fields such as:
+        # recent_same_side_trades,
+        # expected_is_buyer_maker,
+        # price_key, etc.
+        #
+        # We want the COMPLETE diagnostic object exposed so we can
+        # determine whether the problem is:
+        #   1. no trade at exact price,
+        #   2. wrong aggressive side,
+        #   3. time-window mismatch,
+        #   4. price-key mismatch,
+        #   5. exhausted trade quantity,
+        #   6. or successful matching.
+        diagnostics_output = []
+
+        for diagnostic in diagnostics[-limit:]:
+            if not isinstance(diagnostic, dict):
+                continue
+
+            diagnostics_output.append(dict(diagnostic))
+
+        finalized_count = sum(
+            1
+            for record in liquidity_history
+            if isinstance(record, dict)
+            and record.get("finalized") is True
+        )
 
     return jsonify({
+        "status": "ok",
+        "symbol": symbol,
 
-        "status":
-            "ok",
-
-        "symbol":
-            symbol,
-
-        "finalized_count":
-            finalized_count,
-
-        "orderbook": {
-
-            "synchronized":
-                synchronized,
-
-            "resyncing":
-                resyncing,
-
-            "last_update_id":
-                last_update_id,
-
-            "last_depth_update_id":
-                last_depth_update_id,
-
-            "last_depth_event_time":
-                last_depth_event_time,
-
-            "sequence_errors":
-                sequence_errors,
-
-            "resync_count":
-                resync_count,
-
-            "bid_count":
-                bid_count,
-
-            "ask_count":
-                ask_count,
-
-        },
+        "orderbook": orderbook_state,
 
         "fifo": {
-
-            "bid_lot_count":
-                bid_lot_count,
-
-            "ask_lot_count":
-                ask_lot_count,
-
+            "bid_lot_count": bid_lot_count,
+            "ask_lot_count": ask_lot_count,
         },
 
-        "liquidity_history":
-            history,
+        "finalized_count": finalized_count,
 
-        "match_diagnostics":
-            match_diagnostics,
+        "liquidity_history": history_output,
 
+        # Full matcher diagnostics — no field filtering.
+        "match_diagnostics": diagnostics_output,
     })
 
 
