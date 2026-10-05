@@ -1088,6 +1088,8 @@ def match_trade_to_liquidity_reduction(
         liquidity_side == "bid"
     )
 
+    expected_side = liquidity_side
+
     price_key = round(liquidity_price_float, 12)
 
     with lock:
@@ -1128,7 +1130,7 @@ def match_trade_to_liquidity_reduction(
             return 0.0
 
         index_key = (
-            expected_is_buyer_maker,
+            expected_side,
             price_key,
         )
 
