@@ -1532,23 +1532,13 @@ def apply_orderbook_event(symbol, event):
         pulled_qty
             = finalization ke baad non-executed quantity
 
-    FIFO evidence:
-
-        fifo_consumption
-            = exactly kaunse observed old lots consume hue
-
-        fifo_unattributed_qty
-            = reduction ka woh portion jiske liye
-              modeled FIFO ledger mein enough old liquidity nahi thi
-
     IMPORTANT:
 
         - LIVE reduction ko kabhi delay nahi kiya jata.
         - Trade matching sirf attribution/evidence ke liye hai.
-        - Price approach hone se pehle hui deletion bhi record hoti hai.
-        - FIFO yahan observed liquidity additions par based hai.
-        - Binance aggregated orderbook individual order IDs nahi deta,
-          isliye ye modeled FIFO evidence hai, exchange queue ka exact proof nahi.
+        - FIFO modeled evidence hai, exchange queue ka exact proof nahi.
+        - Market/flow context abhi DIAGNOSTIC ONLY hai.
+        - Context abhi LIQUIDITY_PULLED classification ko affect nahi karta.
     """
 
     state = orderbook[symbol]
@@ -1560,14 +1550,6 @@ def apply_orderbook_event(symbol, event):
 
     # ============================================================
     # FINALIZE EXPIRED LIQUIDITY REDUCTIONS
-    #
-    # Har depth event ke arrival par purane reduction records
-    # check karo. Isse finalization sirf naye trade par dependent
-    # nahi rahega.
-    #
-    # Important:
-    # Current event ke naye reduction ko ye finalize nahi karega,
-    # kyunki uski age abhi 1500 ms se kam hogi.
     # ============================================================
 
     finalize_liquidity_records(
@@ -1580,16 +1562,474 @@ def apply_orderbook_event(symbol, event):
     #
     # Key:
     #     (side, rounded_price)
-    #
-    # New reduction records isi index mein immediately add honge.
-    # Isse next aggressive trade ko poori liquidity_history scan
-    # karne ki zarurat nahi padegi.
     # ============================================================
 
     liquidity_index = state.setdefault(
         "liquidity_match_index",
         defaultdict(deque)
     )
+
+    # ============================================================
+    # MARKET / FLOW DIAGNOSTIC CONTEXT
+    #
+    # IMPORTANT:
+    #
+    # Ye function sirf evidence capture karta hai.
+    # Iska output abhi matcher ya final classifier ko
+    # affect nahi karta.
+    #
+    # Trade history se recent aggressive flow calculate hota hai:
+    #
+    #   is_buyer_maker=False -> aggressive BUY
+    #   is_buyer_maker=True  -> aggressive SELL
+    #
+    # Windows:
+    #
+    #   1000 ms
+    #   3000 ms
+    #   10000 ms
+    #
+    # Saath mein actual traded-price range/displacement bhi
+    # capture hota hai. Isse future adaptive-distance model
+    # fixed $ distance par dependent nahi rahega.
+    # ============================================================
+
+    def get_market_flow_context(
+        reduction_price,
+        reduction_qty,
+        reduction_side,
+    ):
+        try:
+
+            reduction_price_float = float(
+                reduction_price
+            )
+
+            # ----------------------------------------------------
+            # Current visible market BEFORE this depth event
+            #
+            # Book mein event apply hone se pehle best bid/ask
+            # capture kar rahe hain.
+            # ----------------------------------------------------
+
+            bid_prices = []
+
+            for p, q in state.get(
+                "bids",
+                {}
+            ).items():
+
+                try:
+                    if float(q) > 0.0:
+                        bid_prices.append(
+                            float(p)
+                        )
+                except Exception:
+                    continue
+
+            ask_prices = []
+
+            for p, q in state.get(
+                "asks",
+                {}
+            ).items():
+
+                try:
+                    if float(q) > 0.0:
+                        ask_prices.append(
+                            float(p)
+                        )
+                except Exception:
+                    continue
+
+            best_bid = (
+                max(bid_prices)
+                if bid_prices
+                else None
+            )
+
+            best_ask = (
+                min(ask_prices)
+                if ask_prices
+                else None
+            )
+
+            # ----------------------------------------------------
+            # Market reference
+            #
+            # Midpoint preferred.
+            # Agar ek side missing ho to available side use karo.
+            # ----------------------------------------------------
+
+            if (
+                best_bid is not None
+                and best_ask is not None
+            ):
+
+                market_reference = (
+                    best_bid + best_ask
+                ) / 2.0
+
+            elif best_bid is not None:
+
+                market_reference = best_bid
+
+            elif best_ask is not None:
+
+                market_reference = best_ask
+
+            else:
+
+                market_reference = None
+
+            if market_reference is not None:
+
+                distance_from_market = (
+                    reduction_price_float
+                    - market_reference
+                )
+
+                abs_distance_from_market = abs(
+                    distance_from_market
+                )
+
+            else:
+
+                distance_from_market = None
+                abs_distance_from_market = None
+
+            # ----------------------------------------------------
+            # Trade history
+            #
+            # Different historical records ko tolerate karne ke
+            # liye common key variants handle kiye gaye hain.
+            # ----------------------------------------------------
+
+            trades = list(
+                state.get(
+                    "trade_history",
+                    []
+                )
+            )
+
+            context = {
+                "reduction_price": reduction_price_float,
+
+                "reduction_qty": float(
+                    reduction_qty
+                ),
+
+                "reduction_side": reduction_side,
+
+                "event_time": event_time,
+
+                "depth_update_id": event_update_id,
+
+                "best_bid": best_bid,
+
+                "best_ask": best_ask,
+
+                "market_reference": market_reference,
+
+                "distance_from_market": (
+                    distance_from_market
+                ),
+
+                "abs_distance_from_market": (
+                    abs_distance_from_market
+                ),
+
+                "windows": {},
+            }
+
+            # ----------------------------------------------------
+            # Rolling flow windows
+            # ----------------------------------------------------
+
+            for window_ms in (
+                1000,
+                3000,
+                10000,
+            ):
+
+                window_start = (
+                    event_time
+                    - window_ms
+                )
+
+                buy_qty = 0.0
+                sell_qty = 0.0
+                total_qty = 0.0
+
+                trade_prices = []
+
+                trade_count = 0
+
+                for trade in trades:
+
+                    try:
+
+                        trade_time = int(
+                            trade.get(
+                                "time",
+                                trade.get(
+                                    "event_time",
+                                    0
+                                )
+                            )
+                        )
+
+                    except Exception:
+
+                        continue
+
+                    if (
+                        trade_time < window_start
+                        or trade_time > event_time
+                    ):
+                        continue
+
+                    try:
+
+                        qty = float(
+                            trade.get(
+                                "qty",
+                                trade.get(
+                                    "quantity",
+                                    0.0
+                                )
+                            )
+                        )
+
+                    except Exception:
+
+                        continue
+
+                    if qty <= 0.0:
+                        continue
+
+                    try:
+
+                        price = float(
+                            trade.get(
+                                "price"
+                            )
+                        )
+
+                    except Exception:
+
+                        price = None
+
+                    is_buyer_maker = trade.get(
+                        "is_buyer_maker"
+                    )
+
+                    # ------------------------------------------------
+                    # Binance Futures aggressive-side definition
+                    #
+                    # buyer_maker=True
+                    #     -> seller was aggressive
+                    #     -> aggressive SELL
+                    #
+                    # buyer_maker=False
+                    #     -> buyer was aggressive
+                    #     -> aggressive BUY
+                    # ------------------------------------------------
+
+                    if is_buyer_maker is False:
+
+                        buy_qty += qty
+
+                    elif is_buyer_maker is True:
+
+                        sell_qty += qty
+
+                    else:
+
+                        continue
+
+                    total_qty += qty
+                    trade_count += 1
+
+                    if price is not None:
+                        trade_prices.append(
+                            price
+                        )
+
+                net_delta = (
+                    buy_qty
+                    - sell_qty
+                )
+
+                if total_qty > 0.0:
+
+                    flow_imbalance = (
+                        net_delta
+                        / total_qty
+                    )
+
+                else:
+
+                    flow_imbalance = 0.0
+
+                # ------------------------------------------------
+                # Actual observed price movement
+                #
+                # Raw flow quantity ko directly dollar distance
+                # mein convert nahi kar rahe.
+                #
+                # Actual market displacement/range capture karna
+                # future adaptive regime ke liye important hai.
+                # ------------------------------------------------
+
+                if trade_prices:
+
+                    observed_low = min(
+                        trade_prices
+                    )
+
+                    observed_high = max(
+                        trade_prices
+                    )
+
+                    observed_range = (
+                        observed_high
+                        - observed_low
+                    )
+
+                    first_trade_price = (
+                        trade_prices[0]
+                    )
+
+                    last_trade_price = (
+                        trade_prices[-1]
+                    )
+
+                    observed_displacement = (
+                        last_trade_price
+                        - first_trade_price
+                    )
+
+                    observed_abs_displacement = abs(
+                        observed_displacement
+                    )
+
+                    distance_to_range_ratio = None
+
+                    if observed_range > 0.0:
+                        distance_to_range_ratio = (
+                            abs_distance_from_market
+                            / observed_range
+                        )
+
+                else:
+
+                    observed_low = None
+                    observed_high = None
+                    observed_range = 0.0
+
+                    first_trade_price = None
+                    last_trade_price = None
+
+                    observed_displacement = 0.0
+                    observed_abs_displacement = 0.0
+
+                    distance_to_range_ratio = None
+
+                context["windows"][
+                    str(window_ms)
+                ] = {
+
+                    "window_ms": window_ms,
+
+                    "trade_count": trade_count,
+
+                    "aggressive_buy_qty": (
+                        buy_qty
+                    ),
+
+                    "aggressive_sell_qty": (
+                        sell_qty
+                    ),
+
+                    "total_aggressive_qty": (
+                        total_qty
+                    ),
+
+                    "net_aggressive_delta": (
+                        net_delta
+                    ),
+
+                    "flow_imbalance": (
+                        flow_imbalance
+                    ),
+
+                    "observed_low": (
+                        observed_low
+                    ),
+
+                    "observed_high": (
+                        observed_high
+                    ),
+
+                    "observed_range": (
+                        observed_range
+                    ),
+
+                    "first_trade_price": (
+                        first_trade_price
+                    ),
+
+                    "last_trade_price": (
+                        last_trade_price
+                    ),
+
+                    "observed_displacement": (
+                        observed_displacement
+                    ),
+
+                    "observed_abs_displacement": (
+                        observed_abs_displacement
+                    ),
+
+                    "distance_to_observed_range_ratio": (
+                        distance_to_range_ratio
+                    ),
+                }
+
+            return context
+
+        except Exception as exc:
+
+            return {
+                "error": (
+                    "market_flow_context_failed"
+                ),
+
+                "message": str(exc),
+
+                "event_time": event_time,
+
+                "depth_update_id": (
+                    event_update_id
+                ),
+
+                "reduction_price": (
+                    str(reduction_price)
+                ),
+
+                "reduction_qty": (
+                    float(reduction_qty)
+                ),
+
+                "reduction_side": (
+                    reduction_side
+                ),
+            }
+
+    # ============================================================
+    # PROCESS ONE SIDE
+    # ============================================================
 
     def process_side(
         side,
@@ -1616,7 +2056,27 @@ def apply_orderbook_event(symbol, event):
             )
 
             # ====================================================
-            # UPDATE LIVE ORDERBOOK FIRST
+            # REDUCTION CONTEXT
+            #
+            # IMPORTANT:
+            # Capture BEFORE live book update so best bid/ask
+            # reduction se pehle ka market represent kare.
+            # ====================================================
+
+            market_flow_context = None
+
+            if reduced_qty > 0.0:
+
+                market_flow_context = (
+                    get_market_flow_context(
+                        price,
+                        reduced_qty,
+                        side,
+                    )
+                )
+
+            # ====================================================
+            # UPDATE LIVE ORDERBOOK
             # ====================================================
 
             if new_quantity == 0.0:
@@ -1645,7 +2105,9 @@ def apply_orderbook_event(symbol, event):
             if added_qty > 0.0:
 
                 lots.append({
-                    "lot_id": str(uuid.uuid4()),
+                    "lot_id": str(
+                        uuid.uuid4()
+                    ),
 
                     "original_qty": float(
                         added_qty
@@ -1656,7 +2118,9 @@ def apply_orderbook_event(symbol, event):
                     ),
 
                     "time": event_time,
+
                     "origin": "depth_add",
+
                     "update_id": event_update_id,
                 })
 
@@ -1728,8 +2192,10 @@ def apply_orderbook_event(symbol, event):
                             )
                         ),
 
-                        "origin_update_id": oldest_lot.get(
-                            "update_id"
+                        "origin_update_id": (
+                            oldest_lot.get(
+                                "update_id"
+                            )
                         ),
 
                         "original_qty": float(
@@ -1763,11 +2229,6 @@ def apply_orderbook_event(symbol, event):
                     ):
 
                         lots.popleft()
-
-                # ------------------------------------------------
-                # Agar modeled FIFO ledger mein enough quantity
-                # nahi thi, to remainder explicitly record karo.
-                # ------------------------------------------------
 
                 fifo_unattributed_qty = max(
                     remaining_reduction,
@@ -1826,11 +2287,7 @@ def apply_orderbook_event(symbol, event):
                 )
 
                 # ------------------------------------------------
-                # FIFO CONSUMPTION PAR EXECUTION ATTRIBUTE KARO
-                #
-                # Trade attribution bhi FIFO order mein assign
-                # hoga, taaki old liquidity ke execution ko
-                # new liquidity ke saath mix na kiya jaye.
+                # FIFO EXECUTION ATTRIBUTION
                 # ------------------------------------------------
 
                 remaining_execution = (
@@ -1871,7 +2328,7 @@ def apply_orderbook_event(symbol, event):
                     )
 
                 # ------------------------------------------------
-                # FIFO evidence ko direct event mein preserve karo.
+                # LIQUIDITY RECORD
                 # ------------------------------------------------
 
                 liquidity_record = {
@@ -1950,6 +2407,17 @@ def apply_orderbook_event(symbol, event):
                     ),
 
                     # --------------------------------------------
+                    # MARKET / FLOW DIAGNOSTIC EVIDENCE
+                    #
+                    # Diagnostic only.
+                    # Classifier abhi is data ko use nahi karta.
+                    # --------------------------------------------
+
+                    "market_context": (
+                        market_flow_context
+                    ),
+
+                    # --------------------------------------------
                     # LIVE STATE
                     # --------------------------------------------
 
@@ -1968,12 +2436,6 @@ def apply_orderbook_event(symbol, event):
 
                 # =================================================
                 # INDEX NEW LIQUIDITY MOVEMENT
-                #
-                # Future aggressive trades ab poori
-                # liquidity_history scan nahi karenge.
-                #
-                # Sirf same side + same price ke pending
-                # reduction records dekhe jayenge.
                 # =================================================
 
                 if reduced_qty > 0.0:
@@ -2016,11 +2478,17 @@ def apply_orderbook_event(symbol, event):
     # UPDATE SYNC STATE
     # ============================================================
 
-    state["last_update_id"] = event_update_id
+    state["last_update_id"] = (
+        event_update_id
+    )
 
-    state["last_depth_update_id"] = event_update_id
+    state["last_depth_update_id"] = (
+        event_update_id
+    )
 
-    state["last_depth_event_time"] = now_ms()
+    state["last_depth_event_time"] = (
+        now_ms()
+    )
 
 
 def initialize_orderbook(symbol):
