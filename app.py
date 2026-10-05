@@ -704,6 +704,9 @@ def record_trade_for_execution_matching(
         2. depth reduction happens before trade
 
     A trade is matched only within the allowed execution window.
+
+    Diagnostic instrumentation in this function is observation-only.
+    It does not change matching/accounting behavior.
     """
 
     if symbol not in orderbook:
@@ -722,6 +725,195 @@ def record_trade_for_execution_matching(
 
     state = orderbook[symbol]
 
+    # --------------------------------------------------------
+    # TRADE EVENT DIAGNOSTICS
+    # --------------------------------------------------------
+
+    diagnostic_history = state.setdefault(
+        "trade_flow_diagnostics",
+        deque(maxlen=300),
+    )
+
+    expected_side = (
+        "bid"
+        if is_buyer_maker
+        else "ask"
+    )
+
+    price_key = round(price, 12)
+
+    # Snapshot the state BEFORE inserting this trade into the
+    # trade index. This tells us exactly what the engine could
+    # see at trade-arrival time.
+    trade_match_index = state.setdefault(
+        "trade_match_index",
+        defaultdict(deque),
+    )
+
+    liquidity_match_index = state.setdefault(
+        "liquidity_match_index",
+        defaultdict(deque),
+    )
+
+    same_price_trade_key = (
+        expected_side,
+        price_key,
+    )
+
+    existing_same_price_trades = list(
+        trade_match_index.get(
+            same_price_trade_key,
+            (),
+        )
+    )
+
+    existing_same_price_trade_snapshot = []
+
+    for existing_trade in existing_same_price_trades[-10:]:
+        try:
+            existing_trade_time = int(
+                existing_trade.get("time")
+            )
+        except (TypeError, ValueError):
+            continue
+
+        existing_same_price_trade_snapshot.append({
+            "time": existing_trade_time,
+            "price": float(
+                existing_trade.get(
+                    "price",
+                    price,
+                )
+            ),
+            "quantity": float(
+                existing_trade.get(
+                    "quantity",
+                    0.0,
+                )
+            ),
+            "remaining_qty": float(
+                existing_trade.get(
+                    "remaining_qty",
+                    0.0,
+                )
+            ),
+            "time_diff_ms": (
+                trade_time - existing_trade_time
+            ),
+        })
+
+    # Snapshot pending liquidity reductions at the exact
+    # same side/price BEFORE this trade is processed.
+    same_price_liquidity = list(
+        liquidity_match_index.get(
+            same_price_trade_key,
+            (),
+        )
+    )
+
+    pending_liquidity_snapshot = []
+
+    for liquidity in same_price_liquidity[-10:]:
+
+        if liquidity.get("finalized"):
+            continue
+
+        try:
+            liquidity_time = int(
+                liquidity.get(
+                    "time",
+                    0,
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            reduced_qty = float(
+                liquidity.get(
+                    "reduced_qty",
+                    0.0,
+                )
+            )
+        except (TypeError, ValueError):
+            reduced_qty = 0.0
+
+        try:
+            executed_qty = float(
+                liquidity.get(
+                    "executed_qty",
+                    0.0,
+                )
+            )
+        except (TypeError, ValueError):
+            executed_qty = 0.0
+
+        pending_liquidity_snapshot.append({
+            "time": liquidity_time,
+            "price": float(
+                liquidity.get(
+                    "price",
+                    price,
+                )
+            ),
+            "reduced_qty": reduced_qty,
+            "executed_qty": executed_qty,
+            "unmatched_qty": max(
+                0.0,
+                reduced_qty - executed_qty,
+            ),
+            "status": liquidity.get(
+                "status"
+            ),
+            "time_diff_ms": (
+                trade_time - liquidity_time
+            ),
+        })
+
+    diagnostic_history.append({
+        "event": "TRADE_ARRIVAL",
+        "time": trade_time,
+        "symbol": symbol,
+        "price": price,
+        "quantity": quantity,
+        "is_buyer_maker": is_buyer_maker,
+        "expected_side": expected_side,
+        "trade_index_key": [
+            expected_side,
+            price_key,
+        ],
+        "trade_index_key_count_before": len(
+            existing_same_price_trades
+        ),
+        "pending_liquidity_key_count_before": len(
+            same_price_liquidity
+        ),
+        "existing_same_price_trades": (
+            existing_same_price_trade_snapshot
+        ),
+        "pending_same_price_liquidity": (
+            pending_liquidity_snapshot
+        ),
+        "trade_history_count_before": len(
+            state.get(
+                "trade_history",
+                (),
+            )
+        ),
+        "liquidity_history_count": len(
+            state.get(
+                "liquidity_history",
+                (),
+            )
+        ),
+        "last_depth_event_time": state.get(
+            "last_depth_event_time"
+        ),
+        "last_depth_update_id": state.get(
+            "last_depth_update_id"
+        ),
+    })
+
     trade_record = {
         "time": trade_time,
         "price": price,
@@ -734,19 +926,6 @@ def record_trade_for_execution_matching(
     # TRADE INDEX
     # --------------------------------------------------------
 
-    trade_match_index = state.setdefault(
-        "trade_match_index",
-        defaultdict(deque),
-    )
-
-    expected_side = (
-        "bid"
-        if is_buyer_maker
-        else "ask"
-    )
-
-    price_key = round(price, 12)
-
     trade_match_index[
         (expected_side, price_key)
     ].append(trade_record)
@@ -754,11 +933,6 @@ def record_trade_for_execution_matching(
     # --------------------------------------------------------
     # LIQUIDITY INDEX
     # --------------------------------------------------------
-
-    liquidity_match_index = state.setdefault(
-        "liquidity_match_index",
-        defaultdict(deque),
-    )
 
     # Add every existing pending reduction to the index.
     #
@@ -3960,8 +4134,17 @@ def liquidity_debug():
     with lock:
         state = orderbook[symbol]
 
-        liquidity_history = list(state.get("liquidity_history", []))
-        diagnostics = list(state.get("match_diagnostics", []))
+        liquidity_history = list(
+            state.get("liquidity_history", [])
+        )
+
+        diagnostics = list(
+            state.get("match_diagnostics", [])
+        )
+
+        trade_flow_diagnostics = list(
+            state.get("trade_flow_diagnostics", [])
+        )
 
         fifo = state.get("liquidity_lots", {})
 
@@ -3978,16 +4161,54 @@ def liquidity_debug():
             for lots in ask_lots.values()
         )
 
+        trade_match_index = state.get(
+            "trade_match_index",
+            {}
+        )
+
+        liquidity_match_index = state.get(
+            "liquidity_match_index",
+            {}
+        )
+
+        trade_index_key_count = len(
+            trade_match_index
+        )
+
+        liquidity_index_key_count = len(
+            liquidity_match_index
+        )
+
         orderbook_state = {
-            "bid_count": len(state.get("bids", {})),
-            "ask_count": len(state.get("asks", {})),
-            "last_depth_event_time": state.get("last_depth_event_time"),
-            "last_depth_update_id": state.get("last_depth_update_id"),
-            "last_update_id": state.get("last_update_id"),
-            "synchronized": bool(state.get("initialized", False)),
-            "resyncing": bool(state.get("resyncing", False)),
-            "sequence_errors": state.get("sequence_errors", 0),
-            "resync_count": state.get("resync_count", 0),
+            "bid_count": len(
+                state.get("bids", {})
+            ),
+            "ask_count": len(
+                state.get("asks", {})
+            ),
+            "last_depth_event_time": state.get(
+                "last_depth_event_time"
+            ),
+            "last_depth_update_id": state.get(
+                "last_depth_update_id"
+            ),
+            "last_update_id": state.get(
+                "last_update_id"
+            ),
+            "synchronized": bool(
+                state.get("initialized", False)
+            ),
+            "resyncing": bool(
+                state.get("resyncing", False)
+            ),
+            "sequence_errors": state.get(
+                "sequence_errors",
+                0
+            ),
+            "resync_count": state.get(
+                "resync_count",
+                0
+            ),
         }
 
         # Snapshot finalized history after finalization.
@@ -3996,6 +4217,7 @@ def liquidity_debug():
         history_output = []
 
         for record in recent_history:
+
             if not isinstance(record, dict):
                 continue
 
@@ -4005,17 +4227,44 @@ def liquidity_debug():
                 "side": record.get("side"),
                 "price": record.get("price"),
 
-                "old_qty": record.get("old_qty", 0.0),
-                "new_qty": record.get("new_qty", 0.0),
-                "added_qty": record.get("added_qty", 0.0),
-                "reduced_qty": record.get("reduced_qty", 0.0),
+                "old_qty": record.get(
+                    "old_qty",
+                    0.0
+                ),
+                "new_qty": record.get(
+                    "new_qty",
+                    0.0
+                ),
+                "added_qty": record.get(
+                    "added_qty",
+                    0.0
+                ),
+                "reduced_qty": record.get(
+                    "reduced_qty",
+                    0.0
+                ),
 
-                "executed_qty": record.get("executed_qty", 0.0),
-                "remaining_qty": record.get("remaining_qty", 0.0),
+                "executed_qty": record.get(
+                    "executed_qty",
+                    0.0
+                ),
+                "remaining_qty": record.get(
+                    "remaining_qty",
+                    0.0
+                ),
 
-                "unmatched_qty": record.get("unmatched_qty", 0.0),
-                "pulled_qty": record.get("pulled_qty", 0.0),
-                "pull_pct": record.get("pull_pct", 0.0),
+                "unmatched_qty": record.get(
+                    "unmatched_qty",
+                    0.0
+                ),
+                "pulled_qty": record.get(
+                    "pulled_qty",
+                    0.0
+                ),
+                "pull_pct": record.get(
+                    "pull_pct",
+                    0.0
+                ),
 
                 "fifo_executed_qty": record.get(
                     "fifo_executed_qty",
@@ -4044,64 +4293,110 @@ def liquidity_debug():
                 ),
 
                 "fifo_reduction": bool(
-                    record.get("fifo_reduction", False)
+                    record.get(
+                        "fifo_reduction",
+                        False
+                    )
                 ),
 
                 "finalized": bool(
-                    record.get("finalized", False)
+                    record.get(
+                        "finalized",
+                        False
+                    )
                 ),
 
-                "status": record.get("status"),
+                "status": record.get(
+                    "status"
+                ),
             })
 
-        # IMPORTANT:
-        # Do NOT filter diagnostic fields here.
-        # The matcher now writes extra fields such as:
-        # recent_same_side_trades,
-        # expected_is_buyer_maker,
-        # price_key, etc.
-        #
-        # We want the COMPLETE diagnostic object exposed so we can
-        # determine whether the problem is:
-        #   1. no trade at exact price,
-        #   2. wrong aggressive side,
-        #   3. time-window mismatch,
-        #   4. price-key mismatch,
-        #   5. exhausted trade quantity,
-        #   6. or successful matching.
+        # ----------------------------------------------------
+        # MATCHER DIAGNOSTICS
+        # ----------------------------------------------------
+
         diagnostics_output = []
 
         for diagnostic in diagnostics[-limit:]:
-            if not isinstance(diagnostic, dict):
+
+            if not isinstance(
+                diagnostic,
+                dict
+            ):
                 continue
 
-            diagnostics_output.append(dict(diagnostic))
+            diagnostics_output.append(
+                dict(diagnostic)
+            )
 
-        finalized_count = sum(
-            1
-            for record in liquidity_history
-            if isinstance(record, dict)
-            and record.get("finalized") is True
-        )
+        # ----------------------------------------------------
+        # TRADE FLOW DIAGNOSTICS
+        # ----------------------------------------------------
+        #
+        # These records are generated at the exact moment a
+        # trade enters the matcher.
+        #
+        # They let us determine what the engine could actually
+        # see at trade-arrival time:
+        #
+        #   - existing same-price trades
+        #   - pending same-price liquidity
+        #   - trade index state
+        #   - liquidity index state
+        #   - depth timing
+        #
+        # This is observation-only and does not affect matching.
+        # ----------------------------------------------------
 
-    return jsonify({
-        "status": "ok",
-        "symbol": symbol,
+        trade_flow_diagnostics_output = []
 
-        "orderbook": orderbook_state,
+        for diagnostic in trade_flow_diagnostics[-limit:]:
 
-        "fifo": {
-            "bid_lot_count": bid_lot_count,
-            "ask_lot_count": ask_lot_count,
-        },
+            if not isinstance(
+                diagnostic,
+                dict
+            ):
+                continue
 
-        "finalized_count": finalized_count,
+            trade_flow_diagnostics_output.append(
+                dict(diagnostic)
+            )
 
-        "liquidity_history": history_output,
+        return jsonify({
+            "status": "ok",
+            "symbol": symbol,
 
-        # Full matcher diagnostics — no field filtering.
-        "match_diagnostics": diagnostics_output,
-    })
+            "orderbook": orderbook_state,
+
+            "fifo": {
+                "bid_lot_count": bid_lot_count,
+                "ask_lot_count": ask_lot_count,
+            },
+
+            "indexes": {
+                "trade_match_index_keys": (
+                    trade_index_key_count
+                ),
+                "liquidity_match_index_keys": (
+                    liquidity_index_key_count
+                ),
+                "trade_flow_diagnostics_count": len(
+                    trade_flow_diagnostics
+                ),
+            },
+
+            "finalized_count": finalized_count,
+
+            "liquidity_history": history_output,
+
+            # Existing matcher diagnostics.
+            "match_diagnostics": diagnostics_output,
+
+            # New event-flow diagnostics.
+            "trade_flow_diagnostics": (
+                trade_flow_diagnostics_output
+            ),
+        })
 
 
 @app.route("/api/scan")
