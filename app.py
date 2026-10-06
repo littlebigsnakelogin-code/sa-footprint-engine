@@ -3356,17 +3356,11 @@ def initialize_orderbook(symbol):
     """
     Binance Futures local orderbook synchronization.
 
-    Startup/resync flow:
-
-    1. Depth events pehle buffer hote hain.
-    2. Binance Futures WS API snapshot liya jata hai.
-    3. Snapshot ke lastUpdateId ke saath buffered event bridge
-       locate kiya jata hai.
-    4. Bridge valid hone par snapshot + buffered events apply hote hain.
-    5. FIFO liquidity lots snapshot se seed hote hain.
-    6. Sequence invalid hone par attempt safely stop hota hai.
-    7. Snapshot failure / timeout par resyncing flag permanently
-       stuck nahi hota.
+    Diagnostic version:
+    - Snapshot successfully mil raha hai ya nahi verify karta hai.
+    - Snapshot ke baad buffered depth-event range log karta hai.
+    - Bridge condition ko change nahi karta.
+    - Existing synchronization logic preserve karta hai.
     """
 
     BRIDGE_WAIT_SECONDS = 10
@@ -3456,6 +3450,39 @@ def initialize_orderbook(symbol):
             f"asks={len(snapshot_asks)}"
         )
 
+        # ---------------------------------------------------------
+        # DIAGNOSTIC: inspect buffered event range
+        # ---------------------------------------------------------
+
+        with lock:
+
+            state = orderbook[symbol]
+
+            if state["buffer"]:
+
+                first_event = state["buffer"][0]
+                last_event = state["buffer"][-1]
+
+                print(
+                    f"[ORDERBOOK DEBUG] BUFFER {symbol} "
+                    f"count={len(state['buffer'])} "
+                    f"first_U={first_event.get('U')} "
+                    f"first_u={first_event.get('u')} "
+                    f"first_pu={first_event.get('pu')} "
+                    f"last_U={last_event.get('U')} "
+                    f"last_u={last_event.get('u')} "
+                    f"last_pu={last_event.get('pu')} "
+                    f"snapshot={snapshot_last_update_id} "
+                    f"target={snapshot_last_update_id + 1}"
+                )
+
+            else:
+
+                print(
+                    f"[ORDERBOOK DEBUG] BUFFER EMPTY {symbol} "
+                    f"snapshot={snapshot_last_update_id}"
+                )
+
         bridge_wait_started = time.time()
 
         while True:
@@ -3484,7 +3511,7 @@ def initialize_orderbook(symbol):
                     return False
 
                 # -------------------------------------------------
-                # Remove events that are already covered by snapshot
+                # Remove events already covered by snapshot
                 # -------------------------------------------------
 
                 while state["buffer"]:
@@ -3534,12 +3561,6 @@ def initialize_orderbook(symbol):
 
                 if bridge_index is None:
 
-                    while len(
-                        state["buffer"]
-                    ) > 2000:
-
-                        state["buffer"].popleft()
-
                     elapsed = (
                         time.time()
                         - bridge_wait_started
@@ -3551,7 +3572,6 @@ def initialize_orderbook(symbol):
 
                     else:
 
-                        # Lock release ke baad short sleep.
                         retry_snapshot = False
 
                 # -------------------------------------------------
@@ -3653,7 +3673,7 @@ def initialize_orderbook(symbol):
                         })
 
                     # ---------------------------------------------
-                    # Apply bridge + all following buffered events
+                    # Apply bridge + following buffered events
                     # ---------------------------------------------
 
                     buffered_events = list(
@@ -3698,7 +3718,7 @@ def initialize_orderbook(symbol):
                                 valid = False
                                 break
 
-                        # Every following event must chain correctly.
+                        # Following events must chain correctly.
                         else:
 
                             event_previous_id = (
@@ -3871,12 +3891,6 @@ def initialize_orderbook(symbol):
         return False
 
     finally:
-
-        # ---------------------------------------------------------
-        # Safety net:
-        # initializer kisi unexpected exception ki wajah se
-        # resyncing=True me permanently stuck na rahe.
-        # ---------------------------------------------------------
 
         with lock:
 
