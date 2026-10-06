@@ -3363,7 +3363,7 @@ def initialize_orderbook(symbol):
     - Existing synchronization logic preserve karta hai.
     """
 
-    BRIDGE_WAIT_SECONDS = 10
+    BRIDGE_WAIT_SECONDS = 60
     BRIDGE_CHECK_INTERVAL = 0.05
 
     print(
