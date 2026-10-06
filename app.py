@@ -5499,7 +5499,7 @@ def liquidity_debug():
             1,
             min(
                 int(request.args.get("limit", 20)),
-                100
+                50
             )
         )
     except Exception:
@@ -5516,8 +5516,8 @@ def liquidity_debug():
 
         state = orderbook[symbol]
 
-        bids = dict(state.get("bids", {}))
-        asks = dict(state.get("asks", {}))
+        bids = state.get("bids", {})
+        asks = state.get("asks", {})
 
         fifo = state.get("liquidity_lots", {})
         bid_lots = fifo.get("bid", {})
@@ -5564,36 +5564,37 @@ def liquidity_debug():
 
         history_tail = liquidity_history[-limit:]
 
-        diagnostics_tail = match_diagnostics[-limit:]
+        diagnostics_tail = match_diagnostics[-5:]
 
-        trade_flow_tail = trade_flow_diagnostics[-limit:]
+        trade_flow_tail = trade_flow_diagnostics[-5:]
 
-        trade_index_keys = [
-            str(key)
-            for key in trade_match_index.keys()
-        ]
+        compact_history = []
 
-        liquidity_index_keys = [
-            str(key)
-            for key in liquidity_match_index.keys()
-        ]
+        for record in history_tail:
+            if not isinstance(record, dict):
+                continue
+
+            compact_history.append({
+                "time": record.get("time"),
+                "price": record.get("price"),
+                "side": record.get("side"),
+                "reduced_qty": record.get("reduced_qty"),
+                "executed_qty": record.get("executed_qty"),
+                "unmatched_qty": record.get("unmatched_qty"),
+                "pulled_qty": record.get("pulled_qty"),
+                "pull_pct": record.get("pull_pct"),
+                "status": record.get("status"),
+                "finalized": record.get("finalized")
+            })
 
         response = {
             "symbol": symbol,
 
             "orderbook": {
-                "initialized": state.get(
-                    "initialized"
-                ),
-                "synchronized": state.get(
-                    "synchronized"
-                ),
-                "resyncing": state.get(
-                    "resyncing"
-                ),
-                "last_update_id": state.get(
-                    "last_update_id"
-                ),
+                "initialized": state.get("initialized"),
+                "synchronized": state.get("synchronized"),
+                "resyncing": state.get("resyncing"),
+                "last_update_id": state.get("last_update_id"),
                 "last_depth_update_id": state.get(
                     "last_depth_update_id"
                 ),
@@ -5619,10 +5620,10 @@ def liquidity_debug():
 
             "indexes": {
                 "trade_match_index_keys": len(
-                    trade_index_keys
+                    trade_match_index
                 ),
                 "liquidity_match_index_keys": len(
-                    liquidity_index_keys
+                    liquidity_match_index
                 ),
                 "trade_flow_diagnostics_count": len(
                     trade_flow_diagnostics
@@ -5631,7 +5632,7 @@ def liquidity_debug():
 
             "finalized_count": finalized_count,
 
-            "liquidity_history": history_tail,
+            "liquidity_history": compact_history,
 
             "match_diagnostics": diagnostics_tail,
 
