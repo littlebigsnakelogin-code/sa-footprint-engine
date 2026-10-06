@@ -379,25 +379,16 @@ ORDERBOOK_SNAPSHOT_LIMIT = 1000
 def fetch_orderbook_snapshot_ws(symbol):
     SNAPSHOT_DEADLINE = 20
     SOCKET_TIMEOUT = 5
-    LOCK_TIMEOUT = 15
 
     ws = None
-    lock_acquired = False
     started_at = time.time()
 
     try:
         ws_url = "wss://ws-fapi.binance.com/ws-fapi/v1"
 
-        print(f"[SNAPSHOT] REQUESTING LOCK {symbol}")
-
-        if not snapshot_ws_lock.acquire(timeout=LOCK_TIMEOUT):
-            print(f"[SNAPSHOT] LOCK TIMEOUT {symbol}")
-            return None
-
-        lock_acquired = True
-
-        print(f"[SNAPSHOT] LOCK ACQUIRED {symbol}")
-        print(f"[SNAPSHOT] CONNECTING {symbol}")
+        print(
+            f"[SNAPSHOT] CONNECTING {symbol}"
+        )
 
         ws = websocket.create_connection(
             ws_url,
@@ -410,11 +401,16 @@ def fetch_orderbook_snapshot_ws(symbol):
         )
 
         try:
-            ws.settimeout(SOCKET_TIMEOUT)
+            ws.settimeout(
+                SOCKET_TIMEOUT
+            )
         except Exception:
             pass
 
-        request_id = int(time.time() * 1000) % 1000000000
+        request_id = (
+            int(time.time() * 1000)
+            % 1000000000
+        )
 
         request = {
             "id": request_id,
@@ -425,15 +421,25 @@ def fetch_orderbook_snapshot_ws(symbol):
             }
         }
 
-        ws.send(json.dumps(request))
+        ws.send(
+            json.dumps(request)
+        )
 
-        print(f"[SNAPSHOT] REQUEST SENT {symbol}")
+        print(
+            f"[SNAPSHOT] REQUEST SENT {symbol}"
+        )
 
-        deadline = time.time() + SNAPSHOT_DEADLINE
+        deadline = (
+            time.time()
+            + SNAPSHOT_DEADLINE
+        )
 
         while time.time() < deadline:
 
-            remaining = deadline - time.time()
+            remaining = (
+                deadline
+                - time.time()
+            )
 
             if remaining <= 0:
                 break
@@ -442,7 +448,10 @@ def fetch_orderbook_snapshot_ws(symbol):
                 ws.settimeout(
                     min(
                         SOCKET_TIMEOUT,
-                        max(0.5, remaining)
+                        max(
+                            0.5,
+                            remaining
+                        )
                     )
                 )
             except Exception:
@@ -453,7 +462,8 @@ def fetch_orderbook_snapshot_ws(symbol):
 
             except websocket.WebSocketTimeoutException:
                 print(
-                    f"[SNAPSHOT] WAITING RESPONSE {symbol}"
+                    f"[SNAPSHOT] "
+                    f"WAITING RESPONSE {symbol}"
                 )
                 continue
 
@@ -468,7 +478,9 @@ def fetch_orderbook_snapshot_ws(symbol):
                 continue
 
             try:
-                response = json.loads(raw)
+                response = json.loads(
+                    raw
+                )
 
             except Exception as e:
                 print(
@@ -480,47 +492,77 @@ def fetch_orderbook_snapshot_ws(symbol):
             if response.get("id") != request_id:
                 continue
 
-            status = response.get("status")
+            status = response.get(
+                "status"
+            )
 
             if status != 200:
                 print(
                     f"[SNAPSHOT] API ERROR {symbol}: "
-                    f"status={status} response={response}"
+                    f"status={status} "
+                    f"response={response}"
                 )
                 return None
 
-            result = response.get("result")
+            result = response.get(
+                "result"
+            )
 
-            if not isinstance(result, dict):
+            if not isinstance(
+                result,
+                dict
+            ):
                 print(
                     f"[SNAPSHOT] INVALID RESULT {symbol}: "
                     f"{response}"
                 )
                 return None
 
-            last_update_id = result.get("lastUpdateId")
-            bids = result.get("bids")
-            asks = result.get("asks")
+            last_update_id = result.get(
+                "lastUpdateId"
+            )
+
+            bids = result.get(
+                "bids"
+            )
+
+            asks = result.get(
+                "asks"
+            )
 
             if (
                 last_update_id is None
-                or not isinstance(bids, list)
-                or not isinstance(asks, list)
+                or not isinstance(
+                    bids,
+                    list
+                )
+                or not isinstance(
+                    asks,
+                    list
+                )
             ):
                 print(
-                    f"[SNAPSHOT] INVALID SNAPSHOT {symbol}: "
-                    f"lastUpdateId={last_update_id} "
-                    f"bids={type(bids).__name__} "
-                    f"asks={type(asks).__name__}"
+                    f"[SNAPSHOT] "
+                    f"INVALID SNAPSHOT {symbol}: "
+                    f"lastUpdateId="
+                    f"{last_update_id} "
+                    f"bids="
+                    f"{type(bids).__name__} "
+                    f"asks="
+                    f"{type(asks).__name__}"
                 )
                 return None
 
-            elapsed = time.time() - started_at
+            elapsed = (
+                time.time()
+                - started_at
+            )
 
             print(
                 f"[SNAPSHOT] RESPONSE OK {symbol} "
                 f"lastUpdateId={last_update_id} "
-                f"bids={len(bids)} asks={len(asks)} "
+                f"bids={len(bids)} "
+                f"asks={len(asks)} "
                 f"({elapsed:.2f}s)"
             )
 
@@ -528,15 +570,18 @@ def fetch_orderbook_snapshot_ws(symbol):
 
         print(
             f"[SNAPSHOT] TIMEOUT {symbol} "
-            f"after {time.time() - started_at:.2f}s"
+            f"after "
+            f"{time.time() - started_at:.2f}s"
         )
 
         return None
 
     except websocket.WebSocketTimeoutException:
         print(
-            f"[SNAPSHOT] CONNECTION/RECV TIMEOUT {symbol} "
-            f"after {time.time() - started_at:.2f}s"
+            f"[SNAPSHOT] "
+            f"CONNECTION/RECV TIMEOUT {symbol} "
+            f"after "
+            f"{time.time() - started_at:.2f}s"
         )
         return None
 
@@ -552,14 +597,9 @@ def fetch_orderbook_snapshot_ws(symbol):
         if ws is not None:
             try:
                 ws.close()
-                print(f"[SNAPSHOT] CLOSED {symbol}")
-            except Exception:
-                pass
-
-        if lock_acquired:
-            try:
-                snapshot_ws_lock.release()
-                print(f"[SNAPSHOT] LOCK RELEASED {symbol}")
+                print(
+                    f"[SNAPSHOT] CLOSED {symbol}"
+                )
             except Exception:
                 pass
 
