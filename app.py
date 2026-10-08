@@ -5839,7 +5839,22 @@ def liquidity_debug():
                 "pulled_qty": record.get("pulled_qty"),
                 "pull_pct": record.get("pull_pct"),
                 "status": record.get("status"),
-                "finalized": record.get("finalized")
+                "finalized": record.get("finalized"),
+
+                # Adaptive liquidity context
+                "market_flow_context": record.get(
+                    "market_flow_context"
+                ),
+
+                # Backward/alternate key support
+                "market_context": record.get(
+                    "market_context"
+                ),
+
+                # Explicit adaptive block if stored directly
+                "adaptive": record.get(
+                    "adaptive"
+                )
             })
 
         response = {
