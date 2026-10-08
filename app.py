@@ -1568,17 +1568,22 @@ def apply_orderbook_event(symbol, event):
           -> EXECUTION MATCH
           -> PULL / ABSORPTION
 
+    Adaptive relevance:
+
+        - 1s / 3s / 10s relevant aggressive flow
+        - liquidity vs relevant flow
+        - distance vs observed market movement
+        - approach pressure
+        - bounded significance score
+
     IMPORTANT:
 
         - LIVE reduction ko kabhi delay nahi kiya jata.
         - Trade matching sirf attribution/evidence ke liye hai.
         - FIFO modeled evidence hai, exchange queue ka exact proof nahi.
-        - Market/flow context diagnostic evidence hai.
-        - Lifecycle data abhi LIQUIDITY_PULLED classification ko affect nahi
-          karta.
+        - Adaptive relevance classification nahi hai.
+        - LIQUIDITY_PULLED ka existing finalization behavior unchanged hai.
         - Koi fixed BTC / dollar / distance threshold use nahi hota.
-        - Approach flow actual market approach ke baad accumulate hota hai.
-        - Lifecycle scan sirf market-reference change par hota hai.
     """
 
     state = orderbook[symbol]
@@ -1608,9 +1613,6 @@ def apply_orderbook_event(symbol, event):
 
     # ============================================================
     # MARKET REFERENCE
-    #
-    # Cached per depth event.
-    # Book mutation ke baad cache invalidate hota hai.
     # ============================================================
 
     market_cache = {
@@ -1741,15 +1743,6 @@ def apply_orderbook_event(symbol, event):
         []
     )
 
-    # ------------------------------------------------------------
-    # New trades ko cumulative lifecycle flow mein absorb karo.
-    #
-    # IMPORTANT:
-    # Har inspected trade ko seen mark karte hain, including
-    # malformed/unsupported records, taaki same record baar-baar
-    # scan na ho.
-    # ------------------------------------------------------------
-
     for trade in reversed(
         trades_for_lifecycle
     ):
@@ -1859,13 +1852,6 @@ def apply_orderbook_event(symbol, event):
 
     # ============================================================
     # UPDATE EXISTING LOT LIFECYCLE
-    #
-    # Optimization:
-    #
-    # Agar best bid/ask / market reference change nahi hua,
-    # to 3000+ lots ko dobara scan karne ki zarurat nahi.
-    #
-    # Market reference change hone par hi lifecycle state refresh.
     # ============================================================
 
     if (
@@ -1920,10 +1906,6 @@ def apply_orderbook_event(symbol, event):
 
                         first_seen_time = event_time
 
-                    # --------------------------------------------
-                    # Lifetime
-                    # --------------------------------------------
-
                     lot[
                         "time_alive_ms"
                     ] = max(
@@ -1931,10 +1913,6 @@ def apply_orderbook_event(symbol, event):
                         - first_seen_time,
                         0
                     )
-
-                    # --------------------------------------------
-                    # Closest market distance
-                    # --------------------------------------------
 
                     previous_closest = lot.get(
                         "closest_market_distance"
@@ -1957,10 +1935,6 @@ def apply_orderbook_event(symbol, event):
                         lot[
                             "closest_market_time"
                         ] = event_time
-
-                    # --------------------------------------------
-                    # Initial observed distance
-                    # --------------------------------------------
 
                     first_seen_market_price = lot.get(
                         "first_seen_market_price"
@@ -1992,10 +1966,6 @@ def apply_orderbook_event(symbol, event):
 
                             initial_distance = None
 
-                    # --------------------------------------------
-                    # MARKET APPROACH
-                    # --------------------------------------------
-
                     approach_started_now = False
 
                     if (
@@ -2013,10 +1983,6 @@ def apply_orderbook_event(symbol, event):
                         ] = True
 
                         approach_started_now = True
-
-                    # --------------------------------------------
-                    # APPROACH FLOW BASELINE
-                    # --------------------------------------------
 
                     if approach_started_now:
 
@@ -2075,10 +2041,6 @@ def apply_orderbook_event(symbol, event):
                         lot[
                             "approach_flow_start_time"
                         ] = event_time
-
-                    # --------------------------------------------
-                    # CONTINUOUS APPROACH FLOW
-                    # --------------------------------------------
 
                     if lot.get(
                         "market_approached",
@@ -2172,78 +2134,34 @@ def apply_orderbook_event(symbol, event):
 
                             if lifecycle_side == "ask":
 
-                                relevant_pressure = (
-                                    buy_qty
-                                )
-
-                                opposite_pressure = (
-                                    sell_qty
-                                )
-
-                                relevant_side = (
-                                    "aggressive_buy"
-                                )
+                                relevant_pressure = buy_qty
+                                opposite_pressure = sell_qty
+                                relevant_side = "aggressive_buy"
 
                             else:
 
-                                relevant_pressure = (
-                                    sell_qty
-                                )
-
-                                opposite_pressure = (
-                                    buy_qty
-                                )
-
-                                relevant_side = (
-                                    "aggressive_sell"
-                                )
+                                relevant_pressure = sell_qty
+                                opposite_pressure = buy_qty
+                                relevant_side = "aggressive_sell"
 
                             lot[
                                 "approach_flow"
                             ] = {
 
-                                "aggressive_buy_qty": (
-                                    buy_qty
-                                ),
-
-                                "aggressive_sell_qty": (
-                                    sell_qty
-                                ),
-
-                                "total_aggressive_qty": (
-                                    total_qty
-                                ),
-
-                                "net_aggressive_delta": (
-                                    net_delta
-                                ),
-
-                                "trade_count": (
-                                    trade_count
-                                ),
-
-                                "relevant_pressure_qty": (
-                                    relevant_pressure
-                                ),
-
-                                "opposite_pressure_qty": (
-                                    opposite_pressure
-                                ),
-
-                                "relevant_side": (
-                                    relevant_side
-                                ),
-
+                                "aggressive_buy_qty": buy_qty,
+                                "aggressive_sell_qty": sell_qty,
+                                "total_aggressive_qty": total_qty,
+                                "net_aggressive_delta": net_delta,
+                                "trade_count": trade_count,
+                                "relevant_pressure_qty": relevant_pressure,
+                                "opposite_pressure_qty": opposite_pressure,
+                                "relevant_side": relevant_side,
                                 "approach_started_time": (
                                     lot.get(
                                         "approach_flow_start_time"
                                     )
                                 ),
                             }
-
-                    # --------------------------------------------
-                    # Explicit zero state for non-approached lots
-                    # --------------------------------------------
 
                     if not lot.get(
                         "market_approached",
@@ -2278,7 +2196,7 @@ def apply_orderbook_event(symbol, event):
         ] = current_market_reference
 
     # ============================================================
-    # MARKET / FLOW DIAGNOSTIC CONTEXT
+    # MARKET / FLOW / ADAPTIVE CONTEXT
     # ============================================================
 
     def get_market_flow_context(
@@ -2286,6 +2204,7 @@ def apply_orderbook_event(symbol, event):
         reduction_qty,
         reduction_side,
     ):
+
         try:
 
             reduction_price_float = float(
@@ -2320,7 +2239,10 @@ def apply_orderbook_event(symbol, event):
             )
 
             context = {
-                "reduction_price": reduction_price_float,
+
+                "reduction_price": (
+                    reduction_price_float
+                ),
 
                 "reduction_qty": float(
                     reduction_qty
@@ -2365,7 +2287,6 @@ def apply_orderbook_event(symbol, event):
                 total_qty = 0.0
 
                 trade_prices = []
-
                 trade_count = 0
 
                 for trade in trades:
@@ -2390,6 +2311,7 @@ def apply_orderbook_event(symbol, event):
                         trade_time < window_start
                         or trade_time > event_time
                     ):
+
                         continue
 
                     try:
@@ -2496,28 +2418,100 @@ def apply_orderbook_event(symbol, event):
                         observed_displacement
                     )
 
-                    distance_to_range_ratio = None
-
-                    if observed_range > 0.0:
+                    if (
+                        abs_distance_from_market is not None
+                        and observed_range > 0.0
+                    ):
 
                         distance_to_range_ratio = (
                             abs_distance_from_market
                             / observed_range
                         )
 
+                    else:
+
+                        distance_to_range_ratio = None
+
                 else:
 
                     observed_low = None
                     observed_high = None
                     observed_range = 0.0
-
                     first_trade_price = None
                     last_trade_price = None
-
                     observed_displacement = 0.0
                     observed_abs_displacement = 0.0
-
                     distance_to_range_ratio = None
+
+                # ------------------------------------------------
+                # RELEVANT FLOW
+                # ------------------------------------------------
+
+                if reduction_side == "ask":
+
+                    relevant_flow_qty = buy_qty
+                    opposite_flow_qty = sell_qty
+
+                else:
+
+                    relevant_flow_qty = sell_qty
+                    opposite_flow_qty = buy_qty
+
+                # ------------------------------------------------
+                # LIQUIDITY / FLOW FACTOR
+                #
+                # bounded:
+                #
+                # R = liquidity / relevant_flow
+                # LF = R / (R + 1)
+                # ------------------------------------------------
+
+                if relevant_flow_qty > 0.0:
+
+                    liquidity_flow_ratio = (
+                        float(reduction_qty)
+                        / relevant_flow_qty
+                    )
+
+                    flow_factor = (
+                        liquidity_flow_ratio
+                        / (
+                            liquidity_flow_ratio
+                            + 1.0
+                        )
+                    )
+
+                else:
+
+                    liquidity_flow_ratio = None
+                    flow_factor = 0.0
+
+                # ------------------------------------------------
+                # DISTANCE FACTOR
+                #
+                # D = distance / observed_range
+                # DF = 1 / (1 + D)
+                # ------------------------------------------------
+
+                if (
+                    abs_distance_from_market is not None
+                    and observed_range > 0.0
+                ):
+
+                    distance_factor = (
+                        1.0
+                        / (
+                            1.0
+                            + (
+                                abs_distance_from_market
+                                / observed_range
+                            )
+                        )
+                    )
+
+                else:
+
+                    distance_factor = 0.0
 
                 context["windows"][
                     str(window_ms)
@@ -2537,6 +2531,14 @@ def apply_orderbook_event(symbol, event):
 
                     "total_aggressive_qty": (
                         total_qty
+                    ),
+
+                    "relevant_aggressive_flow_qty": (
+                        relevant_flow_qty
+                    ),
+
+                    "opposite_aggressive_flow_qty": (
+                        opposite_flow_qty
                     ),
 
                     "net_aggressive_delta": (
@@ -2578,13 +2580,118 @@ def apply_orderbook_event(symbol, event):
                     "distance_to_observed_range_ratio": (
                         distance_to_range_ratio
                     ),
+
+                    "liquidity_flow_ratio": (
+                        liquidity_flow_ratio
+                    ),
+
+                    "flow_factor": (
+                        flow_factor
+                    ),
+
+                    "distance_factor": (
+                        distance_factor
+                    ),
                 }
+
+            # ====================================================
+            # WEIGHTED ADAPTIVE FACTORS
+            # ====================================================
+
+            windows = context["windows"]
+
+            weighted_flow_factor = (
+                0.50
+                * float(
+                    windows["1000"].get(
+                        "flow_factor",
+                        0.0
+                    )
+                )
+                +
+                0.30
+                * float(
+                    windows["3000"].get(
+                        "flow_factor",
+                        0.0
+                    )
+                )
+                +
+                0.20
+                * float(
+                    windows["10000"].get(
+                        "flow_factor",
+                        0.0
+                    )
+                )
+            )
+
+            weighted_distance_factor = (
+                0.50
+                * float(
+                    windows["1000"].get(
+                        "distance_factor",
+                        0.0
+                    )
+                )
+                +
+                0.30
+                * float(
+                    windows["3000"].get(
+                        "distance_factor",
+                        0.0
+                    )
+                )
+                +
+                0.20
+                * float(
+                    windows["10000"].get(
+                        "distance_factor",
+                        0.0
+                    )
+                )
+            )
+
+            # ----------------------------------------------------
+            # APPROACH PRESSURE
+            #
+            # This is calculated later from the lifecycle lot.
+            # Keep context field available now.
+            # ----------------------------------------------------
+
+            context[
+                "adaptive"
+            ] = {
+
+                "flow_factor": (
+                    weighted_flow_factor
+                ),
+
+                "distance_factor": (
+                    weighted_distance_factor
+                ),
+
+                "approach_factor": 0.0,
+
+                "significance_score": (
+                    0.50
+                    * weighted_flow_factor
+                    +
+                    0.25
+                    * weighted_distance_factor
+                ),
+
+                "classification": (
+                    "normal"
+                ),
+            }
 
             return context
 
         except Exception as exc:
 
             return {
+
                 "error": (
                     "market_flow_context_failed"
                 ),
@@ -2678,8 +2785,6 @@ def apply_orderbook_event(symbol, event):
 
                 book[price] = new_quantity
 
-            # Book changed, so next market-reference request must
-            # recalculate from the live book.
             market_cache["valid"] = False
 
             # ====================================================
@@ -2843,10 +2948,6 @@ def apply_orderbook_event(symbol, event):
                         "remaining_qty"
                     ] = remaining_after
 
-                    # --------------------------------------------
-                    # FINAL LIFECYCLE SNAPSHOT
-                    # --------------------------------------------
-
                     try:
 
                         first_seen_time = int(
@@ -2870,8 +2971,7 @@ def apply_orderbook_event(symbol, event):
                     )
 
                     # --------------------------------------------
-                    # Refresh approach flow immediately before
-                    # recording the reduction.
+                    # REFRESH APPROACH FLOW
                     # --------------------------------------------
 
                     if (
@@ -2969,43 +3069,23 @@ def apply_orderbook_event(symbol, event):
 
                         if side == "ask":
 
-                            relevant_pressure = (
-                                buy_qty
-                            )
-
-                            opposite_pressure = (
-                                sell_qty
-                            )
-
-                            relevant_side = (
-                                "aggressive_buy"
-                            )
+                            relevant_pressure = buy_qty
+                            opposite_pressure = sell_qty
+                            relevant_side = "aggressive_buy"
 
                         else:
 
-                            relevant_pressure = (
-                                sell_qty
-                            )
-
-                            opposite_pressure = (
-                                buy_qty
-                            )
-
-                            relevant_side = (
-                                "aggressive_sell"
-                            )
+                            relevant_pressure = sell_qty
+                            opposite_pressure = buy_qty
+                            relevant_side = "aggressive_sell"
 
                         oldest_lot[
                             "approach_flow"
                         ] = {
 
-                            "aggressive_buy_qty": (
-                                buy_qty
-                            ),
+                            "aggressive_buy_qty": buy_qty,
 
-                            "aggressive_sell_qty": (
-                                sell_qty
-                            ),
+                            "aggressive_sell_qty": sell_qty,
 
                             "total_aggressive_qty": (
                                 total_flow_qty
@@ -3243,6 +3323,181 @@ def apply_orderbook_event(symbol, event):
                     remaining_execution -= (
                         allocated_execution
                     )
+
+                # ------------------------------------------------
+                # ADAPTIVE APPROACH FACTOR
+                # ------------------------------------------------
+
+                adaptive_context = None
+
+                if (
+                    reduced_qty > 0.0
+                    and market_flow_context is not None
+                ):
+
+                    if fifo_consumption:
+
+                        weighted_approach_qty = 0.0
+                        weighted_consumed_qty = 0.0
+
+                        for consumption in fifo_consumption:
+
+                            consumed_qty = float(
+                                consumption.get(
+                                    "consumed_qty",
+                                    0.0
+                                )
+                            )
+
+                            approach_flow = (
+                                consumption.get(
+                                    "approach_flow",
+                                    {}
+                                )
+                            )
+
+                            relevant_pressure = float(
+                                approach_flow.get(
+                                    "relevant_pressure_qty",
+                                    0.0
+                                )
+                            )
+
+                            weighted_approach_qty += (
+                                relevant_pressure
+                                * consumed_qty
+                            )
+
+                            weighted_consumed_qty += (
+                                consumed_qty
+                            )
+
+                        if (
+                            weighted_consumed_qty > 0.0
+                        ):
+
+                            approach_flow_qty = (
+                                weighted_approach_qty
+                                / weighted_consumed_qty
+                            )
+
+                        else:
+
+                            approach_flow_qty = 0.0
+
+                    else:
+
+                        approach_flow_qty = 0.0
+
+                    if (
+                        approach_flow_qty > 0.0
+                        and reduced_qty > 0.0
+                    ):
+
+                        approach_factor = (
+                            approach_flow_qty
+                            / (
+                                approach_flow_qty
+                                + reduced_qty
+                            )
+                        )
+
+                    else:
+
+                        approach_factor = 0.0
+
+                    adaptive_context = (
+                        market_flow_context.get(
+                            "adaptive",
+                            {}
+                        )
+                    )
+
+                    flow_factor = float(
+                        adaptive_context.get(
+                            "flow_factor",
+                            0.0
+                        )
+                    )
+
+                    distance_factor = float(
+                        adaptive_context.get(
+                            "distance_factor",
+                            0.0
+                        )
+                    )
+
+                    significance_score = (
+                        0.50
+                        * flow_factor
+                        +
+                        0.25
+                        * distance_factor
+                        +
+                        0.25
+                        * approach_factor
+                    )
+
+                    significance_score = min(
+                        max(
+                            significance_score,
+                            0.0
+                        ),
+                        1.0
+                    )
+
+                    if significance_score >= 0.75:
+
+                        significance_classification = (
+                            "strong_interest"
+                        )
+
+                    elif significance_score >= 0.55:
+
+                        significance_classification = (
+                            "high_interest"
+                        )
+
+                    elif significance_score >= 0.30:
+
+                        significance_classification = (
+                            "meaningful"
+                        )
+
+                    else:
+
+                        significance_classification = (
+                            "normal"
+                        )
+
+                    market_flow_context[
+                        "adaptive"
+                    ] = {
+
+                        "flow_factor": (
+                            flow_factor
+                        ),
+
+                        "distance_factor": (
+                            distance_factor
+                        ),
+
+                        "approach_factor": (
+                            approach_factor
+                        ),
+
+                        "approach_relevant_flow_qty": (
+                            approach_flow_qty
+                        ),
+
+                        "significance_score": (
+                            significance_score
+                        ),
+
+                        "classification": (
+                            significance_classification
+                        ),
+                    }
 
                 # ------------------------------------------------
                 # LIQUIDITY RECORD
