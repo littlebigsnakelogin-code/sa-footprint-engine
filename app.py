@@ -5790,6 +5790,8 @@ def liquidity_debug():
         ]
 
         def short_record(r):
+            fifo_consumption = r.get("fifo_consumption") or []
+
             return {
                 "time": r.get("time"),
                 "price": r.get("price"),
@@ -5798,7 +5800,24 @@ def liquidity_debug():
                 "executed_qty": r.get("executed_qty"),
                 "pulled_qty": r.get("pulled_qty"),
                 "status": r.get("status"),
-                "finalized": r.get("finalized")
+                "finalized": r.get("finalized"),
+                "fifo_consumed_qty": r.get("fifo_consumed_qty"),
+                "fifo_executed_qty": r.get("fifo_executed_qty"),
+                "fifo_unattributed_qty": r.get("fifo_unattributed_qty"),
+                "fifo_unmatched_qty": r.get("fifo_unmatched_qty"),
+                "fifo_consumption_count": len(fifo_consumption),
+                "fifo_consumption": [
+                    {
+                        "lot_id": item.get("lot_id"),
+                        "origin": item.get("origin"),
+                        "consumed_qty": item.get("consumed_qty"),
+                        "execution_qty": item.get("execution_qty"),
+                        "remaining_qty_after": item.get("remaining_qty_after"),
+                        "unmatched_qty": item.get("unmatched_qty")
+                    }
+                    for item in fifo_consumption[:5]
+                    if isinstance(item, dict)
+                ]
             }
 
         trade_examples = []
