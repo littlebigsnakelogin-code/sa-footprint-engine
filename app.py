@@ -5750,13 +5750,7 @@ def liquidity_debug():
     symbol = request.args.get("symbol", "BTCUSDT").upper()
 
     try:
-        limit = max(
-            1,
-            min(
-                int(request.args.get("limit", 20)),
-                50
-            )
-        )
+        limit = max(1, min(int(request.args.get("limit", 20)), 50))
     except Exception:
         limit = 20
 
@@ -5768,7 +5762,6 @@ def liquidity_debug():
 
     try:
         finalize_liquidity_records(symbol)
-
         state = orderbook[symbol]
 
         bids = state.get("bids", {})
@@ -5781,53 +5774,57 @@ def liquidity_debug():
         liquidity_history = list(
             state.get("liquidity_history", [])
         )
-
         match_diagnostics = list(
             state.get("match_diagnostics", [])
         )
-
         trade_flow_diagnostics = list(
             state.get("trade_flow_diagnostics", [])
         )
 
-        trade_match_index = state.get(
-            "trade_match_index",
-            {}
-        )
-
+        trade_match_index = state.get("trade_match_index", {})
         liquidity_match_index = state.get(
-            "liquidity_match_index",
-            {}
+            "liquidity_match_index", {}
         )
 
         finalized_count = sum(
-            1
-            for record in liquidity_history
+            1 for record in liquidity_history
             if isinstance(record, dict)
             and record.get("finalized") is True
         )
 
         bid_lot_count = sum(
-            len(lots)
-            for lots in bid_lots.values()
+            len(lots) for lots in bid_lots.values()
         )
-
         ask_lot_count = sum(
-            len(lots)
-            for lots in ask_lots.values()
+            len(lots) for lots in ask_lots.values()
         )
-
-        history_tail = liquidity_history[-limit:]
-
-        diagnostics_tail = match_diagnostics[-5:]
-
-        trade_flow_tail = trade_flow_diagnostics[-5:]
 
         compact_history = []
 
-        for record in history_tail:
+        for record in liquidity_history[-limit:]:
             if not isinstance(record, dict):
                 continue
+
+            raw_consumption = record.get("fifo_consumption", [])
+
+            if not isinstance(raw_consumption, (list, tuple)):
+                raw_consumption = []
+
+            compact_consumption = []
+
+            for item in list(raw_consumption)[:5]:
+                if not isinstance(item, dict):
+                    continue
+
+                compact_consumption.append({
+                    "lot_id": item.get("lot_id"),
+                    "consumed_qty": item.get("consumed_qty"),
+                    "execution_qty": item.get("execution_qty"),
+                    "remaining_qty_after": item.get(
+                        "remaining_qty_after"
+                    ),
+                    "unmatched_qty": item.get("unmatched_qty")
+                })
 
             compact_history.append({
                 "time": record.get("time"),
@@ -5840,26 +5837,17 @@ def liquidity_debug():
                 "pull_pct": record.get("pull_pct"),
                 "status": record.get("status"),
                 "finalized": record.get("finalized"),
-
-                # Adaptive liquidity context
+                "fifo_consumption_count": len(raw_consumption),
+                "fifo_consumption": compact_consumption,
                 "market_flow_context": record.get(
                     "market_flow_context"
                 ),
-
-                # Backward/alternate key support
-                "market_context": record.get(
-                    "market_context"
-                ),
-
-                # Explicit adaptive block if stored directly
-                "adaptive": record.get(
-                    "adaptive"
-                )
+                "market_context": record.get("market_context"),
+                "adaptive": record.get("adaptive")
             })
 
         response = {
             "symbol": symbol,
-
             "orderbook": {
                 "initialized": state.get("initialized"),
                 "synchronized": state.get("synchronized"),
@@ -5871,27 +5859,17 @@ def liquidity_debug():
                 "last_depth_event_time": state.get(
                     "last_depth_event_time"
                 ),
-                "sequence_errors": state.get(
-                    "sequence_errors",
-                    0
-                ),
-                "resync_count": state.get(
-                    "resync_count",
-                    0
-                ),
+                "sequence_errors": state.get("sequence_errors", 0),
+                "resync_count": state.get("resync_count", 0),
                 "bid_levels": len(bids),
                 "ask_levels": len(asks)
             },
-
             "fifo": {
                 "bid_lot_count": bid_lot_count,
                 "ask_lot_count": ask_lot_count
             },
-
             "indexes": {
-                "trade_match_index_keys": len(
-                    trade_match_index
-                ),
+                "trade_match_index_keys": len(trade_match_index),
                 "liquidity_match_index_keys": len(
                     liquidity_match_index
                 ),
@@ -5899,14 +5877,10 @@ def liquidity_debug():
                     trade_flow_diagnostics
                 )
             },
-
             "finalized_count": finalized_count,
-
             "liquidity_history": compact_history,
-
-            "match_diagnostics": diagnostics_tail,
-
-            "trade_flow_diagnostics": trade_flow_tail
+            "match_diagnostics": match_diagnostics[-5:],
+            "trade_flow_diagnostics": trade_flow_diagnostics[-5:]
         }
 
         return jsonify(response)
