@@ -5749,11 +5749,6 @@ def api_orderbook():
 def liquidity_debug():
     symbol = request.args.get("symbol", "BTCUSDT").upper()
 
-    try:
-        limit = max(1, min(int(request.args.get("limit", 20)), 50))
-    except Exception:
-        limit = 20
-
     if symbol not in orderbook:
         return jsonify({
             "error": "invalid_symbol",
@@ -5764,87 +5759,83 @@ def liquidity_debug():
         finalize_liquidity_records(symbol)
         state = orderbook[symbol]
 
-        bids = state.get("bids", {})
-        asks = state.get("asks", {})
+        history = [
+            r for r in list(state.get("liquidity_history", []))
+            if isinstance(r, dict)
+        ]
+        trades = [
+            d for d in list(state.get("trade_flow_diagnostics", []))
+            if isinstance(d, dict)
+        ]
+        diagnostics = [
+            d for d in list(state.get("match_diagnostics", []))
+            if isinstance(d, dict)
+        ]
 
-        fifo = state.get("liquidity_lots", {})
-        bid_lots = fifo.get("bid", {})
-        ask_lots = fifo.get("ask", {})
+        finalized = [
+            r for r in history
+            if r.get("finalized") is True
+        ]
+        executed = [
+            r for r in finalized
+            if float(r.get("executed_qty") or 0) > 0
+        ]
+        pulled = [
+            r for r in finalized
+            if float(r.get("pulled_qty") or 0) > 0
+        ]
+        reductions = [
+            r for r in history
+            if float(r.get("reduced_qty") or 0) > 0
+        ]
 
-        liquidity_history = list(
-            state.get("liquidity_history", [])
-        )
-        match_diagnostics = list(
-            state.get("match_diagnostics", [])
-        )
-        trade_flow_diagnostics = list(
-            state.get("trade_flow_diagnostics", [])
-        )
+        def short_record(r):
+            return {
+                "time": r.get("time"),
+                "price": r.get("price"),
+                "side": r.get("side"),
+                "reduced_qty": r.get("reduced_qty"),
+                "executed_qty": r.get("executed_qty"),
+                "pulled_qty": r.get("pulled_qty"),
+                "status": r.get("status"),
+                "finalized": r.get("finalized")
+            }
 
-        trade_match_index = state.get("trade_match_index", {})
-        liquidity_match_index = state.get(
-            "liquidity_match_index", {}
-        )
+        trade_examples = []
 
-        finalized_count = sum(
-            1 for record in liquidity_history
-            if isinstance(record, dict)
-            and record.get("finalized") is True
-        )
-
-        bid_lot_count = sum(
-            len(lots) for lots in bid_lots.values()
-        )
-        ask_lot_count = sum(
-            len(lots) for lots in ask_lots.values()
-        )
-
-        compact_history = []
-
-        for record in liquidity_history[-limit:]:
-            if not isinstance(record, dict):
+        for d in reversed(trades):
+            if d.get("event") != "TRADE_ARRIVAL":
                 continue
 
-            raw_consumption = record.get("fifo_consumption", [])
+            pending = d.get("pending_same_price_liquidity") or []
+            existing = d.get("existing_same_price_trades") or []
 
-            if not isinstance(raw_consumption, (list, tuple)):
-                raw_consumption = []
-
-            compact_consumption = []
-
-            for item in list(raw_consumption)[:5]:
-                if not isinstance(item, dict):
-                    continue
-
-                compact_consumption.append({
-                    "lot_id": item.get("lot_id"),
-                    "consumed_qty": item.get("consumed_qty"),
-                    "execution_qty": item.get("execution_qty"),
-                    "remaining_qty_after": item.get(
-                        "remaining_qty_after"
-                    ),
-                    "unmatched_qty": item.get("unmatched_qty")
-                })
-
-            compact_history.append({
-                "time": record.get("time"),
-                "price": record.get("price"),
-                "side": record.get("side"),
-                "reduced_qty": record.get("reduced_qty"),
-                "executed_qty": record.get("executed_qty"),
-                "unmatched_qty": record.get("unmatched_qty"),
-                "pulled_qty": record.get("pulled_qty"),
-                "pull_pct": record.get("pull_pct"),
-                "status": record.get("status"),
-                "finalized": record.get("finalized"),
-                "fifo_consumption_count": len(raw_consumption),
-                "fifo_consumption": compact_consumption,
-                "market_flow_context": record.get(
-                    "market_flow_context"
-                ),
-                "market_context": record.get("market_context"),
-                "adaptive": record.get("adaptive")
+            trade_examples.append({
+                "event": d.get("event"),
+                "price": d.get("price"),
+                "trade_time": d.get("time", d.get("trade_time")),
+                "expected_side": d.get("expected_side"),
+                "is_buyer_maker": d.get("is_buyer_maker"),
+                "pending_same_price_count": len(pending),
+                "pending_same_price_liquidity": [
+                    {
+                        "price": r.get("price"),
+                        "time": r.get("time"),
+                        "reduced_qty": r.get("reduced_qty"),
+                        "executed_qty": r.get("executed_qty"),
+                        "finalized": r.get("finalized"),
+                        "status": r.get("status")
+                    }
+                    for r in pending[:2]
+                    if isinstance(r, dict)
+                ],
+                "existing_same_price_trade_count": len(existing),
+                "pending_liquidity_key_count_before":
+                    d.get("pending_liquidity_key_count_before")
             })
+
+            if len(trade_examples) >= 3:
+                break
 
         response = {
             "symbol": symbol,
@@ -5852,45 +5843,35 @@ def liquidity_debug():
                 "initialized": state.get("initialized"),
                 "synchronized": state.get("synchronized"),
                 "resyncing": state.get("resyncing"),
-                "last_update_id": state.get("last_update_id"),
-                "last_depth_update_id": state.get(
-                    "last_depth_update_id"
-                ),
-                "last_depth_event_time": state.get(
-                    "last_depth_event_time"
-                ),
                 "sequence_errors": state.get("sequence_errors", 0),
-                "resync_count": state.get("resync_count", 0),
-                "bid_levels": len(bids),
-                "ask_levels": len(asks)
+                "bid_levels": len(state.get("bids", {})),
+                "ask_levels": len(state.get("asks", {}))
             },
-            "fifo": {
-                "bid_lot_count": bid_lot_count,
-                "ask_lot_count": ask_lot_count
+            "summary": {
+                "history_records": len(history),
+                "finalized_records": len(finalized),
+                "reduction_records": len(reductions),
+                "finalized_with_execution": len(executed),
+                "finalized_with_pull": len(pulled),
+                "trade_diagnostic_entries": len(trades),
+                "match_diagnostic_entries": len(diagnostics)
             },
-            "indexes": {
-                "trade_match_index_keys": len(trade_match_index),
-                "liquidity_match_index_keys": len(
-                    liquidity_match_index
-                ),
-                "trade_flow_diagnostics_count": len(
-                    trade_flow_diagnostics
-                )
-            },
-            "finalized_count": finalized_count,
-            "liquidity_history": compact_history,
-            "match_diagnostics": match_diagnostics[-5:],
-            "trade_flow_diagnostics": trade_flow_diagnostics[-5:]
+            "execution_examples": [
+                short_record(r) for r in executed[-3:]
+            ],
+            "recent_reductions": [
+                short_record(r) for r in reductions[-3:]
+            ],
+            "trade_examples": trade_examples,
+            "match_diagnostics": diagnostics[-3:]
         }
 
         return jsonify(response)
 
     except Exception as e:
         app.logger.exception(
-            "liquidity_debug failed for %s",
-            symbol
+            "liquidity_debug failed for %s", symbol
         )
-
         return jsonify({
             "error": "liquidity_debug_failed",
             "symbol": symbol,
