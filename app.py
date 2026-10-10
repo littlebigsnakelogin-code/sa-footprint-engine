@@ -723,6 +723,7 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
     return finalized_count
 
 
+
 def record_trade_for_execution_matching(
     symbol,
     price,
@@ -734,19 +735,14 @@ def record_trade_for_execution_matching(
     Record an aggressive market trade and match it against
     liquidity reductions at the same price/side.
 
-    Accounting model:
-        bid reduction -> aggressive SELL (buyer_maker=True)
-        ask reduction -> aggressive BUY  (buyer_maker=False)
+    bid reduction -> aggressive SELL (buyer_maker=True)
+    ask reduction -> aggressive BUY  (buyer_maker=False)
 
-    Matching supports both directions:
+    Supports trade-before-depth and depth-before-trade.
 
-        1. trade happens before depth reduction
-        2. depth reduction happens before trade
-
-    A trade is matched only within the allowed execution window.
-
-    Diagnostic instrumentation in this function is observation-only.
-    It does not change matching/accounting behavior.
+    FIFO lots are consumed by depth reductions only.
+    Trades update execution attribution on existing FIFO
+    consumption entries; they never consume lots again.
     """
 
     if symbol not in orderbook:
@@ -765,26 +761,14 @@ def record_trade_for_execution_matching(
 
     state = orderbook[symbol]
 
-    # --------------------------------------------------------
-    # TRADE EVENT DIAGNOSTICS
-    # --------------------------------------------------------
-
     diagnostic_history = state.setdefault(
         "trade_flow_diagnostics",
         deque(maxlen=300),
     )
 
-    expected_side = (
-        "bid"
-        if is_buyer_maker
-        else "ask"
-    )
-
+    expected_side = "bid" if is_buyer_maker else "ask"
     price_key = round(price, 12)
 
-    # Snapshot the state BEFORE inserting this trade into the
-    # trade index. This tells us exactly what the engine could
-    # see at trade-arrival time.
     trade_match_index = state.setdefault(
         "trade_match_index",
         defaultdict(deque),
@@ -795,119 +779,63 @@ def record_trade_for_execution_matching(
         defaultdict(deque),
     )
 
-    same_price_trade_key = (
-        expected_side,
-        price_key,
-    )
+    same_price_trade_key = (expected_side, price_key)
 
     existing_same_price_trades = list(
-        trade_match_index.get(
-            same_price_trade_key,
-            (),
-        )
+        trade_match_index.get(same_price_trade_key, ())
     )
 
     existing_same_price_trade_snapshot = []
 
     for existing_trade in existing_same_price_trades[-10:]:
         try:
-            existing_trade_time = int(
-                existing_trade.get("time")
-            )
+            existing_trade_time = int(existing_trade.get("time"))
         except (TypeError, ValueError):
             continue
 
         existing_same_price_trade_snapshot.append({
             "time": existing_trade_time,
-            "price": float(
-                existing_trade.get(
-                    "price",
-                    price,
-                )
-            ),
-            "quantity": float(
-                existing_trade.get(
-                    "quantity",
-                    0.0,
-                )
-            ),
+            "price": float(existing_trade.get("price", price)),
+            "quantity": float(existing_trade.get("quantity", 0.0)),
             "remaining_qty": float(
-                existing_trade.get(
-                    "remaining_qty",
-                    0.0,
-                )
+                existing_trade.get("remaining_qty", 0.0)
             ),
-            "time_diff_ms": (
-                trade_time - existing_trade_time
-            ),
+            "time_diff_ms": trade_time - existing_trade_time,
         })
 
-    # Snapshot pending liquidity reductions at the exact
-    # same side/price BEFORE this trade is processed.
     same_price_liquidity = list(
-        liquidity_match_index.get(
-            same_price_trade_key,
-            (),
-        )
+        liquidity_match_index.get(same_price_trade_key, ())
     )
 
     pending_liquidity_snapshot = []
 
     for liquidity in same_price_liquidity[-10:]:
-
         if liquidity.get("finalized"):
             continue
 
         try:
-            liquidity_time = int(
-                liquidity.get(
-                    "time",
-                    0,
-                )
-            )
+            liquidity_time = int(liquidity.get("time", 0))
         except (TypeError, ValueError):
             continue
 
         try:
-            reduced_qty = float(
-                liquidity.get(
-                    "reduced_qty",
-                    0.0,
-                )
-            )
+            reduced_qty = float(liquidity.get("reduced_qty", 0.0))
         except (TypeError, ValueError):
             reduced_qty = 0.0
 
         try:
-            executed_qty = float(
-                liquidity.get(
-                    "executed_qty",
-                    0.0,
-                )
-            )
+            executed_qty = float(liquidity.get("executed_qty", 0.0))
         except (TypeError, ValueError):
             executed_qty = 0.0
 
         pending_liquidity_snapshot.append({
             "time": liquidity_time,
-            "price": float(
-                liquidity.get(
-                    "price",
-                    price,
-                )
-            ),
+            "price": float(liquidity.get("price", price)),
             "reduced_qty": reduced_qty,
             "executed_qty": executed_qty,
-            "unmatched_qty": max(
-                0.0,
-                reduced_qty - executed_qty,
-            ),
-            "status": liquidity.get(
-                "status"
-            ),
-            "time_diff_ms": (
-                trade_time - liquidity_time
-            ),
+            "unmatched_qty": max(0.0, reduced_qty - executed_qty),
+            "status": liquidity.get("status"),
+            "time_diff_ms": trade_time - liquidity_time,
         })
 
     diagnostic_history.append({
@@ -918,10 +846,7 @@ def record_trade_for_execution_matching(
         "quantity": quantity,
         "is_buyer_maker": is_buyer_maker,
         "expected_side": expected_side,
-        "trade_index_key": [
-            expected_side,
-            price_key,
-        ],
+        "trade_index_key": [expected_side, price_key],
         "trade_index_key_count_before": len(
             existing_same_price_trades
         ),
@@ -935,23 +860,13 @@ def record_trade_for_execution_matching(
             pending_liquidity_snapshot
         ),
         "trade_history_count_before": len(
-            state.get(
-                "trade_history",
-                (),
-            )
+            state.get("trade_history", ())
         ),
         "liquidity_history_count": len(
-            state.get(
-                "liquidity_history",
-                (),
-            )
+            state.get("liquidity_history", ())
         ),
-        "last_depth_event_time": state.get(
-            "last_depth_event_time"
-        ),
-        "last_depth_update_id": state.get(
-            "last_depth_update_id"
-        ),
+        "last_depth_event_time": state.get("last_depth_event_time"),
+        "last_depth_update_id": state.get("last_depth_update_id"),
     })
 
     trade_record = {
@@ -962,22 +877,13 @@ def record_trade_for_execution_matching(
         "is_buyer_maker": is_buyer_maker,
     }
 
-    # --------------------------------------------------------
-    # TRADE INDEX
-    # --------------------------------------------------------
-
+    # Index this trade so a later depth reduction can match it.
     trade_match_index[
         (expected_side, price_key)
     ].append(trade_record)
 
-    # --------------------------------------------------------
-    # LIQUIDITY INDEX
-    # --------------------------------------------------------
-
-    # Add every existing pending reduction to the index.
-    #
-    # This is intentionally rebuilt incrementally here rather
-    # than relying on a single initialization point.
+    # Index existing pending reductions that have not yet
+    # been indexed. Keep the original matching architecture.
     indexed_ids = {
         id(record)
         for records in liquidity_match_index.values()
@@ -985,33 +891,29 @@ def record_trade_for_execution_matching(
     }
 
     for liquidity in state["liquidity_history"]:
-
         if id(liquidity) in indexed_ids:
             continue
 
         if liquidity.get("finalized"):
             continue
 
-        reduced_qty = float(
-            liquidity.get(
-                "reduced_qty",
-                0.0,
+        try:
+            reduced_qty = float(
+                liquidity.get("reduced_qty", 0.0)
             )
-        )
+        except (TypeError, ValueError):
+            continue
 
         if reduced_qty <= 0.0:
             continue
 
         side = liquidity.get("side")
-
         if side not in ("bid", "ask"):
             continue
 
-        liquidity_price = liquidity.get("price")
-
         try:
             liquidity_price_key = round(
-                float(liquidity_price),
+                float(liquidity.get("price")),
                 12,
             )
         except (TypeError, ValueError):
@@ -1023,89 +925,61 @@ def record_trade_for_execution_matching(
 
         indexed_ids.add(id(liquidity))
 
-    # --------------------------------------------------------
-    # MATCH NEW TRADE AGAINST PENDING LIQUIDITY
-    # --------------------------------------------------------
-
     matching_records = liquidity_match_index.get(
         (expected_side, price_key),
         (),
     )
 
     matched_total = 0.0
+    epsilon = 1e-12
 
     for liquidity in matching_records:
-
-        if trade_record["remaining_qty"] <= 0.0:
+        if trade_record["remaining_qty"] <= epsilon:
             break
 
         if liquidity.get("finalized"):
             continue
 
-        reduced_qty = float(
-            liquidity.get(
-                "reduced_qty",
-                0.0,
+        try:
+            reduced_qty = float(
+                liquidity.get("reduced_qty", 0.0)
             )
-        )
+            executed_qty = float(
+                liquidity.get("executed_qty", 0.0)
+            )
+            liquidity_time = int(
+                liquidity.get("time", trade_time)
+            )
+            liquidity_price = float(
+                liquidity.get("price", price)
+            )
+        except (TypeError, ValueError):
+            continue
 
         if reduced_qty <= 0.0:
             continue
-
-        executed_qty = float(
-            liquidity.get(
-                "executed_qty",
-                0.0,
-            )
-        )
 
         remaining_reduction = max(
             0.0,
             reduced_qty - executed_qty,
         )
 
-        if remaining_reduction <= 0.0:
+        if remaining_reduction <= epsilon:
             continue
 
-        liquidity_time = int(
-            liquidity.get(
-                "time",
-                trade_time,
-            )
-        )
+        time_difference = trade_time - liquidity_time
 
-        time_difference = (
-            trade_time - liquidity_time
-        )
-
-        # Trade may occur shortly before the reduction
-        # or up to 1500 ms after the reduction.
-        if time_difference < -300:
+        # Permit a trade up to 300 ms before the reduction
+        # and up to 1500 ms after it.
+        if time_difference < -300 or time_difference > 1500:
             continue
 
-        if time_difference > 1500:
-            continue
-
-        liquidity_price = float(
-            liquidity.get(
-                "price",
-                price,
-            )
-        )
-
-        if abs(
-            liquidity_price - price
-        ) > 1e-6:
+        if abs(liquidity_price - price) > 1e-6:
             continue
 
         available_trade = max(
             0.0,
-            float(
-                trade_record.get(
-                    "remaining_qty",
-                    0.0,
-                )
-            ),
+            float(trade_record.get("remaining_qty", 0.0)),
         )
 
         matched_qty = min(
@@ -1113,151 +987,147 @@ def record_trade_for_execution_matching(
             remaining_reduction,
         )
 
-        if matched_qty <= 0.0:
+        if matched_qty <= epsilon:
             continue
 
-        # ----------------------------------------------------
-        # UPDATE LIQUIDITY ACCOUNTING
-        # ----------------------------------------------------
-
+        # Update the reduction's execution accounting.
         new_executed_qty = min(
             reduced_qty,
             executed_qty + matched_qty,
         )
 
-        liquidity["executed_qty"] = (
-            new_executed_qty
+        actual_matched_qty = max(
+            0.0,
+            new_executed_qty - executed_qty,
         )
 
+        if actual_matched_qty <= epsilon:
+            continue
+
+        liquidity["executed_qty"] = new_executed_qty
         liquidity["unmatched_qty"] = max(
             0.0,
             reduced_qty - new_executed_qty,
         )
 
-        # Keep pull accounting provisional until the
+        # Pull classification remains provisional until the
         # reduction's matching window expires.
         liquidity["pulled_qty"] = 0.0
         liquidity["pull_pct"] = 0.0
-
-        liquidity["status"] = (
-            "reduction_pending"
-        )
+        liquidity["status"] = "reduction_pending"
 
         # ----------------------------------------------------
-        # FIFO ATTRIBUTION
+        # FIFO ATTRIBUTION — DO NOT CONSUME LOTS HERE
         # ----------------------------------------------------
+        # The depth event already consumed the FIFO lots and
+        # created fifo_consumption entries. Attribute this new
+        # execution to the unexecuted portion of those entries.
+        # This prevents depth-first events consuming lots twice.
 
         fifo_consumption = liquidity.setdefault(
             "fifo_consumption",
             [],
         )
 
-        fifo_remaining = matched_qty
+        fifo_remaining = actual_matched_qty
 
-        lots = state[
-            "liquidity_lots"
-        ][expected_side].get(
-            str(
-                liquidity_price
-            ),
-            deque(),
-        )
-
-        for lot in lots:
-
-            if fifo_remaining <= 0.0:
+        for item in fifo_consumption:
+            if fifo_remaining <= epsilon:
                 break
 
-            lot_remaining = max(
-                0.0,
-                float(
-                    lot.get(
-                        "remaining_qty",
-                        0.0,
-                    )
-                ),
-            )
-
-            if lot_remaining <= 0.0:
+            try:
+                consumed_qty = max(
+                    0.0,
+                    float(item.get("consumed_qty", 0.0)),
+                )
+                prior_execution_qty = max(
+                    0.0,
+                    float(item.get("execution_qty", 0.0)),
+                )
+            except (TypeError, ValueError):
                 continue
 
-            consume_qty = min(
-                lot_remaining,
+            # Never attribute more execution to a FIFO entry
+            # than the quantity that depth actually consumed.
+            attribution_capacity = max(
+                0.0,
+                consumed_qty - prior_execution_qty,
+            )
+
+            if attribution_capacity <= epsilon:
+                continue
+
+            attributed_qty = min(
+                attribution_capacity,
                 fifo_remaining,
             )
 
-            lot["remaining_qty"] = max(
+            item["execution_qty"] = (
+                prior_execution_qty + attributed_qty
+            )
+
+            item["unmatched_qty"] = max(
                 0.0,
-                lot_remaining - consume_qty,
+                consumed_qty - item["execution_qty"],
             )
 
-            fifo_consumption.append({
-                "lot_id": lot.get("lot_id"),
-                "original_qty": float(
-                    lot.get(
-                        "original_qty",
-                        0.0,
-                    )
-                ),
-                "consumed_qty": consume_qty,
-                "execution_qty": consume_qty,
-                "unmatched_qty": 0.0,
-                "execution_time": trade_time,
-                "trade_price": price,
-            })
+            if attributed_qty > 0.0:
+                item["execution_time"] = trade_time
+                item["trade_price"] = price
 
-            fifo_remaining -= consume_qty
+            fifo_remaining -= attributed_qty
 
-        # Any executed quantity that could not be attributed
-        # to an available FIFO lot remains explicitly tracked.
-        if fifo_remaining > 0.0:
-
-            liquidity["fifo_unattributed_execution_qty"] = (
-                float(
-                    liquidity.get(
-                        "fifo_unattributed_execution_qty",
-                        0.0,
-                    )
-                )
-                + fifo_remaining
-            )
-
-        liquidity["fifo_executed_qty"] = sum(
+        # Matched execution that cannot be attributed to an
+        # existing FIFO entry is tracked separately. Do not
+        # consume another lot to force attribution.
+        previous_unattributed = max(
+            0.0,
             float(
-                item.get(
-                    "execution_qty",
+                liquidity.get(
+                    "fifo_unattributed_execution_qty",
                     0.0,
                 )
+            ),
+        )
+
+        if fifo_remaining > epsilon:
+            liquidity["fifo_unattributed_execution_qty"] = (
+                previous_unattributed + fifo_remaining
+            )
+        else:
+            liquidity["fifo_unattributed_execution_qty"] = (
+                previous_unattributed
+            )
+
+        # Recalculate derived FIFO counters from their source
+        # entries instead of incrementing counters blindly.
+        liquidity["fifo_executed_qty"] = sum(
+            max(
+                0.0,
+                float(item.get("execution_qty", 0.0)),
             )
             for item in fifo_consumption
         )
 
+        # Residual reduction not yet explained by attributed
+        # or explicitly unattributed executions.
         liquidity["fifo_unmatched_qty"] = max(
             0.0,
             reduced_qty
-            - liquidity["fifo_executed_qty"],
+            - liquidity["fifo_executed_qty"]
+            - liquidity["fifo_unattributed_execution_qty"],
         )
 
-        # ----------------------------------------------------
-        # UPDATE TRADE REMAINING QUANTITY
-        # ----------------------------------------------------
-
+        # Consume the trade's available quantity exactly once.
         trade_record["remaining_qty"] = max(
             0.0,
-            float(
-                trade_record["remaining_qty"]
-            ) - matched_qty,
+            float(trade_record["remaining_qty"])
+            - actual_matched_qty,
         )
 
-        matched_total += matched_qty
+        matched_total += actual_matched_qty
 
-    # --------------------------------------------------------
-    # STORE TRADE HISTORY
-    # --------------------------------------------------------
-
-    state["trade_history"].append(
-        trade_record
-    )
+    state["trade_history"].append(trade_record)
 
     return matched_total
 
