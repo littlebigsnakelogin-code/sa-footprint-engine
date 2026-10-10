@@ -639,6 +639,7 @@ def fetch_orderbook_snapshot(symbol):
         )
         return None
 
+
 def finalize_liquidity_records(symbol, current_time_ms=None):
     """
     Finalize liquidity-reduction records whose execution-matching window
@@ -647,9 +648,8 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
     Accounting:
         pulled_qty = reduced_qty - executed_qty
 
-    Execution can be matched from both:
-        - trades already present before the depth reduction
-        - late trades arriving after the reduction
+    Tiny floating-point residuals are normalized using a relative
+    tolerance without applying a fixed minimum quantity threshold.
 
     This function does not classify spoofing or absorption.
     It only finalizes objective liquidity accounting.
@@ -662,7 +662,6 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         current_time_ms = now_ms()
 
     finalized_count = 0
-
     state = orderbook[symbol]
 
     for record in state["liquidity_history"]:
@@ -682,25 +681,27 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         if current_time_ms - record_time < 1500:
             continue
 
+        executed_qty = float(record.get("executed_qty", 0.0))
+
+        # Clamp execution to the valid reduction range.
         executed_qty = max(
             0.0,
-            min(
-                reduced_qty,
-                float(record.get("executed_qty", 0.0))
-            )
+            min(reduced_qty, executed_qty)
         )
 
-        unmatched_qty = max(
-            0.0,
-            reduced_qty - executed_qty
-        )
+        unmatched_qty = reduced_qty - executed_qty
+
+        # Normalize only negligible floating-point residuals.
+        epsilon = max(reduced_qty, executed_qty) * 1e-12
+
+        if abs(unmatched_qty) <= epsilon:
+            executed_qty = reduced_qty
+            unmatched_qty = 0.0
+        else:
+            unmatched_qty = max(0.0, unmatched_qty)
 
         pulled_qty = unmatched_qty
-
-        if reduced_qty > 0.0:
-            pull_pct = (pulled_qty / reduced_qty) * 100.0
-        else:
-            pull_pct = 0.0
+        pull_pct = (pulled_qty / reduced_qty) * 100.0
 
         record["executed_qty"] = executed_qty
         record["unmatched_qty"] = unmatched_qty
