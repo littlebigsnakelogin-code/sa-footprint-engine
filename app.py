@@ -723,7 +723,6 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
     return finalized_count
 
 
-
 def record_trade_for_execution_matching(
     symbol,
     price,
@@ -815,25 +814,21 @@ def record_trade_for_execution_matching(
 
         try:
             liquidity_time = int(liquidity.get("time", 0))
+            reduced_qty = float(liquidity.get("reduced_qty", 0.0))
+            executed_qty = float(liquidity.get("executed_qty", 0.0))
+            liquidity_price = float(liquidity.get("price", price))
         except (TypeError, ValueError):
             continue
 
-        try:
-            reduced_qty = float(liquidity.get("reduced_qty", 0.0))
-        except (TypeError, ValueError):
-            reduced_qty = 0.0
-
-        try:
-            executed_qty = float(liquidity.get("executed_qty", 0.0))
-        except (TypeError, ValueError):
-            executed_qty = 0.0
-
         pending_liquidity_snapshot.append({
             "time": liquidity_time,
-            "price": float(liquidity.get("price", price)),
+            "price": liquidity_price,
             "reduced_qty": reduced_qty,
             "executed_qty": executed_qty,
-            "unmatched_qty": max(0.0, reduced_qty - executed_qty),
+            "unmatched_qty": max(
+                0.0,
+                reduced_qty - executed_qty,
+            ),
             "status": liquidity.get("status"),
             "time_diff_ms": trade_time - liquidity_time,
         })
@@ -877,13 +872,12 @@ def record_trade_for_execution_matching(
         "is_buyer_maker": is_buyer_maker,
     }
 
-    # Index this trade so a later depth reduction can match it.
+    # Index this trade so later depth reductions can match it.
     trade_match_index[
         (expected_side, price_key)
     ].append(trade_record)
 
-    # Index existing pending reductions that have not yet
-    # been indexed. Keep the original matching architecture.
+    # Index pending reductions that have not yet been indexed.
     indexed_ids = {
         id(record)
         for records in liquidity_match_index.values()
@@ -969,8 +963,8 @@ def record_trade_for_execution_matching(
 
         time_difference = trade_time - liquidity_time
 
-        # Permit a trade up to 300 ms before the reduction
-        # and up to 1500 ms after it.
+        # Permit a trade up to 300 ms before reduction
+        # and up to 1500 ms after reduction.
         if time_difference < -300 or time_difference > 1500:
             continue
 
@@ -990,7 +984,6 @@ def record_trade_for_execution_matching(
         if matched_qty <= epsilon:
             continue
 
-        # Update the reduction's execution accounting.
         new_executed_qty = min(
             reduced_qty,
             executed_qty + matched_qty,
@@ -1011,19 +1004,13 @@ def record_trade_for_execution_matching(
         )
 
         # Pull classification remains provisional until the
-        # reduction's matching window expires.
+        # matching window expires.
         liquidity["pulled_qty"] = 0.0
         liquidity["pull_pct"] = 0.0
         liquidity["status"] = "reduction_pending"
 
-        # ----------------------------------------------------
-        # FIFO ATTRIBUTION — DO NOT CONSUME LOTS HERE
-        # ----------------------------------------------------
-        # The depth event already consumed the FIFO lots and
-        # created fifo_consumption entries. Attribute this new
-        # execution to the unexecuted portion of those entries.
-        # This prevents depth-first events consuming lots twice.
-
+        # FIFO attribution: update existing consumption entries.
+        # Never consume liquidity lots from this trade handler.
         fifo_consumption = liquidity.setdefault(
             "fifo_consumption",
             [],
@@ -1047,8 +1034,6 @@ def record_trade_for_execution_matching(
             except (TypeError, ValueError):
                 continue
 
-            # Never attribute more execution to a FIFO entry
-            # than the quantity that depth actually consumed.
             attribution_capacity = max(
                 0.0,
                 consumed_qty - prior_execution_qty,
@@ -1077,9 +1062,8 @@ def record_trade_for_execution_matching(
 
             fifo_remaining -= attributed_qty
 
-        # Matched execution that cannot be attributed to an
-        # existing FIFO entry is tracked separately. Do not
-        # consume another lot to force attribution.
+        # Track execution that could not be attributed to
+        # an existing FIFO consumption entry.
         previous_unattributed = max(
             0.0,
             float(
@@ -1099,8 +1083,7 @@ def record_trade_for_execution_matching(
                 previous_unattributed
             )
 
-        # Recalculate derived FIFO counters from their source
-        # entries instead of incrementing counters blindly.
+        # Recalculate FIFO counters from their source entries.
         liquidity["fifo_executed_qty"] = sum(
             max(
                 0.0,
@@ -1109,16 +1092,18 @@ def record_trade_for_execution_matching(
             for item in fifo_consumption
         )
 
-        # Residual reduction not yet explained by attributed
-        # or explicitly unattributed executions.
-        liquidity["fifo_unmatched_qty"] = max(
-            0.0,
-            reduced_qty
-            - liquidity["fifo_executed_qty"]
-            - liquidity["fifo_unattributed_execution_qty"],
+        # Remaining FIFO-consumed quantity not yet attributed
+        # to execution. This is not the same as pulled_qty.
+        liquidity["fifo_unmatched_qty"] = sum(
+            max(
+                0.0,
+                float(item.get("consumed_qty", 0.0))
+                - float(item.get("execution_qty", 0.0)),
+            )
+            for item in fifo_consumption
         )
 
-        # Consume the trade's available quantity exactly once.
+        # Consume the trade quantity exactly once.
         trade_record["remaining_qty"] = max(
             0.0,
             float(trade_record["remaining_qty"])
@@ -3032,7 +3017,7 @@ def apply_orderbook_event(symbol, event):
 
                         "execution_qty": 0.0,
 
-                        "unmatched_qty": 0.0,
+                        "unmatched_qty": float(consumed_qty),
 
                         "first_seen_time": (
                             oldest_lot.get(
