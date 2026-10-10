@@ -642,21 +642,24 @@ def fetch_orderbook_snapshot(symbol):
 
 def finalize_liquidity_records(symbol, current_time_ms=None):
     """
-    Finalize liquidity-reduction records whose execution-matching window
-    has expired.
+    Finalize expired liquidity reductions and clean execution-match indexes.
 
     Accounting:
         pulled_qty = reduced_qty - executed_qty
 
-    Tiny floating-point residuals are normalized using a relative
-    tolerance without applying a fixed minimum quantity threshold.
+    Index cleanup:
+        - Remove finalized or evicted liquidity records from the index.
+        - Expire old trade-index entries only when a depth-event timestamp
+          is supplied, preserving the existing -300 ms matching window.
+        - Keep trade_history and liquidity_history unchanged by index cleanup.
 
     This function does not classify spoofing or absorption.
-    It only finalizes objective liquidity accounting.
     """
 
     if symbol not in orderbook:
         return 0
+
+    has_event_time = current_time_ms is not None
 
     if current_time_ms is None:
         current_time_ms = now_ms()
@@ -664,24 +667,38 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
     finalized_count = 0
     state = orderbook[symbol]
 
-    for record in state["liquidity_history"]:
+    liquidity_history = state.get(
+        "liquidity_history",
+        ()
+    )
+
+    for record in liquidity_history:
+
+        if not isinstance(record, dict):
+            continue
 
         if record.get("finalized"):
             continue
 
-        reduced_qty = float(record.get("reduced_qty", 0.0))
+        reduced_qty = float(
+            record.get("reduced_qty", 0.0)
+        )
 
         # Only reductions need execution matching/finalization.
         if reduced_qty <= 0.0:
             continue
 
-        record_time = int(record.get("time", current_time_ms))
+        record_time = int(
+            record.get("time", current_time_ms)
+        )
 
         # Keep the 1500 ms matching window open.
         if current_time_ms - record_time < 1500:
             continue
 
-        executed_qty = float(record.get("executed_qty", 0.0))
+        executed_qty = float(
+            record.get("executed_qty", 0.0)
+        )
 
         # Clamp execution to the valid reduction range.
         executed_qty = max(
@@ -692,16 +709,24 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         unmatched_qty = reduced_qty - executed_qty
 
         # Normalize only negligible floating-point residuals.
-        epsilon = max(reduced_qty, executed_qty) * 1e-12
+        epsilon = max(
+            reduced_qty,
+            executed_qty
+        ) * 1e-12
 
         if abs(unmatched_qty) <= epsilon:
             executed_qty = reduced_qty
             unmatched_qty = 0.0
         else:
-            unmatched_qty = max(0.0, unmatched_qty)
+            unmatched_qty = max(
+                0.0,
+                unmatched_qty
+            )
 
         pulled_qty = unmatched_qty
-        pull_pct = (pulled_qty / reduced_qty) * 100.0
+        pull_pct = (
+            pulled_qty / reduced_qty
+        ) * 100.0
 
         record["executed_qty"] = executed_qty
         record["unmatched_qty"] = unmatched_qty
@@ -709,7 +734,6 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         record["pull_pct"] = pull_pct
         record["finalized"] = True
 
-        # Pure accounting state.
         if executed_qty > 0.0 and pulled_qty > 0.0:
             record["status"] = "PARTIAL_EXECUTION_PULL"
         elif executed_qty > 0.0:
@@ -720,6 +744,106 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
             record["status"] = "REDUCTION_ZERO"
 
         finalized_count += 1
+
+    # ---------------------------------------------------------
+    # CLEAN LIQUIDITY MATCH INDEX
+    # ---------------------------------------------------------
+
+    liquidity_index = state.get(
+        "liquidity_match_index"
+    )
+
+    if isinstance(liquidity_index, dict):
+
+        # Records evicted from the bounded history cannot be
+        # finalized or reported through that history anymore.
+        history_ids = {
+            id(record)
+            for record in liquidity_history
+            if isinstance(record, dict)
+        }
+
+        for key, records in list(
+            liquidity_index.items()
+        ):
+
+            retained_records = deque(
+                record
+                for record in records
+                if (
+                    isinstance(record, dict)
+                    and id(record) in history_ids
+                    and not record.get("finalized")
+                )
+            )
+
+            if retained_records:
+                liquidity_index[key] = retained_records
+            else:
+                liquidity_index.pop(key, None)
+
+    # ---------------------------------------------------------
+    # CLEAN TRADE MATCH INDEX
+    # ---------------------------------------------------------
+
+    trade_index = state.get(
+        "trade_match_index"
+    )
+
+    if isinstance(trade_index, dict):
+
+        # Use the depth-event timestamp as the event-time
+        # watermark. A debug request alone must not advance it.
+        trade_cutoff = (
+            current_time_ms - 300
+            if has_event_time
+            else None
+        )
+
+        for key, trades in list(
+            trade_index.items()
+        ):
+
+            retained_trades = deque()
+
+            for trade in trades:
+
+                if not isinstance(trade, dict):
+                    continue
+
+                try:
+                    trade_time = int(
+                        trade.get("time")
+                    )
+
+                    remaining_qty = float(
+                        trade.get(
+                            "remaining_qty",
+                            trade.get("quantity", 0.0)
+                        )
+                    )
+
+                except (TypeError, ValueError):
+                    continue
+
+                # A fully consumed trade cannot match again.
+                if remaining_qty <= 1e-12:
+                    continue
+
+                # Keep trades that may still match a future
+                # reduction within the existing -300 ms rule.
+                if (
+                    trade_cutoff is not None
+                    and trade_time < trade_cutoff
+                ):
+                    continue
+
+                retained_trades.append(trade)
+
+            if retained_trades:
+                trade_index[key] = retained_trades
+            else:
+                trade_index.pop(key, None)
 
     return finalized_count
 
