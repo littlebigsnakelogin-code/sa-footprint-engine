@@ -4223,36 +4223,54 @@ def request_orderbook_resync(symbol):
 
     thread.start()
 
+
 def handle_depth_update(symbol, event):
     """
     Binance Futures depth event ko safely process karta hai.
+    AVAX synchronization diagnostics included.
     """
-
     event_first_id = int(event["U"])
     event_final_id = int(event["u"])
 
     with lock:
-
         state = orderbook[symbol]
-
         state["last_depth_event_time"] = now_ms()
 
-        # ----------------------------------------------------
         # Not initialized yet
-        # ----------------------------------------------------
-
         if not state["initialized"]:
-
             state["buffer"].append(event)
 
-            # Prevent unlimited buffer growth while waiting
-            # for REST snapshot synchronization.
             while len(state["buffer"]) > 2000:
                 state["buffer"].popleft()
 
-            # Snapshot synchronization start karo
-            if not state["resyncing"]:
+            # AVAX diagnostic: maximum once every 5 seconds
+            if symbol == "AVAXUSDT":
+                diagnostic_now = time.monotonic()
+                last_log = state.get("_depth_diag_last_log", 0.0)
 
+                if (
+                    last_log == 0.0
+                    or diagnostic_now - last_log >= 5.0
+                ):
+                    state["_depth_diag_last_log"] = diagnostic_now
+
+                    first_event = state["buffer"][0]
+                    last_event = state["buffer"][-1]
+
+                    print(
+                        f"[AVAX DEPTH DIAG] "
+                        f"U={event_first_id} "
+                        f"u={event_final_id} "
+                        f"pu={event.get('pu')} "
+                        f"buffer_count={len(state['buffer'])} "
+                        f"buffer_first_u={first_event.get('u')} "
+                        f"buffer_last_u={last_event.get('u')} "
+                        f"last_update_id={state.get('last_update_id')} "
+                        f"collector_connected="
+                        f"{collector_state.get('connected')}"
+                    )
+
+            if not state["resyncing"]:
                 state["resyncing"] = True
 
                 thread = threading.Thread(
@@ -4261,72 +4279,50 @@ def handle_depth_update(symbol, event):
                     name=f"orderbook-init-{symbol}",
                     daemon=True,
                 )
-
                 thread.start()
 
             return
-        # ----------------------------------------------------
-        # Already initialized
-        # ----------------------------------------------------
 
+        # Already initialized
         previous_u = state["last_update_id"]
 
         if previous_u is None:
-
             state["buffer"].append(event)
             state["initialized"] = False
-
             state["sequence_errors"] += 1
-
             request_orderbook_resync(symbol)
-
             return
 
-        # ----------------------------------------------------
-        # Ignore old event
-        # ----------------------------------------------------
-
+        # Ignore old events
         if event_final_id <= previous_u:
             return
 
-        # ----------------------------------------------------
         # Futures sequence continuity
-        # ----------------------------------------------------
-
         event_previous_id = event.get("pu")
 
         if (
             event_previous_id is not None
             and int(event_previous_id) != previous_u
         ):
-
             state["sequence_errors"] += 1
 
             print(
-                f"[ORDERBOOK] SEQUENCE GAP "
-                f"{symbol}: "
+                f"[ORDERBOOK] SEQUENCE GAP {symbol}: "
                 f"expected pu={previous_u}, "
                 f"received pu={event_previous_id}"
             )
 
-            # Keep this event so resync can potentially use it
             state["buffer"].clear()
             state["buffer"].append(event)
-
             state["initialized"] = False
 
             request_orderbook_resync(symbol)
-
             return
 
-        # ----------------------------------------------------
         # Apply valid event
-        # ----------------------------------------------------
+        apply_orderbook_event(symbol, event)
+    
 
-        apply_orderbook_event(
-            symbol,
-            event
-        )
 # ============================================================
 # VALUE AREA
 # ============================================================
