@@ -4759,6 +4759,7 @@ def store_finished_candle(candle):
 # PROCESS TRADE
 # ============================================================
 
+
 def process_trade(
     symbol,
     price,
@@ -4768,20 +4769,27 @@ def process_trade(
 ):
     """
     Ek Binance trade ko saare timeframes mein process karta hai.
+    Execution matching aur depth updates ko shared lock se
+    serialize karta hai.
     """
-    
+
     # ----------------------------------------------------
     # EXECUTION MATCHING
     # ----------------------------------------------------
+    # handle_depth_update() bhi isi RLock ka use karta hai.
+    # Matching state ko concurrent modification se bachao.
+    with lock:
+        record_trade_for_execution_matching(
+            symbol,
+            price,
+            quantity,
+            trade_time,
+            is_buyer_maker,
+        )
 
-    record_trade_for_execution_matching(
-        symbol,
-        price,
-        quantity,
-        trade_time,
-        is_buyer_maker,
-    )
-    
+    # ----------------------------------------------------
+    # CANDLE PROCESSING
+    # ----------------------------------------------------
     with lock:
 
         for timeframe, seconds in TIMEFRAMES.items():
