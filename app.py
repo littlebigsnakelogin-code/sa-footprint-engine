@@ -3627,6 +3627,7 @@ def apply_orderbook_event(symbol, event):
     )
 
 
+
 def initialize_orderbook(symbol):
     """
     Binance Futures local orderbook synchronization.
@@ -3635,6 +3636,7 @@ def initialize_orderbook(symbol):
     - Snapshot successfully mil raha hai ya nahi verify karta hai.
     - Snapshot ke baad buffered depth-event range log karta hai.
     - Bridge condition ko change nahi karta.
+    - Snapshot WebSocket requests are serialized.
     - Existing synchronization logic preserve karta hai.
     """
 
@@ -3672,9 +3674,17 @@ def initialize_orderbook(symbol):
             f"REQUESTING SNAPSHOT {symbol}"
         )
 
-        snapshot = fetch_orderbook_snapshot_ws(
-            symbol
-        )
+        # Serialize snapshot requests across symbols.
+        with snapshot_ws_lock:
+
+            print(
+                f"[ORDERBOOK INIT] "
+                f"SNAPSHOT LOCK ACQUIRED {symbol}"
+            )
+
+            snapshot = fetch_orderbook_snapshot_ws(
+                symbol
+            )
 
         if snapshot is None:
 
@@ -3725,10 +3735,7 @@ def initialize_orderbook(symbol):
             f"asks={len(snapshot_asks)}"
         )
 
-        # ---------------------------------------------------------
-        # DIAGNOSTIC: inspect buffered event range
-        # ---------------------------------------------------------
-
+        # DIAGNOSTIC: inspect buffered event range.
         with lock:
 
             state = orderbook[symbol]
@@ -3785,10 +3792,7 @@ def initialize_orderbook(symbol):
 
                     return False
 
-                # -------------------------------------------------
-                # Remove events already covered by snapshot
-                # -------------------------------------------------
-
+                # Remove events already covered by snapshot.
                 while state["buffer"]:
 
                     oldest_event = state["buffer"][0]
@@ -3803,10 +3807,7 @@ def initialize_orderbook(symbol):
 
                         break
 
-                # -------------------------------------------------
-                # Find first event that bridges snapshot
-                # -------------------------------------------------
-
+                # Find first event that bridges snapshot.
                 bridge_index = None
 
                 for index, event in enumerate(
@@ -3830,10 +3831,7 @@ def initialize_orderbook(symbol):
                         bridge_index = index
                         break
 
-                # -------------------------------------------------
-                # No bridge yet
-                # -------------------------------------------------
-
+                # No bridge yet.
                 if bridge_index is None:
 
                     elapsed = (
@@ -3849,10 +3847,7 @@ def initialize_orderbook(symbol):
 
                         retry_snapshot = False
 
-                # -------------------------------------------------
-                # Bridge found
-                # -------------------------------------------------
-
+                # Bridge found.
                 else:
 
                     state["bids"] = (
@@ -3867,98 +3862,42 @@ def initialize_orderbook(symbol):
                         snapshot_last_update_id
                     )
 
-                    # ---------------------------------------------
-                    # Reset FIFO baseline
-                    # ---------------------------------------------
-
-                    state[
-                        "liquidity_lots"
-                    ][
-                        "bid"
-                    ].clear()
-
-                    state[
-                        "liquidity_lots"
-                    ][
-                        "ask"
-                    ].clear()
+                    # Reset FIFO baseline.
+                    state["liquidity_lots"]["bid"].clear()
+                    state["liquidity_lots"]["ask"].clear()
 
                     for price, quantity in (
                         snapshot_bids.items()
                     ):
 
-                        state[
-                            "liquidity_lots"
-                        ][
-                            "bid"
-                        ][
-                            price
-                        ].append({
-
-                            "lot_id": str(
-                                uuid.uuid4()
-                            ),
-
-                            "original_qty": float(
-                                quantity
-                            ),
-
-                            "remaining_qty": float(
-                                quantity
-                            ),
-
+                        state["liquidity_lots"]["bid"][price].append({
+                            "lot_id": str(uuid.uuid4()),
+                            "original_qty": float(quantity),
+                            "remaining_qty": float(quantity),
                             "time": snapshot_time,
-
                             "origin": "snapshot",
-
-                            "update_id":
-                                snapshot_last_update_id,
+                            "update_id": snapshot_last_update_id,
                         })
 
                     for price, quantity in (
                         snapshot_asks.items()
                     ):
 
-                        state[
-                            "liquidity_lots"
-                        ][
-                            "ask"
-                        ][
-                            price
-                        ].append({
-
-                            "lot_id": str(
-                                uuid.uuid4()
-                            ),
-
-                            "original_qty": float(
-                                quantity
-                            ),
-
-                            "remaining_qty": float(
-                                quantity
-                            ),
-
+                        state["liquidity_lots"]["ask"][price].append({
+                            "lot_id": str(uuid.uuid4()),
+                            "original_qty": float(quantity),
+                            "remaining_qty": float(quantity),
                             "time": snapshot_time,
-
                             "origin": "snapshot",
-
-                            "update_id":
-                                snapshot_last_update_id,
+                            "update_id": snapshot_last_update_id,
                         })
 
-                    # ---------------------------------------------
-                    # Apply bridge + following buffered events
-                    # ---------------------------------------------
-
+                    # Apply bridge + following buffered events.
                     buffered_events = list(
                         state["buffer"]
                     )[bridge_index:]
 
-                    previous_u = (
-                        snapshot_last_update_id
-                    )
-
+                    previous_u = snapshot_last_update_id
                     valid = True
 
                     for event in buffered_events:
@@ -4017,43 +3956,23 @@ def initialize_orderbook(symbol):
                             event
                         )
 
-                        previous_u = (
-                            event_final_id
-                        )
+                        previous_u = event_final_id
 
                     if not valid:
 
-                        state[
-                            "sequence_errors"
-                        ] += 1
-
+                        state["sequence_errors"] += 1
                         sequence_failed = True
 
                     else:
 
-                        state[
-                            "buffer"
-                        ].clear()
+                        state["buffer"].clear()
 
-                        state[
-                            "initialized"
-                        ] = True
+                        state["initialized"] = True
+                        state["resyncing"] = False
 
-                        state[
-                            "resyncing"
-                        ] = False
-
-                        state[
-                            "last_update_id"
-                        ] = previous_u
-
-                        state[
-                            "last_depth_update_id"
-                        ] = previous_u
-
-                        state[
-                            "last_depth_event_time"
-                        ] = now_ms()
+                        state["last_update_id"] = previous_u
+                        state["last_depth_update_id"] = previous_u
+                        state["last_depth_event_time"] = now_ms()
 
                         print(
                             f"[ORDERBOOK] SYNCED "
@@ -4069,10 +3988,7 @@ def initialize_orderbook(symbol):
 
                         return True
 
-            # -----------------------------------------------------
-            # Sequence validation failed
-            # -----------------------------------------------------
-
+            # Sequence validation failed.
             if sequence_failed:
 
                 print(
@@ -4094,26 +4010,14 @@ def initialize_orderbook(symbol):
                     state["bids"].clear()
                     state["asks"].clear()
 
-                    state[
-                        "liquidity_lots"
-                    ][
-                        "bid"
-                    ].clear()
-
-                    state[
-                        "liquidity_lots"
-                    ][
-                        "ask"
-                    ].clear()
+                    state["liquidity_lots"]["bid"].clear()
+                    state["liquidity_lots"]["ask"].clear()
 
                     state["buffer"].clear()
 
                 return False
 
-            # -----------------------------------------------------
-            # Bridge timeout
-            # -----------------------------------------------------
-
+            # Bridge timeout.
             if retry_snapshot:
 
                 print(
@@ -4135,17 +4039,8 @@ def initialize_orderbook(symbol):
                     state["bids"].clear()
                     state["asks"].clear()
 
-                    state[
-                        "liquidity_lots"
-                    ][
-                        "bid"
-                    ].clear()
-
-                    state[
-                        "liquidity_lots"
-                    ][
-                        "ask"
-                    ].clear()
+                    state["liquidity_lots"]["bid"].clear()
+                    state["liquidity_lots"]["ask"].clear()
 
                     state["buffer"].clear()
 
