@@ -4833,84 +4833,54 @@ def process_trade(
 # BINANCE MESSAGE HANDLER
 # ============================================================
 
-def handle_message(
-    ws,
-    message
-):
-
+def handle_message(ws, message):
     with lock:
-
-        collector_state[
-            "raw_message_count"
-        ] += 1
-
-        collector_state[
-            "last_message_at"
-        ] = now_ms()
+        collector_state["raw_message_count"] += 1
+        collector_state["last_message_at"] = now_ms()
 
     try:
+        payload = json.loads(message)
 
-        payload = json.loads(
-            message
-        )
+        if not isinstance(payload, dict):
+            return
 
         data = payload.get("data", payload)
+
+        if not isinstance(data, dict):
+            return
+
         event_type = data.get("e")
         symbol = str(data.get("s", "")).upper()
 
         if symbol not in SYMBOLS:
             return
 
-                # --- ORDERBOOK (DEPTH) UPDATE ---
+        # Orderbook depth updates
         if event_type == "depthUpdate":
-
-            handle_depth_update(
-                symbol,
-                data
-            )
-
+            handle_depth_update(symbol, data)
             return
 
-        # --- TRADE UPDATE ---
-        if event_type != "trade":
+        # Binance Futures aggregate trade stream
+        # Existing trade events bhi backward-compatible rahenge.
+        if event_type not in ("trade", "aggTrade"):
             return
 
         price = float(data.get("p", 0))
-        quantity = float(
-            data.get("q", 0)
-        )
-
-        trade_time = int(
-            data.get("T", 0)
-        )
-
-        is_buyer_maker = bool(
-            data.get("m", False)
-        )
-
-        # ----------------------------------------------------
-        # INVALID TRADE PROTECTION
-        # ----------------------------------------------------
+        quantity = float(data.get("q", 0))
+        trade_time = int(data.get("T", 0))
+        is_buyer_maker = bool(data.get("m", False))
 
         if (
             price <= 0
             or quantity <= 0
             or trade_time <= 0
         ):
-
             with lock:
-
-                collector_state[
-                    "invalid_message_count"
-                ] += 1
-
+                collector_state["invalid_message_count"] += 1
             return
 
         with lock:
-
-            collector_state[
-                "trade_message_count"
-            ] += 1
+            collector_state["trade_message_count"] += 1
 
         process_trade(
             symbol,
@@ -4921,16 +4891,14 @@ def handle_message(
         )
 
     except Exception as exc:
-
         with lock:
+            collector_state["invalid_message_count"] += 1
+            collector_state["error"] = str(exc)
 
-            collector_state[
-                "invalid_message_count"
-            ] += 1
-
-            collector_state[
-                "error"
-            ] = str(exc)
+        print(
+            f"[COLLECTOR] MESSAGE ERROR: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
 
 # ============================================================
@@ -4939,7 +4907,7 @@ def handle_message(
 
 def collector_loop():
     trade_streams = [
-        f"{symbol.lower()}@trade"
+        f"{symbol.lower()}@aggTrade"
         for symbol in SYMBOLS
     ]
 
@@ -4995,8 +4963,8 @@ def collector_loop():
             collector_state["status"] = "connecting"
 
     def invalidate_orderbooks_on_depth_disconnect():
-        # Sirf depth connection disconnect hone par book invalidate karo.
-        # Trade connection disconnect hone par orderbook untouched rahega.
+        # Depth disconnect par existing safety behaviour preserve karo.
+        # Trade-only disconnect par orderbook clear nahi hoga.
         for symbol in SYMBOLS:
             state = orderbook[symbol]
 
@@ -5026,12 +4994,8 @@ def collector_loop():
 
                 with lock:
                     stream_connected[role] = True
-                    collector_state[
-                        config["connected_key"]
-                    ] = True
-                    collector_state[
-                        config["error_key"]
-                    ] = None
+                    collector_state[config["connected_key"]] = True
+                    collector_state[config["error_key"]] = None
 
                     if role == "depth":
                         collector_state["error"] = None
@@ -5049,9 +5013,7 @@ def collector_loop():
 
             def on_error(ws, error):
                 with lock:
-                    collector_state[
-                        config["error_key"]
-                    ] = str(error)
+                    collector_state[config["error_key"]] = str(error)
 
                     if role == "depth":
                         collector_state["error"] = str(error)
@@ -5072,9 +5034,7 @@ def collector_loop():
 
                 with lock:
                     stream_connected[role] = False
-                    collector_state[
-                        config["connected_key"]
-                    ] = False
+                    collector_state[config["connected_key"]] = False
 
                     if role == "depth":
                         collector_state["error"] = (
@@ -5082,6 +5042,7 @@ def collector_loop():
                             if close_msg
                             else collector_state.get("error")
                         )
+
                         invalidate_orderbooks_on_depth_disconnect()
 
                     update_connection_status()
@@ -5118,9 +5079,7 @@ def collector_loop():
 
             except Exception as exc:
                 with lock:
-                    collector_state[
-                        config["error_key"]
-                    ] = str(exc)
+                    collector_state[config["error_key"]] = str(exc)
 
                     if role == "depth":
                         collector_state["error"] = str(exc)
@@ -5170,8 +5129,6 @@ def collector_loop():
     for worker in workers:
         worker.start()
 
-    # Main collector thread alive rahe; dono streams independently
-    # reconnect karte rahenge.
     for worker in workers:
         worker.join()
 
