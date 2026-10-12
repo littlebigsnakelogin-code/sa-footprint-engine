@@ -4831,23 +4831,38 @@ def collector_loop():
         else:
             collector_state["status"] = "connecting"
 
+    
     def invalidate_orderbooks_on_depth_disconnect():
-        # Depth disconnect par existing safety behaviour preserve karo.
-        # Trade-only disconnect par orderbook clear nahi hoga.
-        for symbol in SYMBOLS:
-            state = orderbook[symbol]
+        """
+        Invalidate local books after a depth disconnect without
+        allowing a reconnect to start a duplicate initializer
+        while the previous initializer is still active.
+        """
+        with lock:
+            for symbol in SYMBOLS:
+                state = orderbook[symbol]
 
-            state["initialized"] = False
-            state["resyncing"] = False
-            state["last_update_id"] = None
-            state["last_depth_update_id"] = None
+                state["initialized"] = False
 
-            state["bids"].clear()
-            state["asks"].clear()
+                # Active initializer ko finish hone do.
+                # Uska finally block resyncing ko reset karega.
+                state["resyncing"] = bool(
+                    state.get("_init_worker_active", False)
+                )
 
-            state["liquidity_lots"]["bid"].clear()
-            state["liquidity_lots"]["ask"].clear()
-            state["buffer"].clear()
+                state["last_update_id"] = None
+                state["last_depth_update_id"] = None
+
+                state["bids"].clear()
+                state["asks"].clear()
+                state["liquidity_lots"]["bid"].clear()
+                state["liquidity_lots"]["ask"].clear()
+                state["buffer"].clear()
+
+            print(
+                "[ORDERBOOK RECOVERY] Depth disconnect invalidated "
+                "all books; active initializers preserved until exit"
+            )
 
     def run_stream_worker(role):
         config = stream_configs[role]
