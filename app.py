@@ -3561,33 +3561,25 @@ def apply_orderbook_event(symbol, event):
     )
 
 
+
 def initialize_orderbook(symbol):
     """
-    Recover Binance Futures orderbook synchronization.
+    Synchronize Binance Futures orderbook from a REST-like WS snapshot
+    and a contiguous buffered depth-event sequence.
 
-    Design:
-    - One active initialization worker per symbol.
-    - Retry snapshots internally with bounded exponential backoff.
-    - Preserve the depth-event buffer between snapshot attempts.
-    - Validate the complete buffered sequence before applying events.
-    - Publish synchronized state only after successful replay.
+    Never publish a synchronized book unless the snapshot bridge and
+    all replayed events pass sequence validation.
     """
 
     BRIDGE_WAIT_SECONDS = 10.0
     BRIDGE_CHECK_INTERVAL = 0.05
-
     RETRY_BASE_SECONDS = 0.5
     RETRY_MAX_SECONDS = 5.0
+    MAX_BUFFER_EVENTS = 2000
 
     if symbol not in orderbook:
-        print(
-            f"[ORDERBOOK INIT] INVALID SYMBOL {symbol}"
-        )
+        print(f"[ORDERBOOK INIT] INVALID SYMBOL {symbol}")
         return False
-
-    # ---------------------------------------------------------
-    # CLAIM THE SYMBOL WORKER
-    # ---------------------------------------------------------
 
     with lock:
         state = orderbook[symbol]
@@ -3608,37 +3600,27 @@ def initialize_orderbook(symbol):
 
     try:
         while True:
-
-            # -------------------------------------------------
-            # CHECK COLLECTOR
-            # -------------------------------------------------
-
             with lock:
                 state = orderbook[symbol]
 
-                if not collector_state.get(
-                    "connected",
-                    False
-                ):
+                if not collector_state.get("connected", False):
                     print(
                         f"[ORDERBOOK INIT] STOPPED {symbol}; "
                         f"collector disconnected"
                     )
                     return False
 
-                # Preserve the bounded buffer.
-                # Never discard valid candidate events merely
-                # because the preceding snapshot attempt failed.
-                while len(state["buffer"]) > 2000:
+                while len(state["buffer"]) > MAX_BUFFER_EVENTS:
                     state["buffer"].popleft()
+
+                buffer_count = len(state["buffer"])
 
             attempt += 1
 
             print(
                 f"[ORDERBOOK INIT] ATTEMPT {symbol} "
-                f"attempt={attempt} "
-                f"reason={retry_reason} "
-                f"buffer_count={len(orderbook[symbol]['buffer'])}"
+                f"attempt={attempt} reason={retry_reason} "
+                f"buffer_count={buffer_count}"
             )
 
             # -------------------------------------------------
@@ -3648,47 +3630,33 @@ def initialize_orderbook(symbol):
             snapshot = None
 
             try:
-                print(
-                    f"[ORDERBOOK INIT] REQUESTING SNAPSHOT "
-                    f"{symbol} attempt={attempt}"
-                )
-
-                # Keep the existing shared snapshot lock.
                 with snapshot_ws_lock:
                     with lock:
                         if not collector_state.get(
-                            "connected",
-                            False
+                            "connected", False
                         ):
                             return False
 
-                    snapshot = fetch_orderbook_snapshot_ws(
-                        symbol
-                    )
+                    snapshot = fetch_orderbook_snapshot_ws(symbol)
 
             except Exception as exc:
                 print(
-                    f"[ORDERBOOK INIT] SNAPSHOT ERROR "
-                    f"{symbol} "
+                    f"[ORDERBOOK INIT] SNAPSHOT ERROR {symbol}: "
                     f"{type(exc).__name__}: {exc}"
                 )
 
             if not isinstance(snapshot, dict):
                 retry_reason = "SNAPSHOT_FAILED"
-
                 delay = min(
                     RETRY_BASE_SECONDS
                     * (2 ** min(attempt - 1, 4)),
                     RETRY_MAX_SECONDS,
                 )
-
                 print(
                     f"[ORDERBOOK INIT] RETRY {symbol} "
-                    f"reason={retry_reason} "
-                    f"attempt={attempt} "
+                    f"reason={retry_reason} attempt={attempt} "
                     f"delay={delay:.2f}s"
                 )
-
                 time.sleep(delay)
                 continue
 
@@ -3699,58 +3667,41 @@ def initialize_orderbook(symbol):
 
                 snapshot_bids = {
                     str(price): float(quantity)
-                    for price, quantity
-                    in snapshot.get("bids", [])
+                    for price, quantity in snapshot.get("bids", [])
                     if float(quantity) > 0.0
                 }
 
                 snapshot_asks = {
                     str(price): float(quantity)
-                    for price, quantity
-                    in snapshot.get("asks", [])
+                    for price, quantity in snapshot.get("asks", [])
                     if float(quantity) > 0.0
                 }
 
-            except (
-                KeyError,
-                TypeError,
-                ValueError,
-            ) as exc:
-
+            except (KeyError, TypeError, ValueError) as exc:
                 retry_reason = "INVALID_SNAPSHOT"
-
                 print(
-                    f"[ORDERBOOK INIT] INVALID SNAPSHOT "
-                    f"{symbol}: "
+                    f"[ORDERBOOK INIT] INVALID SNAPSHOT {symbol}: "
                     f"{type(exc).__name__}: {exc}"
                 )
-
                 time.sleep(RETRY_BASE_SECONDS)
                 continue
 
             if not snapshot_bids or not snapshot_asks:
                 retry_reason = "EMPTY_SNAPSHOT"
-
                 print(
-                    f"[ORDERBOOK INIT] EMPTY SNAPSHOT "
-                    f"{symbol} "
+                    f"[ORDERBOOK INIT] EMPTY SNAPSHOT {symbol} "
                     f"lastUpdateId={snapshot_last_update_id} "
                     f"bids={len(snapshot_bids)} "
                     f"asks={len(snapshot_asks)}"
                 )
-
                 time.sleep(RETRY_BASE_SECONDS)
                 continue
 
-            target_update_id = (
-                snapshot_last_update_id + 1
-            )
-
+            target_update_id = snapshot_last_update_id + 1
             snapshot_time = now_ms()
 
             print(
-                f"[ORDERBOOK INIT] SNAPSHOT READY "
-                f"{symbol} "
+                f"[ORDERBOOK INIT] SNAPSHOT READY {symbol} "
                 f"attempt={attempt} "
                 f"lastUpdateId={snapshot_last_update_id} "
                 f"target={target_update_id} "
@@ -3759,83 +3710,49 @@ def initialize_orderbook(symbol):
             )
 
             # -------------------------------------------------
-            # FIND AND VALIDATE A SNAPSHOT BRIDGE
+            # FIND A BRIDGE AND VALIDATE THE BUFFER
             # -------------------------------------------------
 
             bridge_wait_started = time.monotonic()
             retry_reason = None
+            bridge_succeeded = False
 
             while True:
-
                 with lock:
                     state = orderbook[symbol]
 
-                    if not collector_state.get(
-                        "connected",
-                        False
-                    ):
+                    if not collector_state.get("connected", False):
                         print(
                             f"[ORDERBOOK INIT] STOPPED {symbol}; "
                             f"collector disconnected while bridging"
                         )
                         return False
 
-                    # Events already included in the snapshot
-                    # cannot be replayed.
+                    # Drop events already covered by the snapshot.
                     while state["buffer"]:
                         try:
                             first_final_id = int(
                                 state["buffer"][0]["u"]
                             )
-                        except (
-                            KeyError,
-                            TypeError,
-                            ValueError,
-                        ):
+                        except (KeyError, TypeError, ValueError):
                             state["buffer"].popleft()
                             continue
 
-                        if (
-                            first_final_id
-                            <= snapshot_last_update_id
-                        ):
+                        if first_final_id <= snapshot_last_update_id:
                             state["buffer"].popleft()
                         else:
                             break
 
-                    buffer_count = len(state["buffer"])
-
-                    first_event = (
-                        state["buffer"][0]
-                        if buffer_count
-                        else None
-                    )
-
-                    last_event = (
-                        state["buffer"][-1]
-                        if buffer_count
-                        else None
-                    )
+                    buffered_events = list(state["buffer"])
+                    buffer_count = len(buffered_events)
 
                     bridge_index = None
 
-                    # Locate the event whose [U, u] interval
-                    # covers snapshot_last_update_id + 1.
-                    for index, event in enumerate(
-                        state["buffer"]
-                    ):
+                    for index, event in enumerate(buffered_events):
                         try:
-                            event_first_id = int(
-                                event["U"]
-                            )
-                            event_final_id = int(
-                                event["u"]
-                            )
-                        except (
-                            KeyError,
-                            TypeError,
-                            ValueError,
-                        ):
+                            event_first_id = int(event["U"])
+                            event_final_id = int(event["u"])
+                        except (KeyError, TypeError, ValueError):
                             continue
 
                         if (
@@ -3846,57 +3763,57 @@ def initialize_orderbook(symbol):
                             bridge_index = index
                             break
 
-                    # -----------------------------------------
+                    # -------------------------------------------------
                     # BRIDGE NOT FOUND
-                    # -----------------------------------------
+                    # -------------------------------------------------
 
                     if bridge_index is None:
+                        first_event = (
+                            buffered_events[0]
+                            if buffered_events
+                            else None
+                        )
+                        last_event = (
+                            buffered_events[-1]
+                            if buffered_events
+                            else None
+                        )
 
                         bridge_impossible = False
 
                         if first_event is not None:
                             try:
-                                first_U = int(
-                                    first_event["U"]
-                                )
+                                first_U = int(first_event["U"])
+                                last_u = int(last_event["u"])
 
-                                if first_U > target_update_id:
+                                # No event covers the target, and the
+                                # buffered sequence has already passed
+                                # it. Fetch a newer snapshot immediately.
+                                if (
+                                    first_U > target_update_id
+                                    or last_u >= target_update_id
+                                ):
                                     bridge_impossible = True
 
-                            except (
-                                KeyError,
-                                TypeError,
-                                ValueError,
-                            ):
+                            except (KeyError, TypeError, ValueError):
                                 pass
 
                         bridge_timed_out = (
-                            time.monotonic()
-                            - bridge_wait_started
+                            time.monotonic() - bridge_wait_started
                             >= BRIDGE_WAIT_SECONDS
                         )
 
-                        if (
-                            bridge_impossible
-                            or bridge_timed_out
-                        ):
-
-                            if bridge_impossible:
-                                retry_reason = (
-                                    "BRIDGE_IMPOSSIBLE"
-                                )
-                            else:
-                                retry_reason = (
-                                    "BRIDGE_TIMEOUT"
-                                )
+                        if bridge_impossible or bridge_timed_out:
+                            retry_reason = (
+                                "BRIDGE_IMPOSSIBLE"
+                                if bridge_impossible
+                                else "BRIDGE_TIMEOUT"
+                            )
 
                             print(
-                                f"[ORDERBOOK INIT] "
-                                f"{retry_reason} "
-                                f"{symbol} "
-                                f"attempt={attempt} "
-                                f"snapshot_id="
-                                f"{snapshot_last_update_id} "
+                                f"[ORDERBOOK INIT] {retry_reason} "
+                                f"{symbol} attempt={attempt} "
+                                f"snapshot_id={snapshot_last_update_id} "
                                 f"target={target_update_id} "
                                 f"buffer_count={buffer_count} "
                                 f"buffer_first_U="
@@ -3908,69 +3825,34 @@ def initialize_orderbook(symbol):
                                 f"buffer_last_u="
                                 f"{last_event.get('u') if last_event else None}"
                             )
-
-                            # Do not clear the buffer here.
-                            # The next snapshot will be compared
-                            # against the same recent event stream.
                             break
 
-                        # New events may still arrive and create
-                        # the bridge. Release the lock and check again.
-                        pass
-
-                    # -----------------------------------------
-                    # BRIDGE FOUND: VALIDATE FULL SEQUENCE
-                    # -----------------------------------------
-
                     else:
-
-                        buffered_events = list(
-                            state["buffer"]
-                        )[bridge_index:]
-
+                        # Validate all events before changing the book.
+                        replay_events = buffered_events[bridge_index:]
                         valid_events = []
-                        previous_u = (
-                            snapshot_last_update_id
-                        )
-
+                        previous_u = snapshot_last_update_id
                         sequence_error = None
 
-                        for event in buffered_events:
-
+                        for event in replay_events:
                             try:
-                                event_first_id = int(
-                                    event["U"]
-                                )
-                                event_final_id = int(
-                                    event["u"]
-                                )
-
-                                event_previous_id = event.get(
-                                    "pu"
-                                )
+                                event_first_id = int(event["U"])
+                                event_final_id = int(event["u"])
+                                event_previous_id = event.get("pu")
 
                                 if event_previous_id is not None:
                                     event_previous_id = int(
                                         event_previous_id
                                     )
 
-                            except (
-                                KeyError,
-                                TypeError,
-                                ValueError,
-                            ):
-                                sequence_error = (
-                                    "INVALID_EVENT_IDS"
-                                )
+                            except (KeyError, TypeError, ValueError):
+                                sequence_error = "INVALID_EVENT_IDS"
                                 break
 
-                            # Ignore duplicate or stale events.
                             if event_final_id <= previous_u:
                                 continue
 
-                            # First event must cover snapshot + 1.
                             if previous_u == snapshot_last_update_id:
-
                                 if not (
                                     event_first_id
                                     <= snapshot_last_update_id + 1
@@ -3980,47 +3862,31 @@ def initialize_orderbook(symbol):
                                         "FIRST_EVENT_NOT_BRIDGED"
                                     )
                                     break
-
-                            else:
-                                # Subsequent Futures depth events
-                                # must continue from the previous u.
-                                if (
-                                    event_previous_id is None
-                                    or event_previous_id != previous_u
-                                ):
-                                    sequence_error = (
-                                        "SEQUENCE_GAP"
-                                    )
-                                    break
+                            elif (
+                                event_previous_id is None
+                                or event_previous_id != previous_u
+                            ):
+                                sequence_error = "SEQUENCE_GAP"
+                                break
 
                             valid_events.append(event)
                             previous_u = event_final_id
 
                         if sequence_error is not None:
-
                             retry_reason = sequence_error
-
                             print(
-                                f"[ORDERBOOK INIT] "
-                                f"SEQUENCE VALIDATION FAILED "
-                                f"{symbol} "
-                                f"attempt={attempt} "
+                                f"[ORDERBOOK INIT] SEQUENCE VALIDATION "
+                                f"FAILED {symbol} attempt={attempt} "
                                 f"reason={sequence_error} "
-                                f"snapshot_id="
-                                f"{snapshot_last_update_id} "
-                                f"validated_events="
-                                f"{len(valid_events)} "
-                                f"buffer_count="
-                                f"{len(state['buffer'])}"
+                                f"snapshot_id={snapshot_last_update_id} "
+                                f"validated_events={len(valid_events)} "
+                                f"buffer_count={len(state['buffer'])}"
                             )
-
-                            # No events have been applied yet.
-                            # Keep the buffer and fetch a newer snapshot.
                             break
 
-                        # -------------------------------------
-                        # VALID SEQUENCE: INSTALL SNAPSHOT
-                        # -------------------------------------
+                        # -------------------------------------------------
+                        # INSTALL SNAPSHOT AND REPLAY VALID EVENTS
+                        # -------------------------------------------------
 
                         state["bids"] = snapshot_bids.copy()
                         state["asks"] = snapshot_asks.copy()
@@ -4048,36 +3914,24 @@ def initialize_orderbook(symbol):
                                 "update_id": snapshot_last_update_id,
                             })
 
-                        state["last_update_id"] = (
-                            snapshot_last_update_id
-                        )
+                        state["last_update_id"] = snapshot_last_update_id
 
-                        # Validation is complete before the first
-                        # event is applied.
                         for event in valid_events:
-                            apply_orderbook_event(
-                                symbol,
-                                event,
-                            )
+                            apply_orderbook_event(symbol, event)
 
                         state["last_update_id"] = previous_u
                         state["last_depth_update_id"] = previous_u
                         state["last_depth_event_time"] = now_ms()
 
-                        # Remove only the events covered by this
-                        # successfully replayed sequence.
                         state["buffer"].clear()
-
                         state["initialized"] = True
                         state["resyncing"] = False
 
                         print(
                             f"[ORDERBOOK] SYNCED {symbol} "
                             f"updateId={previous_u} "
-                            f"snapshotId="
-                            f"{snapshot_last_update_id} "
-                            f"replayed_events="
-                            f"{len(valid_events)} "
+                            f"snapshotId={snapshot_last_update_id} "
+                            f"replayed_events={len(valid_events)} "
                             f"bids={len(state['bids'])} "
                             f"asks={len(state['asks'])} "
                             f"fifo_bids="
@@ -4086,19 +3940,15 @@ def initialize_orderbook(symbol):
                             f"{len(state['liquidity_lots']['ask'])}"
                         )
 
-                        return True
+                        bridge_succeeded = True
 
-                # ---------------------------------------------
-                # END BRIDGE CHECK
-                # ---------------------------------------------
+                if bridge_succeeded:
+                    return True
 
                 if retry_reason is not None:
                     break
 
-                if bridge_index is None:
-                    time.sleep(
-                        BRIDGE_CHECK_INTERVAL
-                    )
+                time.sleep(BRIDGE_CHECK_INTERVAL)
 
             # -------------------------------------------------
             # RETRY WITH BACKOFF
@@ -4112,17 +3962,14 @@ def initialize_orderbook(symbol):
 
             print(
                 f"[ORDERBOOK INIT] RETRY {symbol} "
-                f"attempt={attempt} "
-                f"reason={retry_reason} "
+                f"attempt={attempt} reason={retry_reason} "
                 f"delay={delay:.2f}s "
-                f"buffer_count="
-                f"{len(orderbook[symbol]['buffer'])}"
+                f"buffer_count={len(orderbook[symbol]['buffer'])}"
             )
 
             time.sleep(delay)
 
     except Exception as exc:
-
         print(
             f"[ORDERBOOK INIT] UNHANDLED ERROR {symbol}: "
             f"{type(exc).__name__}: {exc}"
@@ -4130,28 +3977,24 @@ def initialize_orderbook(symbol):
 
         with lock:
             state = orderbook[symbol]
-
             state["initialized"] = False
             state["last_update_id"] = None
             state["last_depth_update_id"] = None
-
             state["bids"].clear()
             state["asks"].clear()
-
             state["liquidity_lots"]["bid"].clear()
             state["liquidity_lots"]["ask"].clear()
 
         return False
 
     finally:
-
         with lock:
             state = orderbook[symbol]
-
             state["_init_worker_active"] = False
 
             if not state.get("initialized", False):
                 state["resyncing"] = False
+
 
 
 def request_orderbook_resync(symbol):
