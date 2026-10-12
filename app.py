@@ -3573,7 +3573,6 @@ def initialize_orderbook(symbol):
       An empty buffer is not a reason to repeatedly fetch
       newer snapshots. Keep waiting for the live depth bridge.
     """
-
     RETRY_BASE_SECONDS = 0.5
     RETRY_MAX_SECONDS = 5.0
     BRIDGE_CHECK_INTERVAL = 0.05
@@ -3630,7 +3629,6 @@ def initialize_orderbook(symbol):
             # --------------------------------------------------
             # FETCH SNAPSHOT
             # --------------------------------------------------
-
             try:
                 with snapshot_ws_lock:
                     with lock:
@@ -3643,7 +3641,6 @@ def initialize_orderbook(symbol):
 
             except Exception as exc:
                 snapshot = None
-
                 print(
                     f"[ORDERBOOK INIT] SNAPSHOT ERROR {symbol}: "
                     f"{type(exc).__name__}: {exc}"
@@ -3723,7 +3720,6 @@ def initialize_orderbook(symbol):
             # --------------------------------------------------
             # WAIT FOR A VALID LIVE DEPTH BRIDGE
             # --------------------------------------------------
-
             last_wait_log = time.monotonic()
             retry_reason = None
             bridge_succeeded = False
@@ -3769,8 +3765,8 @@ def initialize_orderbook(symbol):
                         try:
                             first_U = int(first_event["U"])
                             first_u = int(first_event["u"])
-
                             first_pu = first_event.get("pu")
+
                             if first_pu is not None:
                                 first_pu = int(first_pu)
 
@@ -3796,10 +3792,7 @@ def initialize_orderbook(symbol):
                     # --------------------------------------------------
                     # NO BRIDGE AVAILABLE
                     # --------------------------------------------------
-
                     if bridge_mode is None:
-
-                        # No events means there is nothing to validate.
                         # Do NOT fetch another snapshot just because
                         # the live stream has not delivered a bridge yet.
                         if buffer_count == 0:
@@ -3817,6 +3810,7 @@ def initialize_orderbook(symbol):
                                     f"buffer_count=0; "
                                     f"keeping current snapshot"
                                 )
+
                                 last_wait_log = current_time
 
                         else:
@@ -3848,7 +3842,6 @@ def initialize_orderbook(symbol):
                     # --------------------------------------------------
                     # VALIDATE COMPLETE BUFFER BEFORE APPLYING
                     # --------------------------------------------------
-
                     else:
                         valid_events = []
                         previous_u = snapshot_last_update_id
@@ -3862,6 +3855,7 @@ def initialize_orderbook(symbol):
                                 event_u = int(event["u"])
 
                                 event_pu = event.get("pu")
+
                                 if event_pu is not None:
                                     event_pu = int(event_pu)
 
@@ -3920,7 +3914,6 @@ def initialize_orderbook(symbol):
                             # --------------------------------------------------
                             # INSTALL SNAPSHOT + FIFO BASELINE
                             # --------------------------------------------------
-
                             state["bids"] = snapshot_bids.copy()
                             state["asks"] = snapshot_asks.copy()
 
@@ -3988,7 +3981,6 @@ def initialize_orderbook(symbol):
             # --------------------------------------------------
             # RETRY ONLY WHEN SNAPSHOT/SEQUENCE IS UNUSABLE
             # --------------------------------------------------
-
             delay = min(
                 RETRY_BASE_SECONDS
                 * (2 ** min(attempt - 1, 4)),
@@ -4018,13 +4010,12 @@ def initialize_orderbook(symbol):
 
             state["bids"].clear()
             state["asks"].clear()
-
             state["liquidity_lots"]["bid"].clear()
             state["liquidity_lots"]["ask"].clear()
 
         return False
 
-        finally:
+    finally:
         restart_initializer = False
 
         with lock:
