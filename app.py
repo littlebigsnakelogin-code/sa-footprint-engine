@@ -4848,22 +4848,37 @@ def collector_loop():
                 "all books; active initializers preserved until exit"
             )
 
+    
     def run_stream_worker(role):
         config = stream_configs[role]
         reconnect_delay = 5
         max_reconnect_delay = 60
 
+        # A connected socket must also keep receiving messages.
+        STREAM_STALE_SECONDS = 20
+        CONNECT_TIMEOUT_SECONDS = 30
+
         while True:
             connection_started_at = time.time()
+            connection_started_monotonic = time.monotonic()
             close_handled = {"value": False}
+            opened_monotonic = {"value": None}
+            last_message_monotonic = {"value": None}
+            watchdog_stop = threading.Event()
 
             def on_open(ws):
                 nonlocal reconnect_delay
+
+                opened_monotonic["value"] = time.monotonic()
+                last_message_monotonic["value"] = time.monotonic()
 
                 with lock:
                     stream_connected[role] = True
                     collector_state[config["connected_key"]] = True
                     collector_state[config["error_key"]] = None
+                    collector_state[
+                        f"{role}_stream_last_message_at"
+                    ] = None
 
                     if role == "depth":
                         collector_state["error"] = None
@@ -4877,6 +4892,14 @@ def collector_loop():
                 )
 
             def on_message(ws, message):
+                received_at = now_ms()
+                last_message_monotonic["value"] = time.monotonic()
+
+                with lock:
+                    collector_state[
+                        f"{role}_stream_last_message_at"
+                    ] = received_at
+
                 handle_message(ws, message)
 
             def on_error(ws, error):
@@ -4899,6 +4922,7 @@ def collector_loop():
                     return
 
                 close_handled["value"] = True
+                watchdog_stop.set()
 
                 with lock:
                     stream_connected[role] = False
@@ -4926,6 +4950,63 @@ def collector_loop():
                     close_msg,
                 )
 
+            def monitor_stream(ws):
+                while not watchdog_stop.wait(5):
+                    current_monotonic = time.monotonic()
+                    opened_at = opened_monotonic["value"]
+
+                    # A connection that never opens is also unhealthy.
+                    if opened_at is None:
+                        age = (
+                            current_monotonic
+                            - connection_started_monotonic
+                        )
+
+                        if age < CONNECT_TIMEOUT_SECONDS:
+                            continue
+
+                        reason = (
+                            "connection-open timeout: "
+                            f"{age:.1f}s without on_open"
+                        )
+
+                    else:
+                        last_seen = last_message_monotonic["value"]
+
+                        if last_seen is None:
+                            last_seen = opened_at
+
+                        age = current_monotonic - last_seen
+
+                        if age < STREAM_STALE_SECONDS:
+                            continue
+
+                        reason = (
+                            "stale stream: no messages for "
+                            f"{age:.1f}s"
+                        )
+
+                    with lock:
+                        collector_state[config["error_key"]] = reason
+
+                        if role == "depth":
+                            collector_state["error"] = reason
+
+                    print(
+                        f"[COLLECTOR] {role.upper()} WATCHDOG: "
+                        f"{reason}; closing socket to reconnect"
+                    )
+
+                    try:
+                        ws.close()
+                    except Exception as exc:
+                        print(
+                            f"[COLLECTOR] {role.upper()} WATCHDOG "
+                            f"CLOSE ERROR: {type(exc).__name__}: {exc}"
+                        )
+
+                    return
+
             try:
                 print(
                     f"[COLLECTOR] Connecting {role.upper()} "
@@ -4940,9 +5021,19 @@ def collector_loop():
                     on_close=on_close,
                 )
 
+                watchdog_thread = threading.Thread(
+                    target=monitor_stream,
+                    args=(ws,),
+                    name=f"binance-{role}-watchdog",
+                    daemon=True,
+                )
+                watchdog_thread.start()
+
+                # Ping/pong detects dead connections; the watchdog
+                # separately detects a connected but silent data stream.
                 ws.run_forever(
-                    ping_interval=0,
-                    ping_timeout=None,
+                    ping_interval=20,
+                    ping_timeout=10,
                 )
 
             except Exception as exc:
@@ -4958,6 +5049,7 @@ def collector_loop():
                 )
 
             finally:
+                watchdog_stop.set()
                 handle_stream_close(None, "connection ended")
 
             connection_uptime = (
