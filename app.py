@@ -4938,7 +4938,6 @@ def handle_message(
 # ============================================================
 
 def collector_loop():
-
     trade_streams = [
         f"{symbol.lower()}@trade"
         for symbol in SYMBOLS
@@ -4949,159 +4948,233 @@ def collector_loop():
         for symbol in SYMBOLS
     ]
 
-    streams = "/".join(
-        trade_streams + depth_streams
-    )
+    stream_configs = {
+        "trade": {
+            "url": (
+                "wss://fstream.binance.com/market/stream"
+                f"?streams={'/'.join(trade_streams)}"
+            ),
+            "connected_key": "trade_stream_connected",
+            "error_key": "trade_stream_error",
+        },
+        "depth": {
+            "url": (
+                "wss://fstream.binance.com/public/stream"
+                f"?streams={'/'.join(depth_streams)}"
+            ),
+            "connected_key": "depth_stream_connected",
+            "error_key": "depth_stream_error",
+        },
+    }
 
-    url = (
-        "wss://fstream.binance.com/stream"
-        f"?streams={streams}"
-    )
-
-    reconnect_delay = 5
-    max_reconnect_delay = 60
+    stream_connected = {
+        "trade": False,
+        "depth": False,
+    }
 
     with lock:
-
         collector_state["status"] = "connecting"
+        collector_state["connected"] = False
         collector_state["started_at"] = now_ms()
+        collector_state["trade_stream_connected"] = False
+        collector_state["depth_stream_connected"] = False
+        collector_state["trade_stream_error"] = None
+        collector_state["depth_stream_error"] = None
 
-    while True:
+    def update_connection_status():
+        depth_connected = stream_connected["depth"]
+        trade_connected = stream_connected["trade"]
 
-        connection_started_at = time.time()
+        collector_state["connected"] = depth_connected
 
-        try:
+        if depth_connected and trade_connected:
+            collector_state["status"] = "connected"
+        elif depth_connected or trade_connected:
+            collector_state["status"] = "partial"
+        else:
+            collector_state["status"] = "connecting"
 
-            print(
-                "[COLLECTOR] Connecting to Binance Futures..."
-            )
+    def invalidate_orderbooks_on_depth_disconnect():
+        # Sirf depth connection disconnect hone par book invalidate karo.
+        # Trade connection disconnect hone par orderbook untouched rahega.
+        for symbol in SYMBOLS:
+            state = orderbook[symbol]
+
+            state["initialized"] = False
+            state["resyncing"] = False
+            state["last_update_id"] = None
+            state["last_depth_update_id"] = None
+
+            state["bids"].clear()
+            state["asks"].clear()
+
+            state["liquidity_lots"]["bid"].clear()
+            state["liquidity_lots"]["ask"].clear()
+            state["buffer"].clear()
+
+    def run_stream_worker(role):
+        config = stream_configs[role]
+        reconnect_delay = 5
+        max_reconnect_delay = 60
+
+        while True:
+            connection_started_at = time.time()
+            close_handled = {"value": False}
 
             def on_open(ws):
-
                 nonlocal reconnect_delay
 
                 with lock:
+                    stream_connected[role] = True
+                    collector_state[
+                        config["connected_key"]
+                    ] = True
+                    collector_state[
+                        config["error_key"]
+                    ] = None
 
-                    collector_state["connected"] = True
-                    collector_state["status"] = "connected"
-                    collector_state["error"] = None
+                    if role == "depth":
+                        collector_state["error"] = None
+
+                    update_connection_status()
 
                 reconnect_delay = 5
 
                 print(
-                    "[COLLECTOR] CONNECTED"
+                    f"[COLLECTOR] {role.upper()} STREAM CONNECTED"
                 )
 
             def on_message(ws, message):
-
-                handle_message(
-                    ws,
-                    message
-                )
+                handle_message(ws, message)
 
             def on_error(ws, error):
-
                 with lock:
+                    collector_state[
+                        config["error_key"]
+                    ] = str(error)
 
-                    collector_state["error"] = str(error)
-                    collector_state["status"] = "error"
+                    if role == "depth":
+                        collector_state["error"] = str(error)
 
                 print(
-                    "[COLLECTOR] ERROR:",
-                    error
+                    f"[COLLECTOR] {role.upper()} STREAM ERROR: "
+                    f"{error}"
                 )
 
-            def on_close(
-                ws,
+            def handle_stream_close(
                 close_status_code,
-                close_msg
+                close_msg,
             ):
+                if close_handled["value"]:
+                    return
+
+                close_handled["value"] = True
 
                 with lock:
+                    stream_connected[role] = False
+                    collector_state[
+                        config["connected_key"]
+                    ] = False
 
-                    collector_state["connected"] = False
-                    collector_state["status"] = "closed"
+                    if role == "depth":
+                        collector_state["error"] = (
+                            str(close_msg)
+                            if close_msg
+                            else collector_state.get("error")
+                        )
+                        invalidate_orderbooks_on_depth_disconnect()
 
-                    for symbol in SYMBOLS:
-
-                        state = orderbook[symbol]
-
-                        # Current orderbook ko invalid mark karo.
-                        # Disconnect ke baad purana book evidence
-                        # ke liye use nahi hona chahiye.
-                        state["initialized"] = False
-                        state["resyncing"] = False
-
-                        state["last_update_id"] = None
-                        state["last_depth_update_id"] = None
-
-                        state["bids"].clear()
-                        state["asks"].clear()
-
-                        # Purani FIFO liquidity bhi invalid hai.
-                        state["liquidity_lots"]["bid"].clear()
-                        state["liquidity_lots"]["ask"].clear()
-
-                        # Purane connection ke buffered events
-                        # naye connection ke saath mix nahi hone chahiye.
-                        state["buffer"].clear()
+                    update_connection_status()
 
                 print(
-                    "[COLLECTOR] CLOSED:",
-                    close_status_code,
-                    close_msg
+                    f"[COLLECTOR] {role.upper()} STREAM CLOSED: "
+                    f"{close_status_code} {close_msg}"
                 )
 
-            ws = websocket.WebSocketApp(
-                url,
-                on_open=on_open,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close,
+            def on_close(ws, close_status_code, close_msg):
+                handle_stream_close(
+                    close_status_code,
+                    close_msg,
+                )
+
+            try:
+                print(
+                    f"[COLLECTOR] Connecting {role.upper()} "
+                    f"stream to Binance Futures..."
+                )
+
+                ws = websocket.WebSocketApp(
+                    config["url"],
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+
+                ws.run_forever(
+                    ping_interval=0,
+                    ping_timeout=None,
+                )
+
+            except Exception as exc:
+                with lock:
+                    collector_state[
+                        config["error_key"]
+                    ] = str(exc)
+
+                    if role == "depth":
+                        collector_state["error"] = str(exc)
+
+                print(
+                    f"[COLLECTOR] {role.upper()} STREAM EXCEPTION: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+            finally:
+                handle_stream_close(None, "connection ended")
+
+            connection_uptime = (
+                time.time() - connection_started_at
             )
 
-            # Binance server-side ping/pong handle karega.
-            # Client-side ping ko disable rakha hai taaki
-            # websocket-client ka artificial ping timeout
-            # reconnect trigger na kare.
-            ws.run_forever(
-                ping_interval=0,
-                ping_timeout=None,
-            )
-
-        except Exception as exc:
-
-            with lock:
-
-                collector_state["connected"] = False
-                collector_state["status"] = "error"
-                collector_state["error"] = str(exc)
+            if connection_uptime >= 60:
+                reconnect_delay = 5
 
             print(
-                "[COLLECTOR] EXCEPTION:",
-                exc
+                f"[COLLECTOR] {role.upper()} reconnecting in "
+                f"{reconnect_delay} seconds..."
             )
 
-        connection_uptime = (
-            time.time() - connection_started_at
-        )
+            time.sleep(reconnect_delay)
 
-        # Agar connection reasonably long chala,
-        # reconnect delay ko reset rakho.
-        if connection_uptime >= 60:
-            reconnect_delay = 5
+            reconnect_delay = min(
+                reconnect_delay * 2,
+                max_reconnect_delay,
+            )
 
-        print(
-            f"[COLLECTOR] Reconnecting in "
-            f"{reconnect_delay} seconds..."
-        )
+    workers = [
+        threading.Thread(
+            target=run_stream_worker,
+            args=("trade",),
+            name="binance-trade-stream",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=run_stream_worker,
+            args=("depth",),
+            name="binance-depth-stream",
+            daemon=True,
+        ),
+    ]
 
-        time.sleep(reconnect_delay)
+    for worker in workers:
+        worker.start()
 
-        reconnect_delay = min(
-            reconnect_delay * 2,
-            max_reconnect_delay
-        )        
+    # Main collector thread alive rahe; dono streams independently
+    # reconnect karte rahenge.
+    for worker in workers:
+        worker.join()
+
 
 # ============================================================
 # COLLECTOR START
