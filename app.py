@@ -4024,13 +4024,36 @@ def initialize_orderbook(symbol):
 
         return False
 
-    finally:
+        finally:
+        restart_initializer = False
+
         with lock:
             state = orderbook[symbol]
             state["_init_worker_active"] = False
 
-            if not state.get("initialized", False):
+            if state.get("initialized", False):
                 state["resyncing"] = False
+
+            elif (
+                collector_state.get("connected", False)
+                and state.get("buffer")
+            ):
+                # Reconnect ke dauran events buffer hue hon,
+                # toh unhe process karne ke liye naya worker chahiye.
+                state["resyncing"] = True
+                restart_initializer = True
+
+            else:
+                state["resyncing"] = False
+
+        if restart_initializer:
+            thread = threading.Thread(
+                target=initialize_orderbook,
+                args=(symbol,),
+                name=f"orderbook-init-{symbol}-recovery",
+                daemon=True,
+            )
+            thread.start()
 
 
 def handle_depth_update(symbol, event):
