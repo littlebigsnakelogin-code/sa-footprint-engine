@@ -4712,7 +4712,6 @@ def collector_loop():
 
                 state["bids"].clear()
                 state["asks"].clear()
-
                 state["liquidity_lots"]["bid"].clear()
                 state["liquidity_lots"]["ask"].clear()
 
@@ -4747,6 +4746,38 @@ def collector_loop():
                 print(
                     f"[COLLECTOR] {role.upper()} STREAM CONNECTED"
                 )
+
+                # Explicit recovery trigger after depth reconnect.
+                if role == "depth":
+                    for symbol in SYMBOLS:
+                        should_start = False
+
+                        with lock:
+                            state = orderbook[symbol]
+
+                            if (
+                                not state.get("initialized", False)
+                                and not state.get(
+                                    "_init_worker_active", False
+                                )
+                            ):
+                                state["resyncing"] = True
+                                should_start = True
+
+                        if should_start:
+                            print(
+                                f"[ORDERBOOK RECOVERY] RECONNECT "
+                                f"{symbol}"
+                            )
+
+                            threading.Thread(
+                                target=initialize_orderbook,
+                                args=(symbol,),
+                                name=(
+                                    f"orderbook-init-{symbol}-reconnect"
+                                ),
+                                daemon=True,
+                            ).start()
 
             def on_message(ws, message):
                 handle_message(ws, message)
