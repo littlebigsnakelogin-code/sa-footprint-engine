@@ -4845,21 +4845,12 @@ def collector_loop():
         else:
             collector_state["status"] = "connecting"
 
-    
     def invalidate_orderbooks_on_depth_disconnect():
-        """
-        Invalidate local books after a depth disconnect without
-        allowing a reconnect to start a duplicate initializer
-        while the previous initializer is still active.
-        """
         with lock:
             for symbol in SYMBOLS:
                 state = orderbook[symbol]
 
                 state["initialized"] = False
-
-                # Active initializer ko finish hone do.
-                # Uska finally block resyncing ko reset karega.
                 state["resyncing"] = bool(
                     state.get("_init_worker_active", False)
                 )
@@ -4869,8 +4860,10 @@ def collector_loop():
 
                 state["bids"].clear()
                 state["asks"].clear()
+
                 state["liquidity_lots"]["bid"].clear()
                 state["liquidity_lots"]["ask"].clear()
+
                 state["buffer"].clear()
 
             print(
@@ -4878,19 +4871,17 @@ def collector_loop():
                 "all books; active initializers preserved until exit"
             )
 
-    
-    
     def run_stream_worker(role):
         config = stream_configs[role]
+
         reconnect_delay = 5
         max_reconnect_delay = 60
 
         while True:
-            connection_started_at = time.time()
+            connection_started_at = time.monotonic()
             close_handled = {"value": False}
 
             def on_open(ws):
-                nonlocal reconnect_delay
                 with lock:
                     stream_connected[role] = True
                     collector_state[config["connected_key"]] = True
@@ -4900,8 +4891,6 @@ def collector_loop():
                         collector_state["error"] = None
 
                     update_connection_status()
-
-                reconnect_delay = 5
 
                 print(
                     f"[COLLECTOR] {role.upper()} STREAM CONNECTED"
@@ -4972,8 +4961,8 @@ def collector_loop():
                 )
 
                 ws.run_forever(
-                    ping_interval=0,
-                    ping_timeout=None,
+                    ping_interval=20,
+                    ping_timeout=10,
                 )
 
             except Exception as exc:
@@ -4992,15 +4981,16 @@ def collector_loop():
                 handle_stream_close(None, "connection ended")
 
             connection_uptime = (
-                time.time() - connection_started_at
+                time.monotonic() - connection_started_at
             )
 
             if connection_uptime >= 60:
                 reconnect_delay = 5
 
             print(
-                f"[COLLECTOR] {role.upper()} reconnecting in "
-                f"{reconnect_delay} seconds..."
+                f"[COLLECTOR] {role.upper()} connection uptime="
+                f"{connection_uptime:.1f}s; reconnecting in "
+                f"{reconnect_delay}s"
             )
 
             time.sleep(reconnect_delay)
