@@ -3564,19 +3564,14 @@ def apply_orderbook_event(symbol, event):
 def initialize_orderbook(symbol):
     """
     Synchronize Binance USD-M Futures orderbook.
-
-    Valid bridge modes:
-      1. U <= snapshot_last_update_id + 1 <= u
-      2. pu == snapshot_last_update_id
-
-    Important recovery rule:
-      An empty buffer is not a reason to repeatedly fetch
-      newer snapshots. Keep waiting for the live depth bridge.
+    Retry with a fresh snapshot if a valid live bridge
+    cannot be established within the bridge timeout.
     """
     RETRY_BASE_SECONDS = 0.5
     RETRY_MAX_SECONDS = 5.0
     BRIDGE_CHECK_INTERVAL = 0.05
     BRIDGE_WAIT_LOG_SECONDS = 10.0
+    BRIDGE_TIMEOUT_SECONDS = 5.0
     MAX_BUFFER_EVENTS = 2000
 
     if symbol not in orderbook:
@@ -3585,7 +3580,6 @@ def initialize_orderbook(symbol):
 
     with lock:
         state = orderbook[symbol]
-
         if state.get("_init_worker_active", False):
             print(
                 f"[ORDERBOOK INIT] DUPLICATE WORKER BLOCKED "
@@ -3618,7 +3612,6 @@ def initialize_orderbook(symbol):
                 buffer_count = len(state["buffer"])
 
             attempt += 1
-
             print(
                 f"[ORDERBOOK INIT] ATTEMPT {symbol} "
                 f"attempt={attempt} "
@@ -3626,9 +3619,7 @@ def initialize_orderbook(symbol):
                 f"buffer_count={buffer_count}"
             )
 
-            # --------------------------------------------------
-            # FETCH SNAPSHOT
-            # --------------------------------------------------
+            # Fetch a fresh snapshot.
             try:
                 with snapshot_ws_lock:
                     with lock:
@@ -3648,19 +3639,16 @@ def initialize_orderbook(symbol):
 
             if not isinstance(snapshot, dict):
                 retry_reason = "SNAPSHOT_FAILED"
-
                 delay = min(
                     RETRY_BASE_SECONDS
                     * (2 ** min(attempt - 1, 4)),
                     RETRY_MAX_SECONDS,
                 )
-
                 print(
                     f"[ORDERBOOK INIT] RETRY {symbol} "
                     f"reason={retry_reason} "
                     f"delay={delay:.2f}s"
                 )
-
                 time.sleep(delay)
                 continue
 
@@ -3668,13 +3656,11 @@ def initialize_orderbook(symbol):
                 snapshot_last_update_id = int(
                     snapshot["lastUpdateId"]
                 )
-
                 snapshot_bids = {
                     str(price): float(quantity)
                     for price, quantity in snapshot.get("bids", [])
                     if float(quantity) > 0.0
                 }
-
                 snapshot_asks = {
                     str(price): float(quantity)
                     for price, quantity in snapshot.get("asks", [])
@@ -3683,25 +3669,21 @@ def initialize_orderbook(symbol):
 
             except (KeyError, TypeError, ValueError) as exc:
                 retry_reason = "INVALID_SNAPSHOT"
-
                 print(
                     f"[ORDERBOOK INIT] INVALID SNAPSHOT {symbol}: "
                     f"{type(exc).__name__}: {exc}"
                 )
-
                 time.sleep(RETRY_BASE_SECONDS)
                 continue
 
             if not snapshot_bids or not snapshot_asks:
                 retry_reason = "EMPTY_SNAPSHOT"
-
                 print(
                     f"[ORDERBOOK INIT] EMPTY SNAPSHOT {symbol} "
                     f"lastUpdateId={snapshot_last_update_id} "
                     f"bids={len(snapshot_bids)} "
                     f"asks={len(snapshot_asks)}"
                 )
-
                 time.sleep(RETRY_BASE_SECONDS)
                 continue
 
@@ -3717,10 +3699,9 @@ def initialize_orderbook(symbol):
                 f"asks={len(snapshot_asks)}"
             )
 
-            # --------------------------------------------------
-            # WAIT FOR A VALID LIVE DEPTH BRIDGE
-            # --------------------------------------------------
-            last_wait_log = time.monotonic()
+            # Wait for a valid bridge, but do not wait forever.
+            bridge_started_at = time.monotonic()
+            last_wait_log = bridge_started_at
             retry_reason = None
             bridge_succeeded = False
 
@@ -3737,12 +3718,10 @@ def initialize_orderbook(symbol):
                         )
                         return False
 
-                    # Remove events completely covered by snapshot.
+                    # Remove events fully covered by the snapshot.
                     while state["buffer"]:
                         try:
-                            first_u = int(
-                                state["buffer"][0]["u"]
-                            )
+                            first_u = int(state["buffer"][0]["u"])
                         except (KeyError, TypeError, ValueError):
                             state["buffer"].popleft()
                             continue
@@ -3756,9 +3735,10 @@ def initialize_orderbook(symbol):
                     buffer_count = len(buffered_events)
 
                     bridge_mode = None
+                    first_U = None
+                    first_u = None
+                    first_pu = None
 
-                    # The first remaining event must bridge the
-                    # snapshot. Never skip an earlier live event.
                     if buffered_events:
                         first_event = buffered_events[0]
 
@@ -3784,18 +3764,25 @@ def initialize_orderbook(symbol):
                             first_u = None
                             first_pu = None
 
-                    else:
-                        first_U = None
-                        first_u = None
-                        first_pu = None
-
-                    # --------------------------------------------------
-                    # NO BRIDGE AVAILABLE
-                    # --------------------------------------------------
+                    # No valid bridge found yet.
                     if bridge_mode is None:
-                        # Do NOT fetch another snapshot just because
-                        # the live stream has not delivered a bridge yet.
-                        if buffer_count == 0:
+                        elapsed = (
+                            time.monotonic() - bridge_started_at
+                        )
+
+                        if elapsed >= BRIDGE_TIMEOUT_SECONDS:
+                            retry_reason = "BRIDGE_TIMEOUT"
+                            print(
+                                f"[ORDERBOOK INIT] BRIDGE TIMEOUT "
+                                f"{symbol} "
+                                f"snapshot_id="
+                                f"{snapshot_last_update_id} "
+                                f"buffer_count={buffer_count} "
+                                f"wait_seconds={elapsed:.2f}; "
+                                f"retrying with fresh snapshot"
+                            )
+
+                        elif buffer_count == 0:
                             current_time = time.monotonic()
 
                             if (
@@ -3810,13 +3797,9 @@ def initialize_orderbook(symbol):
                                     f"buffer_count=0; "
                                     f"keeping current snapshot"
                                 )
-
                                 last_wait_log = current_time
 
                         else:
-                            # A newer event that neither overlaps
-                            # nor continues the snapshot means this
-                            # snapshot cannot safely bridge the stream.
                             bridge_impossible = (
                                 first_U is not None
                                 and first_U > target_update_id
@@ -3826,7 +3809,6 @@ def initialize_orderbook(symbol):
 
                             if bridge_impossible:
                                 retry_reason = "BRIDGE_IMPOSSIBLE"
-
                                 print(
                                     f"[ORDERBOOK INIT] "
                                     f"BRIDGE_IMPOSSIBLE {symbol} "
@@ -3839,21 +3821,16 @@ def initialize_orderbook(symbol):
                                     f"first_pu={first_pu}"
                                 )
 
-                    # --------------------------------------------------
-                    # VALIDATE COMPLETE BUFFER BEFORE APPLYING
-                    # --------------------------------------------------
+                    # Validate the complete buffered sequence.
                     else:
                         valid_events = []
                         previous_u = snapshot_last_update_id
                         sequence_error = None
 
-                        for index, event in enumerate(
-                            buffered_events
-                        ):
+                        for index, event in enumerate(buffered_events):
                             try:
                                 event_U = int(event["U"])
                                 event_u = int(event["u"])
-
                                 event_pu = event.get("pu")
 
                                 if event_pu is not None:
@@ -3875,7 +3852,6 @@ def initialize_orderbook(symbol):
                                     event_U <= target_update_id
                                     <= event_u
                                 )
-
                                 direct_continuation = (
                                     event_pu
                                     == snapshot_last_update_id
@@ -3898,7 +3874,6 @@ def initialize_orderbook(symbol):
 
                         if sequence_error is not None:
                             retry_reason = sequence_error
-
                             print(
                                 f"[ORDERBOOK INIT] SEQUENCE "
                                 f"VALIDATION FAILED {symbol} "
@@ -3911,9 +3886,7 @@ def initialize_orderbook(symbol):
                             )
 
                         else:
-                            # --------------------------------------------------
-                            # INSTALL SNAPSHOT + FIFO BASELINE
-                            # --------------------------------------------------
+                            # Install snapshot and its FIFO baseline.
                             state["bids"] = snapshot_bids.copy()
                             state["asks"] = snapshot_asks.copy()
 
@@ -3944,7 +3917,7 @@ def initialize_orderbook(symbol):
                                 snapshot_last_update_id
                             )
 
-                            # Apply only events that passed validation.
+                            # Replay only events that passed validation.
                             for event in valid_events:
                                 apply_orderbook_event(symbol, event)
 
@@ -3978,9 +3951,7 @@ def initialize_orderbook(symbol):
 
                 time.sleep(BRIDGE_CHECK_INTERVAL)
 
-            # --------------------------------------------------
-            # RETRY ONLY WHEN SNAPSHOT/SEQUENCE IS UNUSABLE
-            # --------------------------------------------------
+            # Retry after timeout or unusable sequence.
             delay = min(
                 RETRY_BASE_SECONDS
                 * (2 ** min(attempt - 1, 4)),
@@ -4029,8 +4000,6 @@ def initialize_orderbook(symbol):
                 collector_state.get("connected", False)
                 and state.get("buffer")
             ):
-                # Reconnect ke dauran events buffer hue hon,
-                # toh unhe process karne ke liye naya worker chahiye.
                 state["resyncing"] = True
                 restart_initializer = True
 
@@ -4045,36 +4014,6 @@ def initialize_orderbook(symbol):
                 daemon=True,
             )
             thread.start()
-
-
-def request_orderbook_resync(symbol):
-    if symbol not in orderbook:
-        return False
-
-    start_worker = False
-
-    with lock:
-        state = orderbook[symbol]
-
-        state["initialized"] = False
-        state["resyncing"] = True
-        state["resync_count"] = (
-            int(state.get("resync_count", 0)) + 1
-        )
-
-        if not state.get("_init_worker_active", False):
-            start_worker = True
-
-    if start_worker:
-        thread = threading.Thread(
-            target=initialize_orderbook,
-            args=(symbol,),
-            name=f"orderbook-init-{symbol}-resync",
-            daemon=True,
-        )
-        thread.start()
-
-    return True
 
 
 def handle_depth_update(symbol, event):
