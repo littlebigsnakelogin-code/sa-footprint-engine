@@ -4640,6 +4640,7 @@ def handle_message(ws, message):
 # BINANCE CONNECTION
 # ============================================================
 
+
 def collector_loop():
     trade_streams = [
         f"{symbol.lower()}@aggTrade"
@@ -4685,14 +4686,14 @@ def collector_loop():
         collector_state["depth_stream_error"] = None
 
     def update_connection_status():
-        depth_connected = stream_connected["depth"]
         trade_connected = stream_connected["trade"]
+        depth_connected = stream_connected["depth"]
 
         collector_state["connected"] = depth_connected
 
-        if depth_connected and trade_connected:
+        if trade_connected and depth_connected:
             collector_state["status"] = "connected"
-        elif depth_connected or trade_connected:
+        elif trade_connected or depth_connected:
             collector_state["status"] = "partial"
         else:
             collector_state["status"] = "connecting"
@@ -4712,27 +4713,29 @@ def collector_loop():
 
                 state["bids"].clear()
                 state["asks"].clear()
+
                 state["liquidity_lots"]["bid"].clear()
                 state["liquidity_lots"]["ask"].clear()
 
                 state["buffer"].clear()
 
             print(
-                "[ORDERBOOK RECOVERY] Depth disconnect invalidated "
-                "all books; active initializers preserved until exit"
+                "[ORDERBOOK RECOVERY] Depth stream disconnected; "
+                "all books marked unsynchronized and cleared"
             )
 
     def run_stream_worker(role):
         config = stream_configs[role]
-
         reconnect_delay = 5
         max_reconnect_delay = 60
 
         while True:
-            connection_started_at = time.monotonic()
+            connection_started_at = time.time()
             close_handled = {"value": False}
 
             def on_open(ws):
+                nonlocal reconnect_delay
+
                 with lock:
                     stream_connected[role] = True
                     collector_state[config["connected_key"]] = True
@@ -4743,55 +4746,29 @@ def collector_loop():
 
                     update_connection_status()
 
+                reconnect_delay = 5
+
                 print(
                     f"[COLLECTOR] {role.upper()} STREAM CONNECTED"
                 )
-
-                # Explicit recovery trigger after depth reconnect.
-                if role == "depth":
-                    for symbol in SYMBOLS:
-                        should_start = False
-
-                        with lock:
-                            state = orderbook[symbol]
-
-                            if (
-                                not state.get("initialized", False)
-                                and not state.get(
-                                    "_init_worker_active", False
-                                )
-                            ):
-                                state["resyncing"] = True
-                                should_start = True
-
-                        if should_start:
-                            print(
-                                f"[ORDERBOOK RECOVERY] RECONNECT "
-                                f"{symbol}"
-                            )
-
-                            threading.Thread(
-                                target=initialize_orderbook,
-                                args=(symbol,),
-                                name=(
-                                    f"orderbook-init-{symbol}-reconnect"
-                                ),
-                                daemon=True,
-                            ).start()
 
             def on_message(ws, message):
                 handle_message(ws, message)
 
             def on_error(ws, error):
+                error_text = (
+                    f"{type(error).__name__}: {error}"
+                )
+
                 with lock:
-                    collector_state[config["error_key"]] = str(error)
+                    collector_state[config["error_key"]] = error_text
 
                     if role == "depth":
-                        collector_state["error"] = str(error)
+                        collector_state["error"] = error_text
 
                 print(
                     f"[COLLECTOR] {role.upper()} STREAM ERROR: "
-                    f"{error}"
+                    f"{error_text}"
                 )
 
             def handle_stream_close(
@@ -4808,11 +4785,17 @@ def collector_loop():
                     collector_state[config["connected_key"]] = False
 
                     if role == "depth":
-                        collector_state["error"] = (
+                        close_error = (
                             str(close_msg)
                             if close_msg
-                            else collector_state.get("error")
+                            else "Depth stream disconnected"
                         )
+
+                        collector_state["depth_stream_error"] = (
+                            collector_state.get("depth_stream_error")
+                            or close_error
+                        )
+                        collector_state["error"] = close_error
 
                         invalidate_orderbooks_on_depth_disconnect()
 
@@ -4820,7 +4803,7 @@ def collector_loop():
 
                 print(
                     f"[COLLECTOR] {role.upper()} STREAM CLOSED: "
-                    f"{close_status_code} {close_msg}"
+                    f"code={close_status_code}, reason={close_msg}"
                 )
 
             def on_close(ws, close_status_code, close_msg):
@@ -4843,37 +4826,45 @@ def collector_loop():
                     on_close=on_close,
                 )
 
+                # Client-generated ping disabled.
+                # websocket-client will still handle server ping frames.
                 ws.run_forever(
                     ping_interval=0,
                     ping_timeout=None,
                 )
 
             except Exception as exc:
-                with lock:
-                    collector_state[config["error_key"]] = str(exc)
-
-                    if role == "depth":
-                        collector_state["error"] = str(exc)
-
-                print(
-                    f"[COLLECTOR] {role.upper()} STREAM EXCEPTION: "
+                error_text = (
                     f"{type(exc).__name__}: {exc}"
                 )
 
+                with lock:
+                    collector_state[config["error_key"]] = error_text
+
+                    if role == "depth":
+                        collector_state["error"] = error_text
+
+                print(
+                    f"[COLLECTOR] {role.upper()} STREAM EXCEPTION: "
+                    f"{error_text}"
+                )
+
             finally:
-                handle_stream_close(None, "connection ended")
+                handle_stream_close(
+                    None,
+                    "connection ended",
+                )
 
             connection_uptime = (
-                time.monotonic() - connection_started_at
+                time.time() - connection_started_at
             )
 
             if connection_uptime >= 60:
                 reconnect_delay = 5
 
             print(
-                f"[COLLECTOR] {role.upper()} connection uptime="
-                f"{connection_uptime:.1f}s; reconnecting in "
-                f"{reconnect_delay}s"
+                f"[COLLECTOR] {role.upper()} reconnecting in "
+                f"{reconnect_delay} seconds..."
             )
 
             time.sleep(reconnect_delay)
