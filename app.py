@@ -3561,36 +3561,6 @@ def apply_orderbook_event(symbol, event):
     )
 
 
-    finally:
-        restart_initializer = False
-
-        with lock:
-            state = orderbook[symbol]
-            state["_init_worker_active"] = False
-
-            if state.get("initialized", False):
-                state["resyncing"] = False
-
-            elif collector_state.get("connected", False):
-                state["resyncing"] = True
-                restart_initializer = True
-
-            else:
-                state["resyncing"] = False
-
-        if restart_initializer:
-            print(
-                f"[ORDERBOOK RECOVERY] SCHEDULE RETRY "
-                f"{symbol} after initializer exit"
-            )
-
-            threading.Timer(
-                0.5,
-                initialize_orderbook,
-                args=(symbol,),
-            ).start()
-
-
 def initialize_orderbook(symbol):
     """
     Recover and synchronize a Binance USD-M Futures orderbook.
@@ -3660,7 +3630,6 @@ def initialize_orderbook(symbol):
 
             if not isinstance(snapshot, dict):
                 retry_reason = "SNAPSHOT_FAILED"
-
             else:
                 try:
                     snapshot_id = int(snapshot["lastUpdateId"])
@@ -3768,9 +3737,7 @@ def initialize_orderbook(symbol):
                                     continues = event_pu == snapshot_id
 
                                     if not (overlaps or continues):
-                                        sequence_error = (
-                                            "FIRST_EVENT_NOT_BRIDGED"
-                                        )
+                                        sequence_error = "FIRST_EVENT_NOT_BRIDGED"
                                         break
 
                                 elif event_pu != previous_u:
@@ -3818,6 +3785,7 @@ def initialize_orderbook(symbol):
                                 state["last_update_id"] = previous_u
                                 state["last_depth_update_id"] = previous_u
                                 state["last_depth_event_time"] = now_ms()
+
                                 state["buffer"].clear()
                                 state["initialized"] = True
                                 state["resyncing"] = False
@@ -3907,7 +3875,6 @@ def initialize_orderbook(symbol):
             ):
                 state["resyncing"] = True
                 restart_initializer = True
-
             else:
                 state["resyncing"] = False
 
@@ -3946,10 +3913,8 @@ def handle_depth_update(symbol, event):
             f"[ORDERBOOK] INVALID DEPTH EVENT "
             f"{symbol}: {type(exc).__name__}: {exc}"
         )
-
         with lock:
             orderbook[symbol]["sequence_errors"] += 1
-
         return
 
     start_initializer = False
@@ -3959,7 +3924,9 @@ def handle_depth_update(symbol, event):
         state = orderbook[symbol]
         state["last_depth_event_time"] = now_ms()
 
+        # --------------------------------------------------
         # Buffer events until a snapshot has been synchronized.
+        # --------------------------------------------------
         if not state["initialized"]:
             state["buffer"].append(event)
 
@@ -3974,7 +3941,9 @@ def handle_depth_update(symbol, event):
         else:
             previous_u = state.get("last_update_id")
 
+            # --------------------------------------------------
             # A synchronized book must have a valid update ID.
+            # --------------------------------------------------
             if previous_u is None:
                 state["initialized"] = False
                 state["resyncing"] = True
@@ -3991,7 +3960,9 @@ def handle_depth_update(symbol, event):
             elif event_final_id <= int(previous_u):
                 return
 
+            # --------------------------------------------------
             # Futures continuity: pu must match the prior final ID.
+            # --------------------------------------------------
             elif (
                 event_previous_id is not None
                 and event_previous_id != int(previous_u)
@@ -4018,11 +3989,12 @@ def handle_depth_update(symbol, event):
                     f"event_u={event_final_id}"
                 )
 
+            # --------------------------------------------------
             # Apply only a continuous event.
+            # --------------------------------------------------
             else:
                 try:
                     apply_orderbook_event(symbol, event)
-
                 except Exception as exc:
                     state["initialized"] = False
                     state["resyncing"] = True
@@ -4740,7 +4712,6 @@ def collector_loop():
 
                 state["bids"].clear()
                 state["asks"].clear()
-
                 state["liquidity_lots"]["bid"].clear()
                 state["liquidity_lots"]["ask"].clear()
 
@@ -4775,6 +4746,38 @@ def collector_loop():
                 print(
                     f"[COLLECTOR] {role.upper()} STREAM CONNECTED"
                 )
+
+                # Explicit recovery trigger after depth reconnect.
+                if role == "depth":
+                    for symbol in SYMBOLS:
+                        should_start = False
+
+                        with lock:
+                            state = orderbook[symbol]
+
+                            if (
+                                not state.get("initialized", False)
+                                and not state.get(
+                                    "_init_worker_active", False
+                                )
+                            ):
+                                state["resyncing"] = True
+                                should_start = True
+
+                        if should_start:
+                            print(
+                                f"[ORDERBOOK RECOVERY] RECONNECT "
+                                f"{symbol}"
+                            )
+
+                            threading.Thread(
+                                target=initialize_orderbook,
+                                args=(symbol,),
+                                name=(
+                                    f"orderbook-init-{symbol}-reconnect"
+                                ),
+                                daemon=True,
+                            ).start()
 
             def on_message(ws, message):
                 handle_message(ws, message)
@@ -4841,8 +4844,8 @@ def collector_loop():
                 )
 
                 ws.run_forever(
-                    ping_interval=20,
-                    ping_timeout=10,
+                    ping_interval=0,
+                    ping_timeout=None,
                 )
 
             except Exception as exc:
