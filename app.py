@@ -4018,102 +4018,144 @@ def initialize_orderbook(symbol):
 
 def handle_depth_update(symbol, event):
     """
-    Binance Futures depth event ko safely process karta hai.
-    AVAX synchronization diagnostics included.
+    Safely buffer, validate and apply Binance Futures depth events.
+    On a sequence gap, start orderbook initialization directly.
+    Does not depend on an undefined resync helper.
     """
-    event_first_id = int(event["U"])
-    event_final_id = int(event["u"])
+
+    if symbol not in orderbook or not isinstance(event, dict):
+        return
+
+    try:
+        event_first_id = int(event["U"])
+        event_final_id = int(event["u"])
+        event_previous_id = event.get("pu")
+
+        if event_previous_id is not None:
+            event_previous_id = int(event_previous_id)
+
+        if event_first_id <= 0 or event_final_id < event_first_id:
+            raise ValueError("Invalid depth update IDs")
+
+    except (KeyError, TypeError, ValueError) as exc:
+        print(
+            f"[ORDERBOOK] INVALID DEPTH EVENT "
+            f"{symbol}: {type(exc).__name__}: {exc}"
+        )
+        with lock:
+            orderbook[symbol]["sequence_errors"] += 1
+        return
+
+    start_initializer = False
+    reason = None
 
     with lock:
         state = orderbook[symbol]
         state["last_depth_event_time"] = now_ms()
 
-        # Not initialized yet
+        # --------------------------------------------------
+        # Buffer events until a snapshot has been synchronized.
+        # --------------------------------------------------
         if not state["initialized"]:
             state["buffer"].append(event)
 
             while len(state["buffer"]) > 2000:
                 state["buffer"].popleft()
 
-            # AVAX diagnostic: maximum once every 5 seconds
-            if symbol == "AVAXUSDT":
-                diagnostic_now = time.monotonic()
-                last_log = state.get("_depth_diag_last_log", 0.0)
+            if not state.get("_init_worker_active", False):
+                state["resyncing"] = True
+                start_initializer = True
+                reason = "UNINITIALIZED"
 
-                if (
-                    last_log == 0.0
-                    or diagnostic_now - last_log >= 5.0
-                ):
-                    state["_depth_diag_last_log"] = diagnostic_now
+        else:
+            previous_u = state.get("last_update_id")
 
-                    first_event = state["buffer"][0]
-                    last_event = state["buffer"][-1]
+            # --------------------------------------------------
+            # A synchronized book must have a valid update ID.
+            # --------------------------------------------------
+            if previous_u is None:
+                state["initialized"] = False
+                state["resyncing"] = True
+                state["sequence_errors"] += 1
+                state["buffer"].clear()
+                state["buffer"].append(event)
 
-                    print(
-                        f"[AVAX DEPTH DIAG] "
-                        f"U={event_first_id} "
-                        f"u={event_final_id} "
-                        f"pu={event.get('pu')} "
-                        f"buffer_count={len(state['buffer'])} "
-                        f"buffer_first_u={first_event.get('u')} "
-                        f"buffer_last_u={last_event.get('u')} "
-                        f"last_update_id={state.get('last_update_id')} "
-                        f"collector_connected="
-                        f"{collector_state.get('connected')}"
-                    )
+                start_initializer = not state.get(
+                    "_init_worker_active", False
+                )
+                reason = "MISSING_LAST_UPDATE_ID"
 
-            if not state["resyncing"]:
+            # Ignore already-applied or older updates.
+            elif event_final_id <= int(previous_u):
+                return
+
+            # --------------------------------------------------
+            # Futures continuity: pu must match the prior final ID.
+            # --------------------------------------------------
+            elif (
+                event_previous_id is not None
+                and event_previous_id != int(previous_u)
+            ):
+                state["sequence_errors"] += 1
+                state["initialized"] = False
                 state["resyncing"] = True
 
-                thread = threading.Thread(
-                    target=initialize_orderbook,
-                    args=(symbol,),
-                    name=f"orderbook-init-{symbol}",
-                    daemon=True,
+                # Keep the triggering event as the start of the
+                # new synchronization buffer.
+                state["buffer"].clear()
+                state["buffer"].append(event)
+
+                start_initializer = not state.get(
+                    "_init_worker_active", False
                 )
-                thread.start()
+                reason = "SEQUENCE_GAP"
 
-            return
+                print(
+                    f"[ORDERBOOK] SEQUENCE GAP {symbol}: "
+                    f"expected_pu={previous_u} "
+                    f"received_pu={event_previous_id} "
+                    f"event_U={event_first_id} "
+                    f"event_u={event_final_id}"
+                )
 
-        # Already initialized
-        previous_u = state["last_update_id"]
+            # --------------------------------------------------
+            # Apply only a continuous event.
+            # --------------------------------------------------
+            else:
+                try:
+                    apply_orderbook_event(symbol, event)
+                except Exception as exc:
+                    state["initialized"] = False
+                    state["resyncing"] = True
+                    state["sequence_errors"] += 1
+                    state["buffer"].clear()
+                    state["buffer"].append(event)
 
-        if previous_u is None:
-            state["buffer"].append(event)
-            state["initialized"] = False
-            state["sequence_errors"] += 1
-            request_orderbook_resync(symbol)
-            return
+                    start_initializer = not state.get(
+                        "_init_worker_active", False
+                    )
+                    reason = "APPLY_ERROR"
 
-        # Ignore old events
-        if event_final_id <= previous_u:
-            return
+                    print(
+                        f"[ORDERBOOK] APPLY ERROR {symbol}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
-        # Futures sequence continuity
-        event_previous_id = event.get("pu")
+    # Start recovery outside the shared lock.
+    if start_initializer:
+        print(
+            f"[ORDERBOOK RECOVERY] START {symbol} "
+            f"reason={reason}"
+        )
 
-        if (
-            event_previous_id is not None
-            and int(event_previous_id) != previous_u
-        ):
-            state["sequence_errors"] += 1
+        thread = threading.Thread(
+            target=initialize_orderbook,
+            args=(symbol,),
+            name=f"orderbook-init-{symbol}-recovery",
+            daemon=True,
+        )
+        thread.start()
 
-            print(
-                f"[ORDERBOOK] SEQUENCE GAP {symbol}: "
-                f"expected pu={previous_u}, "
-                f"received pu={event_previous_id}"
-            )
-
-            state["buffer"].clear()
-            state["buffer"].append(event)
-            state["initialized"] = False
-
-            request_orderbook_resync(symbol)
-            return
-
-        # Apply valid event
-        apply_orderbook_event(symbol, event)
-    
 
 # ============================================================
 # VALUE AREA
