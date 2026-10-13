@@ -4972,8 +4972,8 @@ def collector_loop():
                 )
 
                 ws.run_forever(
-                    ping_interval=20,
-                    ping_timeout=10,
+                    ping_interval=0,
+                    ping_timeout=NONE,
                 )
 
             except Exception as exc:
