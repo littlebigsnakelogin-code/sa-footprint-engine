@@ -4047,6 +4047,36 @@ def initialize_orderbook(symbol):
             thread.start()
 
 
+def request_orderbook_resync(symbol):
+    if symbol not in orderbook:
+        return False
+
+    start_worker = False
+
+    with lock:
+        state = orderbook[symbol]
+
+        state["initialized"] = False
+        state["resyncing"] = True
+        state["resync_count"] = (
+            int(state.get("resync_count", 0)) + 1
+        )
+
+        if not state.get("_init_worker_active", False):
+            start_worker = True
+
+    if start_worker:
+        thread = threading.Thread(
+            target=initialize_orderbook,
+            args=(symbol,),
+            name=f"orderbook-init-{symbol}-resync",
+            daemon=True,
+        )
+        thread.start()
+
+    return True
+
+
 def handle_depth_update(symbol, event):
     """
     Binance Futures depth event ko safely process karta hai.
@@ -4942,8 +4972,8 @@ def collector_loop():
                 )
 
                 ws.run_forever(
-                    ping_interval=0,
-                    ping_timeout=None,
+                    ping_interval=20,
+                    ping_timeout=10,
                 )
 
             except Exception as exc:
