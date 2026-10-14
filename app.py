@@ -4913,7 +4913,7 @@ def collector_loop():
             f"init_active={state.get('_init_worker_active', False)}"
         )
 
-        def run_stream_worker(role, url, symbol=None):
+            def run_stream_worker(role, url, symbol=None):
         is_depth = symbol is not None
         error_key = (
             "depth_stream_error"
@@ -4930,6 +4930,7 @@ def collector_loop():
             close_handled = {"value": False}
             opened = {"value": False}
             overflowed = {"value": False}
+            accepting_messages = {"value": True}
             close_details = {
                 "code": None,
                 "reason": None,
@@ -4947,6 +4948,8 @@ def collector_loop():
                         if message is None:
                             return
 
+                        started = time.monotonic()
+
                         try:
                             handle_message(None, message)
                         except Exception as exc:
@@ -4956,7 +4959,9 @@ def collector_loop():
 
                             with lock:
                                 collector_state["error"] = error_text
-                                collector_state["invalid_message_count"] += 1
+                                collector_state[
+                                    "invalid_message_count"
+                                ] += 1
 
                             print(
                                 f"[COLLECTOR] {role.upper()} "
@@ -4964,6 +4969,17 @@ def collector_loop():
                                 f"{'symbol=' + symbol + ' ' if is_depth else ''}"
                                 f"{error_text}"
                             )
+
+                        elapsed = time.monotonic() - started
+
+                        if elapsed >= 0.1:
+                            print(
+                                f"[COLLECTOR] {role.upper()} "
+                                f"PROCESSING SLOW "
+                                f"{'symbol=' + symbol + ' ' if is_depth else ''}"
+                                f"duration={elapsed:.3f}s"
+                            )
+
                     finally:
                         processing_queue.task_done()
 
@@ -4997,7 +5013,9 @@ def collector_loop():
                         collector_state["error"] = None
                     else:
                         connection_state["trade_connected"] = True
-                        collector_state["trade_stream_error"] = None
+                        collector_state[
+                            "trade_stream_error"
+                        ] = None
 
                     update_connection_status()
 
@@ -5012,13 +5030,14 @@ def collector_loop():
                     )
 
             def on_message(ws, message):
-                if overflowed["value"]:
+                if not accepting_messages["value"]:
                     return
 
                 try:
                     processing_queue.put_nowait(message)
                 except queue.Full:
                     overflowed["value"] = True
+                    accepting_messages["value"] = False
 
                     error_text = (
                         f"Processing queue overflow "
@@ -5039,7 +5058,7 @@ def collector_loop():
                         f"QUEUE OVERFLOW "
                         f"{'symbol=' + symbol + ' ' if is_depth else ''}"
                         f"capacity={max_queue_size}; "
-                        f"closing connection for recovery"
+                        f"closing connection"
                     )
 
                     try:
@@ -5047,7 +5066,7 @@ def collector_loop():
                     except Exception as exc:
                         print(
                             f"[COLLECTOR] {role.upper()} "
-                            f"CLOSE AFTER OVERFLOW ERROR: {exc}"
+                            f"CLOSE ERROR: {exc}"
                         )
 
             def on_error(ws, error):
@@ -5074,6 +5093,8 @@ def collector_loop():
                 close_details["code"] = close_status_code
                 close_details["reason"] = close_msg
 
+                accepting_messages["value"] = False
+
             def handle_stream_close(
                 close_status_code,
                 close_msg,
@@ -5092,24 +5113,20 @@ def collector_loop():
                         close_error = (
                             str(close_msg)
                             if close_msg
-                            else "Depth stream disconnected"
+                            else (
+                                "Processing queue overflow"
+                                if overflowed["value"]
+                                else "Depth stream disconnected"
+                            )
                         )
 
                         collector_state[
                             "depth_symbol_errors"
-                        ][symbol] = (
-                            collector_state[
-                                "depth_symbol_errors"
-                            ].get(symbol)
-                            or close_error
-                        )
+                        ][symbol] = close_error
 
-                        collector_state["depth_stream_error"] = (
-                            collector_state.get(
-                                "depth_stream_error"
-                            )
-                            or close_error
-                        )
+                        collector_state[
+                            "depth_stream_error"
+                        ] = close_error
                         collector_state["error"] = close_error
 
                         if opened["value"]:
@@ -5175,8 +5192,11 @@ def collector_loop():
                 )
 
             finally:
-                # Drain messages already received before invalidating
-                # the book. This preserves FIFO processing order.
+                # Stop accepting data from this socket.
+                accepting_messages["value"] = False
+
+                # FIFO sentinel: previously received messages finish
+                # processing before the processor thread exits.
                 processing_queue.put(None)
                 processing_thread.join()
 
@@ -5207,8 +5227,7 @@ def collector_loop():
             reconnect_delay = min(
                 reconnect_delay * 2,
                 max_reconnect_delay,
-            )
-            
+            )    
     workers = [
         threading.Thread(
             target=run_stream_worker,
