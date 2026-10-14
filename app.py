@@ -2078,6 +2078,36 @@ def apply_orderbook_event(symbol, event):
                 "windows": {},
             }
 
+            # Build each time window in one pass over trade_history.
+            # Keep the original per-window aggregation and validation unchanged.
+            window_sizes = (1000, 3000, 10000)
+            window_trades = {
+                window_ms: []
+                for window_ms in window_sizes
+            }
+
+            for trade in trades:
+                try:
+                    trade_time = int(
+                        trade.get(
+                            "time",
+                            trade.get(
+                                "event_time",
+                                0
+                            )
+                        )
+                    )
+                except Exception:
+                    continue
+
+                if trade_time > event_time:
+                    continue
+
+                age_ms = event_time - trade_time
+                for window_ms in window_sizes:
+                    if age_ms <= window_ms:
+                        window_trades[window_ms].append(trade)
+
             for window_ms in (
                 1000,
                 3000,
@@ -2096,7 +2126,7 @@ def apply_orderbook_event(symbol, event):
                 trade_prices = []
                 trade_count = 0
 
-                for trade in trades:
+                for trade in window_trades[window_ms]:
 
                     try:
 
