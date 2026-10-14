@@ -5062,8 +5062,8 @@ def collector_loop():
 
                 # Keep the currently deployed heartbeat behavior.
                 ws.run_forever(
-                    ping_interval=0,
-                    ping_timeout=None,
+                    ping_interval=30,
+                    ping_timeout=25,
                 )
 
             except Exception as exc:
