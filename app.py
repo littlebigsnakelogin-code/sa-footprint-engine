@@ -4913,7 +4913,7 @@ def collector_loop():
             f"init_active={state.get('_init_worker_active', False)}"
         )
 
-    def run_stream_worker(role, url, symbol=None):
+        def run_stream_worker(role, url, symbol=None):
         is_depth = symbol is not None
         error_key = (
             "depth_stream_error"
@@ -4923,11 +4923,60 @@ def collector_loop():
 
         reconnect_delay = 5
         max_reconnect_delay = 60
+        max_queue_size = 5000
 
         while True:
             connection_started_at = time.time()
             close_handled = {"value": False}
             opened = {"value": False}
+            overflowed = {"value": False}
+            close_details = {
+                "code": None,
+                "reason": None,
+            }
+
+            processing_queue = queue.Queue(
+                maxsize=max_queue_size
+            )
+
+            def process_queued_messages():
+                while True:
+                    message = processing_queue.get()
+
+                    try:
+                        if message is None:
+                            return
+
+                        try:
+                            handle_message(None, message)
+                        except Exception as exc:
+                            error_text = (
+                                f"{type(exc).__name__}: {exc}"
+                            )
+
+                            with lock:
+                                collector_state["error"] = error_text
+                                collector_state["invalid_message_count"] += 1
+
+                            print(
+                                f"[COLLECTOR] {role.upper()} "
+                                f"PROCESSING ERROR "
+                                f"{'symbol=' + symbol + ' ' if is_depth else ''}"
+                                f"{error_text}"
+                            )
+                    finally:
+                        processing_queue.task_done()
+
+            processing_thread = threading.Thread(
+                target=process_queued_messages,
+                name=(
+                    f"binance-message-processor-{symbol}"
+                    if is_depth
+                    else "binance-trade-message-processor"
+                ),
+                daemon=True,
+            )
+            processing_thread.start()
 
             def on_open(ws):
                 opened["value"] = True
@@ -4942,7 +4991,9 @@ def collector_loop():
                             "depth_symbol_errors"
                         ][symbol] = None
 
-                        collector_state["depth_stream_error"] = None
+                        collector_state[
+                            "depth_stream_error"
+                        ] = None
                         collector_state["error"] = None
                     else:
                         connection_state["trade_connected"] = True
@@ -4961,7 +5012,43 @@ def collector_loop():
                     )
 
             def on_message(ws, message):
-                handle_message(ws, message)
+                if overflowed["value"]:
+                    return
+
+                try:
+                    processing_queue.put_nowait(message)
+                except queue.Full:
+                    overflowed["value"] = True
+
+                    error_text = (
+                        f"Processing queue overflow "
+                        f"capacity={max_queue_size}"
+                    )
+
+                    with lock:
+                        collector_state[error_key] = error_text
+
+                        if is_depth:
+                            collector_state["error"] = error_text
+                            collector_state[
+                                "depth_symbol_errors"
+                            ][symbol] = error_text
+
+                    print(
+                        f"[COLLECTOR] {role.upper()} "
+                        f"QUEUE OVERFLOW "
+                        f"{'symbol=' + symbol + ' ' if is_depth else ''}"
+                        f"capacity={max_queue_size}; "
+                        f"closing connection for recovery"
+                    )
+
+                    try:
+                        ws.close()
+                    except Exception as exc:
+                        print(
+                            f"[COLLECTOR] {role.upper()} "
+                            f"CLOSE AFTER OVERFLOW ERROR: {exc}"
+                        )
 
             def on_error(ws, error):
                 error_text = (
@@ -4982,6 +5069,10 @@ def collector_loop():
                     f"{'symbol=' + symbol + ' ' if is_depth else ''}"
                     f"{error_text}"
                 )
+
+            def on_close(ws, close_status_code, close_msg):
+                close_details["code"] = close_status_code
+                close_details["reason"] = close_msg
 
             def handle_stream_close(
                 close_status_code,
@@ -5004,9 +5095,9 @@ def collector_loop():
                             else "Depth stream disconnected"
                         )
 
-                        collector_state["depth_symbol_errors"][
-                            symbol
-                        ] = (
+                        collector_state[
+                            "depth_symbol_errors"
+                        ][symbol] = (
                             collector_state[
                                 "depth_symbol_errors"
                             ].get(symbol)
@@ -5021,19 +5112,19 @@ def collector_loop():
                         )
                         collector_state["error"] = close_error
 
-                        # Do not wipe other symbols' books.
-                        # Invalidate only after this socket had opened.
                         if opened["value"]:
                             invalidate_symbol_orderbook(symbol)
 
                     else:
                         connection_state["trade_connected"] = False
-                        collector_state["trade_stream_connected"] = False
+                        collector_state[
+                            "trade_stream_connected"
+                        ] = False
 
                         if close_msg:
-                            collector_state["trade_stream_error"] = (
-                                str(close_msg)
-                            )
+                            collector_state[
+                                "trade_stream_error"
+                            ] = str(close_msg)
 
                     update_connection_status()
 
@@ -5055,12 +5146,9 @@ def collector_loop():
                     on_open=on_open,
                     on_message=on_message,
                     on_error=on_error,
-                    on_close=lambda ws, code, msg: (
-                        handle_stream_close(code, msg)
-                    ),
+                    on_close=on_close,
                 )
 
-                # Keep the currently deployed heartbeat behavior.
                 ws.run_forever(
                     ping_interval=30,
                     ping_timeout=25,
@@ -5076,9 +5164,9 @@ def collector_loop():
 
                     if is_depth:
                         collector_state["error"] = error_text
-                        collector_state["depth_symbol_errors"][
-                            symbol
-                        ] = error_text
+                        collector_state[
+                            "depth_symbol_errors"
+                        ][symbol] = error_text
 
                 print(
                     f"[COLLECTOR] {role.upper()} STREAM EXCEPTION "
@@ -5087,16 +5175,24 @@ def collector_loop():
                 )
 
             finally:
+                # Drain messages already received before invalidating
+                # the book. This preserves FIFO processing order.
+                processing_queue.put(None)
+                processing_thread.join()
+
                 handle_stream_close(
-                    None,
-                    "connection ended",
+                    close_details["code"],
+                    close_details["reason"] or (
+                        "Processing queue overflow"
+                        if overflowed["value"]
+                        else "connection ended"
+                    ),
                 )
 
             connection_uptime = (
                 time.time() - connection_started_at
             )
 
-            # Reset backoff only after a stable connection.
             if connection_uptime >= 60:
                 reconnect_delay = 5
 
@@ -5112,7 +5208,7 @@ def collector_loop():
                 reconnect_delay * 2,
                 max_reconnect_delay,
             )
-
+            
     workers = [
         threading.Thread(
             target=run_stream_worker,
