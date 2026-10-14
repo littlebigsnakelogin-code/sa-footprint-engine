@@ -4569,6 +4569,14 @@ def process_trade(
 # ============================================================
 
 def handle_message(ws, message):
+    """
+    Binance combined-stream message router.
+
+    Depth events ko event type aur payload structure se identify
+    karta hai, aur symbol ko data ya stream name se resolve karta hai.
+    Existing trade processing aur execution matcher unchanged hain.
+    """
+
     with lock:
         collector_state["raw_message_count"] += 1
         collector_state["last_message_at"] = now_ms()
@@ -4584,32 +4592,90 @@ def handle_message(ws, message):
         if not isinstance(data, dict):
             return
 
-        event_type = data.get("e")
+        # Resolve symbol from the event first.
         symbol = str(data.get("s", "")).upper()
+
+        # Fallback for combined-stream wrappers.
+        if symbol not in SYMBOLS:
+            stream_name = str(payload.get("stream", ""))
+            if stream_name:
+                stream_symbol = stream_name.split("@", 1)[0].upper()
+                if stream_symbol in SYMBOLS:
+                    symbol = stream_symbol
 
         if symbol not in SYMBOLS:
             return
 
-        # Orderbook depth updates
-        if event_type == "depthUpdate":
+        event_type = data.get("e")
+
+        # Depth payload fallback: U/u are update IDs; b/a are
+        # bid/ask updates. Keep validation strict before dispatch.
+        is_depth_event = (
+            event_type == "depthUpdate"
+            or (
+                "U" in data
+                and "u" in data
+                and isinstance(data.get("b"), list)
+                and isinstance(data.get("a"), list)
+            )
+        )
+
+        if is_depth_event:
+            try:
+                first_id = int(data["U"])
+                final_id = int(data["u"])
+
+                if first_id <= 0 or final_id < first_id:
+                    raise ValueError(
+                        f"Invalid depth update range U={first_id}, u={final_id}"
+                    )
+
+            except (KeyError, TypeError, ValueError) as exc:
+                with lock:
+                    collector_state["invalid_message_count"] += 1
+
+                print(
+                    f"[DEPTH ROUTER] INVALID EVENT {symbol}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return
+
+            # Count actual depth events received for each symbol.
+            with lock:
+                state = orderbook[symbol]
+                state["_depth_messages_received"] = (
+                    state.get("_depth_messages_received", 0) + 1
+                )
+                state["_depth_last_message_at"] = now_ms()
+
+                # Log the first event for each symbol after process startup.
+                if not state.get("_depth_first_message_logged", False):
+                    state["_depth_first_message_logged"] = True
+                    print(
+                        f"[DEPTH ROUTER] FIRST EVENT {symbol} "
+                        f"U={first_id} u={final_id} "
+                        f"pu={data.get('pu')}"
+                    )
+
             handle_depth_update(symbol, data)
             return
 
-        # Binance Futures aggregate trade stream
-        # Existing trade events bhi backward-compatible rahenge.
+        # Preserve the existing aggregate-trade processing path.
         if event_type not in ("trade", "aggTrade"):
             return
 
-        price = float(data.get("p", 0))
-        quantity = float(data.get("q", 0))
-        trade_time = int(data.get("T", 0))
-        is_buyer_maker = bool(data.get("m", False))
+        try:
+            price = float(data.get("p", 0))
+            quantity = float(data.get("q", 0))
+            trade_time = int(data.get("T", 0))
+            is_buyer_maker = bool(data.get("m", False))
 
-        if (
-            price <= 0
-            or quantity <= 0
-            or trade_time <= 0
-        ):
+        except (TypeError, ValueError):
+            with lock:
+                collector_state["invalid_message_count"] += 1
+            return
+
+        if price <= 0 or quantity <= 0 or trade_time <= 0:
             with lock:
                 collector_state["invalid_message_count"] += 1
             return
