@@ -4689,6 +4689,7 @@ def collector_loop():
         trade_connected = stream_connected["trade"]
         depth_connected = stream_connected["depth"]
 
+        # Orderbook synchronization depends on the depth stream.
         collector_state["connected"] = depth_connected
 
         if trade_connected and depth_connected:
@@ -4721,7 +4722,7 @@ def collector_loop():
 
             print(
                 "[ORDERBOOK RECOVERY] Depth stream disconnected; "
-                "all books marked unsynchronized and cleared"
+                "all books invalidated and awaiting fresh synchronization"
             )
 
     def run_stream_worker(role):
@@ -4734,8 +4735,6 @@ def collector_loop():
             close_handled = {"value": False}
 
             def on_open(ws):
-                nonlocal reconnect_delay
-
                 with lock:
                     stream_connected[role] = True
                     collector_state[config["connected_key"]] = True
@@ -4746,8 +4745,9 @@ def collector_loop():
 
                     update_connection_status()
 
-                reconnect_delay = 5
-
+                # Do not reset reconnect_delay here.
+                # A socket that opens and immediately closes must
+                # still receive exponential reconnect backoff.
                 print(
                     f"[COLLECTOR] {role.upper()} STREAM CONNECTED"
                 )
@@ -4756,9 +4756,7 @@ def collector_loop():
                 handle_message(ws, message)
 
             def on_error(ws, error):
-                error_text = (
-                    f"{type(error).__name__}: {error}"
-                )
+                error_text = f"{type(error).__name__}: {error}"
 
                 with lock:
                     collector_state[config["error_key"]] = error_text
@@ -4826,17 +4824,16 @@ def collector_loop():
                     on_close=on_close,
                 )
 
-                # Client-generated ping disabled.
-                # websocket-client will still handle server ping frames.
+                # Disable client-generated pings to avoid the
+                # previously observed client ping/pong timeout.
+                # Server ping frames are still handled by websocket-client.
                 ws.run_forever(
                     ping_interval=0,
                     ping_timeout=None,
                 )
 
             except Exception as exc:
-                error_text = (
-                    f"{type(exc).__name__}: {exc}"
-                )
+                error_text = f"{type(exc).__name__}: {exc}"
 
                 with lock:
                     collector_state[config["error_key"]] = error_text
@@ -4855,10 +4852,9 @@ def collector_loop():
                     "connection ended",
                 )
 
-            connection_uptime = (
-                time.time() - connection_started_at
-            )
+            connection_uptime = time.time() - connection_started_at
 
+            # Reset the backoff only after a stable connection.
             if connection_uptime >= 60:
                 reconnect_delay = 5
 
