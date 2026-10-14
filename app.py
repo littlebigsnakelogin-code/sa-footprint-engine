@@ -1005,47 +1005,10 @@ def record_trade_for_execution_matching(
         (expected_side, price_key)
     ].append(trade_record)
 
-    # Index pending reductions that have not yet been indexed.
-    indexed_ids = {
-        id(record)
-        for records in liquidity_match_index.values()
-        for record in records
-    }
-
-    for liquidity in state["liquidity_history"]:
-        if id(liquidity) in indexed_ids:
-            continue
-
-        if liquidity.get("finalized"):
-            continue
-
-        try:
-            reduced_qty = float(
-                liquidity.get("reduced_qty", 0.0)
-            )
-        except (TypeError, ValueError):
-            continue
-
-        if reduced_qty <= 0.0:
-            continue
-
-        side = liquidity.get("side")
-        if side not in ("bid", "ask"):
-            continue
-
-        try:
-            liquidity_price_key = round(
-                float(liquidity.get("price")),
-                12,
-            )
-        except (TypeError, ValueError):
-            continue
-
-        liquidity_match_index[
-            (side, liquidity_price_key)
-        ].append(liquidity)
-
-        indexed_ids.add(id(liquidity))
+    # All live reductions are indexed atomically by apply_orderbook_event()
+    # before the shared lock is released. Scanning the entire 3000-record
+    # history and rebuilding every index key for every trade is redundant
+    # and caused O(history + index) work on the hottest trade path.
 
     matching_records = liquidity_match_index.get(
         (expected_side, price_key),
@@ -1243,7 +1206,6 @@ def record_trade_for_execution_matching(
     state["trade_history"].append(trade_record)
 
     return matched_total
-
 
 
 def match_trade_to_liquidity_reduction(
@@ -5976,7 +5938,9 @@ def liquidity_debug():
             "message": str(e)
         }), 500
 
-
+previous_cluster_state = {
+    sym: {"bids": {}, "asks": {}} for sym in SYMBOLS
+}
 @app.route("/api/scan")
 def api_scan():
     symbol = request.args.get("symbol", "BTCUSDT").upper()
