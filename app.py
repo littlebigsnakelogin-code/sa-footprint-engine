@@ -3889,11 +3889,10 @@ def initialize_orderbook(symbol):
 
 def handle_depth_update(symbol, event):
     """
-    Safely buffer, validate and apply Binance Futures depth events.
-    On a sequence gap, start orderbook initialization directly.
-    Does not depend on an undefined resync helper.
+    Buffer, validate and apply Binance Futures depth events.
+    Adds low-volume diagnostics to isolate orderbook bridge timeouts.
+    Preserves existing sequence validation and recovery behavior.
     """
-
     if symbol not in orderbook or not isinstance(event, dict):
         return
 
@@ -3922,11 +3921,13 @@ def handle_depth_update(symbol, event):
 
     with lock:
         state = orderbook[symbol]
+
+        # Count events that actually reach this handler.
+        handler_calls = state.get("_depth_handler_calls", 0) + 1
+        state["_depth_handler_calls"] = handler_calls
         state["last_depth_event_time"] = now_ms()
 
-        # --------------------------------------------------
         # Buffer events until a snapshot has been synchronized.
-        # --------------------------------------------------
         if not state["initialized"]:
             state["buffer"].append(event)
 
@@ -3941,9 +3942,7 @@ def handle_depth_update(symbol, event):
         else:
             previous_u = state.get("last_update_id")
 
-            # --------------------------------------------------
             # A synchronized book must have a valid update ID.
-            # --------------------------------------------------
             if previous_u is None:
                 state["initialized"] = False
                 state["resyncing"] = True
@@ -3960,9 +3959,7 @@ def handle_depth_update(symbol, event):
             elif event_final_id <= int(previous_u):
                 return
 
-            # --------------------------------------------------
             # Futures continuity: pu must match the prior final ID.
-            # --------------------------------------------------
             elif (
                 event_previous_id is not None
                 and event_previous_id != int(previous_u)
@@ -3971,8 +3968,7 @@ def handle_depth_update(symbol, event):
                 state["initialized"] = False
                 state["resyncing"] = True
 
-                # Keep the triggering event as the start of the
-                # new synchronization buffer.
+                # Preserve the event that triggered recovery.
                 state["buffer"].clear()
                 state["buffer"].append(event)
 
@@ -3989,12 +3985,11 @@ def handle_depth_update(symbol, event):
                     f"event_u={event_final_id}"
                 )
 
-            # --------------------------------------------------
             # Apply only a continuous event.
-            # --------------------------------------------------
             else:
                 try:
                     apply_orderbook_event(symbol, event)
+
                 except Exception as exc:
                     state["initialized"] = False
                     state["resyncing"] = True
@@ -4011,6 +4006,22 @@ def handle_depth_update(symbol, event):
                         f"[ORDERBOOK] APPLY ERROR {symbol}: "
                         f"{type(exc).__name__}: {exc}"
                     )
+
+        # Log every 100 handler calls per symbol, not every event.
+        if handler_calls % 100 == 0:
+            print(
+                f"[DEPTH HANDLER TRACE] {symbol} "
+                f"calls={handler_calls} "
+                f"initialized={state.get('initialized')} "
+                f"resyncing={state.get('resyncing')} "
+                f"init_active={state.get('_init_worker_active', False)} "
+                f"buffer_count={len(state['buffer'])} "
+                f"last_update_id={state.get('last_update_id')} "
+                f"event_U={event_first_id} "
+                f"event_u={event_final_id} "
+                f"event_pu={event_previous_id} "
+                f"sequence_errors={state.get('sequence_errors', 0)}"
+            )
 
     # Start recovery outside the shared lock.
     if start_initializer:
