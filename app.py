@@ -4828,14 +4828,6 @@ def handle_message(ws, message):
 
 
 def collector_loop():
-    """
-    Run one combined trade stream and an independent depth stream
-    for each symbol.
-
-    A single symbol's depth disconnect must not invalidate the
-    other symbols' synchronized orderbooks.
-    """
-
     trade_streams = [
         f"{symbol.lower()}@aggTrade"
         for symbol in SYMBOLS
@@ -4846,9 +4838,10 @@ def collector_loop():
         f"?streams={'/'.join(trade_streams)}"
     )
 
-    # Track individual depth connections separately.
-    depth_connected_symbols = set()
-    trade_connected = {"value": False}
+    connection_state = {
+        "trade_connected": False,
+        "depth_connected_symbols": set(),
+    }
 
     with lock:
         collector_state["status"] = "connecting"
@@ -4858,81 +4851,75 @@ def collector_loop():
         collector_state["depth_stream_connected"] = False
         collector_state["trade_stream_error"] = None
         collector_state["depth_stream_error"] = None
-
-        for symbol in SYMBOLS:
-            orderbook[symbol]["_depth_stream_connected"] = False
+        collector_state["depth_symbol_errors"] = {
+            symbol: None for symbol in SYMBOLS
+        }
 
     def update_connection_status():
-        """
-        collector_state.connected represents whether at least one
-        depth stream is connected. Per-symbol synchronization remains
-        available in each orderbook's initialized state.
-        """
-        with lock:
-            depth_connected = bool(depth_connected_symbols)
-            trade_is_connected = trade_connected["value"]
+        depth_connected = bool(
+            connection_state["depth_connected_symbols"]
+        )
+        trade_connected = connection_state["trade_connected"]
 
-            collector_state["depth_stream_connected"] = (
-                depth_connected
-            )
-            collector_state["trade_stream_connected"] = (
-                trade_is_connected
-            )
-            collector_state["connected"] = depth_connected
+        collector_state["connected"] = depth_connected
+        collector_state["trade_stream_connected"] = trade_connected
+        collector_state["depth_stream_connected"] = depth_connected
 
-            if depth_connected and trade_is_connected:
-                collector_state["status"] = "connected"
-            elif depth_connected or trade_is_connected:
-                collector_state["status"] = "partial"
-            else:
-                collector_state["status"] = "connecting"
+        if trade_connected and depth_connected:
+            collector_state["status"] = "connected"
+        elif trade_connected or depth_connected:
+            collector_state["status"] = "partial"
+        else:
+            collector_state["status"] = "connecting"
 
     def invalidate_symbol_orderbook(symbol):
         """
-        Invalidate only the book whose depth feed disconnected.
-        A disconnected symbol must never retain a falsely synchronized
-        orderbook.
+        Sirf us symbol ka orderbook invalidate karo
+        jiska depth connection disconnect hua hai.
         """
-        with lock:
-            state = orderbook[symbol]
+        state = orderbook[symbol]
 
-            state["_depth_stream_connected"] = False
-            state["initialized"] = False
-            state["resyncing"] = bool(
-                state.get("_init_worker_active", False)
-            )
-
-            state["last_update_id"] = None
-            state["last_depth_update_id"] = None
-
-            state["bids"].clear()
-            state["asks"].clear()
-
-            state["liquidity_lots"]["bid"].clear()
-            state["liquidity_lots"]["ask"].clear()
-
-            state["buffer"].clear()
-
-        print(
-            f"[ORDERBOOK RECOVERY] {symbol} depth disconnected; "
-            "only this symbol's book was invalidated"
+        was_active = (
+            state.get("initialized", False)
+            or bool(state.get("bids"))
+            or bool(state.get("asks"))
         )
 
-    def run_stream_worker(role, symbol=None):
-        """
-        role='trade': one combined aggregate-trade connection.
-        role='depth': one independent depth connection per symbol.
-        """
+        state["initialized"] = False
+        state["resyncing"] = bool(
+            state.get("_init_worker_active", False)
+        )
 
-        if role == "trade":
-            url = trade_url
-            label = "TRADE"
-        else:
-            url = (
-                "wss://fstream.binance.com/public/ws/"
-                f"{symbol.lower()}@depth@100ms"
+        state["last_update_id"] = None
+        state["last_depth_update_id"] = None
+
+        state["bids"].clear()
+        state["asks"].clear()
+
+        state["liquidity_lots"]["bid"].clear()
+        state["liquidity_lots"]["ask"].clear()
+
+        state["buffer"].clear()
+
+        # Count actual disconnect-triggered recovery events.
+        if was_active:
+            state["resync_count"] = (
+                state.get("resync_count", 0) + 1
             )
-            label = f"DEPTH {symbol}"
+
+        print(
+            f"[ORDERBOOK RECOVERY] INVALIDATED {symbol} "
+            f"reason=SYMBOL_DEPTH_DISCONNECT "
+            f"init_active={state.get('_init_worker_active', False)}"
+        )
+
+    def run_stream_worker(role, url, symbol=None):
+        is_depth = symbol is not None
+        error_key = (
+            "depth_stream_error"
+            if is_depth
+            else "trade_stream_error"
+        )
 
         reconnect_delay = 5
         max_reconnect_delay = 60
@@ -4940,29 +4927,40 @@ def collector_loop():
         while True:
             connection_started_at = time.time()
             close_handled = {"value": False}
+            opened = {"value": False}
 
             def on_open(ws):
+                opened["value"] = True
+
                 with lock:
-                    if role == "trade":
-                        trade_connected["value"] = True
-                        collector_state["trade_stream_error"] = None
-                    else:
-                        depth_connected_symbols.add(symbol)
-                        orderbook[symbol][
-                            "_depth_stream_connected"
-                        ] = True
+                    if is_depth:
+                        connection_state[
+                            "depth_connected_symbols"
+                        ].add(symbol)
+
+                        collector_state[
+                            "depth_symbol_errors"
+                        ][symbol] = None
 
                         collector_state["depth_stream_error"] = None
                         collector_state["error"] = None
+                    else:
+                        connection_state["trade_connected"] = True
+                        collector_state["trade_stream_error"] = None
 
-                update_connection_status()
+                    update_connection_status()
 
-                print(
-                    f"[COLLECTOR] {label} STREAM CONNECTED"
-                )
+                if is_depth:
+                    print(
+                        f"[COLLECTOR] DEPTH STREAM CONNECTED "
+                        f"symbol={symbol}"
+                    )
+                else:
+                    print(
+                        "[COLLECTOR] TRADE STREAM CONNECTED"
+                    )
 
             def on_message(ws, message):
-                # Existing router handles raw and combined payloads.
                 handle_message(ws, message)
 
             def on_error(ws, error):
@@ -4971,18 +4969,17 @@ def collector_loop():
                 )
 
                 with lock:
-                    if role == "trade":
-                        collector_state["trade_stream_error"] = (
-                            error_text
-                        )
-                    else:
-                        collector_state["depth_stream_error"] = (
-                            error_text
-                        )
+                    collector_state[error_key] = error_text
+
+                    if is_depth:
                         collector_state["error"] = error_text
+                        collector_state[
+                            "depth_symbol_errors"
+                        ][symbol] = error_text
 
                 print(
-                    f"[COLLECTOR] {label} STREAM ERROR: "
+                    f"[COLLECTOR] {role.upper()} STREAM ERROR "
+                    f"{'symbol=' + symbol + ' ' if is_depth else ''}"
                     f"{error_text}"
                 )
 
@@ -4995,50 +4992,62 @@ def collector_loop():
 
                 close_handled["value"] = True
 
-                if role == "trade":
-                    with lock:
-                        trade_connected["value"] = False
-                        collector_state[
-                            "trade_stream_connected"
-                        ] = False
+                with lock:
+                    if is_depth:
+                        connection_state[
+                            "depth_connected_symbols"
+                        ].discard(symbol)
 
-                        if close_msg:
+                        close_error = (
+                            str(close_msg)
+                            if close_msg
+                            else "Depth stream disconnected"
+                        )
+
+                        collector_state["depth_symbol_errors"][
+                            symbol
+                        ] = (
                             collector_state[
-                                "trade_stream_error"
-                            ] = str(close_msg)
+                                "depth_symbol_errors"
+                            ].get(symbol)
+                            or close_error
+                        )
 
-                else:
-                    with lock:
-                        depth_connected_symbols.discard(symbol)
-
-                        if close_msg:
-                            collector_state[
+                        collector_state["depth_stream_error"] = (
+                            collector_state.get(
                                 "depth_stream_error"
-                            ] = str(close_msg)
-                            collector_state["error"] = str(
-                                close_msg
+                            )
+                            or close_error
+                        )
+                        collector_state["error"] = close_error
+
+                        # Do not wipe other symbols' books.
+                        # Invalidate only after this socket had opened.
+                        if opened["value"]:
+                            invalidate_symbol_orderbook(symbol)
+
+                    else:
+                        connection_state["trade_connected"] = False
+                        collector_state["trade_stream_connected"] = False
+
+                        if close_msg:
+                            collector_state["trade_stream_error"] = (
+                                str(close_msg)
                             )
 
-                    # Critical isolation: do not clear other symbols.
-                    invalidate_symbol_orderbook(symbol)
-
-                update_connection_status()
+                    update_connection_status()
 
                 print(
-                    f"[COLLECTOR] {label} STREAM CLOSED: "
-                    f"code={close_status_code}, "
-                    f"reason={close_msg}"
-                )
-
-            def on_close(ws, close_status_code, close_msg):
-                handle_stream_close(
-                    close_status_code,
-                    close_msg,
+                    f"[COLLECTOR] {role.upper()} STREAM CLOSED "
+                    f"{'symbol=' + symbol + ' ' if is_depth else ''}"
+                    f"code={close_status_code}, reason={close_msg}"
                 )
 
             try:
                 print(
-                    f"[COLLECTOR] Connecting {label} stream..."
+                    f"[COLLECTOR] Connecting {role.upper()} "
+                    f"{'symbol=' + symbol + ' ' if is_depth else ''}"
+                    "stream to Binance Futures..."
                 )
 
                 ws = websocket.WebSocketApp(
@@ -5046,10 +5055,12 @@ def collector_loop():
                     on_open=on_open,
                     on_message=on_message,
                     on_error=on_error,
-                    on_close=on_close,
+                    on_close=lambda ws, code, msg: (
+                        handle_stream_close(code, msg)
+                    ),
                 )
 
-                # Preserve the existing heartbeat configuration.
+                # Keep the currently deployed heartbeat behavior.
                 ws.run_forever(
                     ping_interval=0,
                     ping_timeout=None,
@@ -5061,18 +5072,17 @@ def collector_loop():
                 )
 
                 with lock:
-                    if role == "trade":
-                        collector_state["trade_stream_error"] = (
-                            error_text
-                        )
-                    else:
-                        collector_state["depth_stream_error"] = (
-                            error_text
-                        )
+                    collector_state[error_key] = error_text
+
+                    if is_depth:
                         collector_state["error"] = error_text
+                        collector_state["depth_symbol_errors"][
+                            symbol
+                        ] = error_text
 
                 print(
-                    f"[COLLECTOR] {label} STREAM EXCEPTION: "
+                    f"[COLLECTOR] {role.upper()} STREAM EXCEPTION "
+                    f"{'symbol=' + symbol + ' ' if is_depth else ''}"
                     f"{error_text}"
                 )
 
@@ -5091,8 +5101,9 @@ def collector_loop():
                 reconnect_delay = 5
 
             print(
-                f"[COLLECTOR] {label} reconnecting in "
-                f"{reconnect_delay} seconds..."
+                f"[COLLECTOR] {role.upper()} reconnecting "
+                f"{'symbol=' + symbol + ' ' if is_depth else ''}"
+                f"in {reconnect_delay} seconds..."
             )
 
             time.sleep(reconnect_delay)
@@ -5105,18 +5116,28 @@ def collector_loop():
     workers = [
         threading.Thread(
             target=run_stream_worker,
-            args=("trade",),
+            args=("trade", trade_url, None),
             name="binance-trade-stream",
             daemon=True,
         )
     ]
 
+    # Each symbol gets its own depth connection.
     for symbol in SYMBOLS:
+        depth_url = (
+            "wss://fstream.binance.com/public/stream"
+            f"?streams={symbol.lower()}@depth@100ms"
+        )
+
         workers.append(
             threading.Thread(
                 target=run_stream_worker,
-                args=("depth", symbol),
-                name=f"binance-depth-{symbol}",
+                args=(
+                    f"depth-{symbol}",
+                    depth_url,
+                    symbol,
+                ),
+                name=f"binance-depth-stream-{symbol}",
                 daemon=True,
             )
         )
