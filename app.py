@@ -4873,10 +4873,6 @@ def collector_loop():
             collector_state["status"] = "connecting"
 
     def invalidate_symbol_orderbook(symbol):
-        """
-        Sirf us symbol ka orderbook invalidate karo
-        jiska depth connection disconnect hua hai.
-        """
         state = orderbook[symbol]
 
         was_active = (
@@ -4889,19 +4885,15 @@ def collector_loop():
         state["resyncing"] = bool(
             state.get("_init_worker_active", False)
         )
-
         state["last_update_id"] = None
         state["last_depth_update_id"] = None
 
         state["bids"].clear()
         state["asks"].clear()
-
         state["liquidity_lots"]["bid"].clear()
         state["liquidity_lots"]["ask"].clear()
-
         state["buffer"].clear()
 
-        # Count actual disconnect-triggered recovery events.
         if was_active:
             state["resync_count"] = (
                 state.get("resync_count", 0) + 1
@@ -4913,7 +4905,7 @@ def collector_loop():
             f"init_active={state.get('_init_worker_active', False)}"
         )
 
-            def run_stream_worker(role, url, symbol=None):
+    def run_stream_worker(role, url, symbol=None):
         is_depth = symbol is not None
         error_key = (
             "depth_stream_error"
@@ -4927,10 +4919,11 @@ def collector_loop():
 
         while True:
             connection_started_at = time.time()
-            close_handled = {"value": False}
-            opened = {"value": False}
-            overflowed = {"value": False}
-            accepting_messages = {"value": True}
+            opened = False
+            overflowed = False
+            accepting_messages = threading.Event()
+            accepting_messages.set()
+
             close_details = {
                 "code": None,
                 "reason": None,
@@ -4977,7 +4970,8 @@ def collector_loop():
                                 f"[COLLECTOR] {role.upper()} "
                                 f"PROCESSING SLOW "
                                 f"{'symbol=' + symbol + ' ' if is_depth else ''}"
-                                f"duration={elapsed:.3f}s"
+                                f"duration={elapsed:.3f}s "
+                                f"queue={processing_queue.qsize()}"
                             )
 
                     finally:
@@ -4995,7 +4989,8 @@ def collector_loop():
             processing_thread.start()
 
             def on_open(ws):
-                opened["value"] = True
+                nonlocal opened
+                opened = True
 
                 with lock:
                     if is_depth:
@@ -5006,38 +5001,30 @@ def collector_loop():
                         collector_state[
                             "depth_symbol_errors"
                         ][symbol] = None
-
-                        collector_state[
-                            "depth_stream_error"
-                        ] = None
+                        collector_state["depth_stream_error"] = None
                         collector_state["error"] = None
                     else:
                         connection_state["trade_connected"] = True
-                        collector_state[
-                            "trade_stream_error"
-                        ] = None
+                        collector_state["trade_stream_error"] = None
 
                     update_connection_status()
 
-                if is_depth:
-                    print(
-                        f"[COLLECTOR] DEPTH STREAM CONNECTED "
-                        f"symbol={symbol}"
-                    )
-                else:
-                    print(
-                        "[COLLECTOR] TRADE STREAM CONNECTED"
-                    )
+                print(
+                    f"[COLLECTOR] {role.upper()} STREAM CONNECTED"
+                    f"{' symbol=' + symbol if is_depth else ''}"
+                )
 
             def on_message(ws, message):
-                if not accepting_messages["value"]:
+                nonlocal overflowed
+
+                if not accepting_messages.is_set():
                     return
 
                 try:
                     processing_queue.put_nowait(message)
                 except queue.Full:
-                    overflowed["value"] = True
-                    accepting_messages["value"] = False
+                    overflowed = True
+                    accepting_messages.clear()
 
                     error_text = (
                         f"Processing queue overflow "
@@ -5054,11 +5041,9 @@ def collector_loop():
                             ][symbol] = error_text
 
                     print(
-                        f"[COLLECTOR] {role.upper()} "
-                        f"QUEUE OVERFLOW "
+                        f"[COLLECTOR] {role.upper()} QUEUE OVERFLOW "
                         f"{'symbol=' + symbol + ' ' if is_depth else ''}"
-                        f"capacity={max_queue_size}; "
-                        f"closing connection"
+                        f"capacity={max_queue_size}; closing socket"
                     )
 
                     try:
@@ -5092,64 +5077,7 @@ def collector_loop():
             def on_close(ws, close_status_code, close_msg):
                 close_details["code"] = close_status_code
                 close_details["reason"] = close_msg
-
-                accepting_messages["value"] = False
-
-            def handle_stream_close(
-                close_status_code,
-                close_msg,
-            ):
-                if close_handled["value"]:
-                    return
-
-                close_handled["value"] = True
-
-                with lock:
-                    if is_depth:
-                        connection_state[
-                            "depth_connected_symbols"
-                        ].discard(symbol)
-
-                        close_error = (
-                            str(close_msg)
-                            if close_msg
-                            else (
-                                "Processing queue overflow"
-                                if overflowed["value"]
-                                else "Depth stream disconnected"
-                            )
-                        )
-
-                        collector_state[
-                            "depth_symbol_errors"
-                        ][symbol] = close_error
-
-                        collector_state[
-                            "depth_stream_error"
-                        ] = close_error
-                        collector_state["error"] = close_error
-
-                        if opened["value"]:
-                            invalidate_symbol_orderbook(symbol)
-
-                    else:
-                        connection_state["trade_connected"] = False
-                        collector_state[
-                            "trade_stream_connected"
-                        ] = False
-
-                        if close_msg:
-                            collector_state[
-                                "trade_stream_error"
-                            ] = str(close_msg)
-
-                    update_connection_status()
-
-                print(
-                    f"[COLLECTOR] {role.upper()} STREAM CLOSED "
-                    f"{'symbol=' + symbol + ' ' if is_depth else ''}"
-                    f"code={close_status_code}, reason={close_msg}"
-                )
+                accepting_messages.clear()
 
             try:
                 print(
@@ -5192,21 +5120,57 @@ def collector_loop():
                 )
 
             finally:
-                # Stop accepting data from this socket.
-                accepting_messages["value"] = False
+                accepting_messages.clear()
 
-                # FIFO sentinel: previously received messages finish
-                # processing before the processor thread exits.
+                # FIFO sentinel: pehle se queued messages process honge.
                 processing_queue.put(None)
                 processing_thread.join()
 
-                handle_stream_close(
-                    close_details["code"],
-                    close_details["reason"] or (
+                close_code = close_details["code"]
+                close_reason = close_details["reason"]
+
+                if not close_reason:
+                    close_reason = (
                         "Processing queue overflow"
-                        if overflowed["value"]
+                        if overflowed
                         else "connection ended"
-                    ),
+                    )
+
+                with lock:
+                    if is_depth:
+                        connection_state[
+                            "depth_connected_symbols"
+                        ].discard(symbol)
+
+                        collector_state[
+                            "depth_symbol_errors"
+                        ][symbol] = close_reason
+                        collector_state["depth_stream_error"] = (
+                            close_reason
+                        )
+                        collector_state["error"] = close_reason
+
+                        # Queue drain hone ke baad hi stale book invalidate.
+                        if opened:
+                            invalidate_symbol_orderbook(symbol)
+
+                    else:
+                        connection_state["trade_connected"] = False
+                        collector_state[
+                            "trade_stream_connected"
+                        ] = False
+
+                        if close_reason:
+                            collector_state[
+                                "trade_stream_error"
+                            ] = close_reason
+
+                    update_connection_status()
+
+                print(
+                    f"[COLLECTOR] {role.upper()} STREAM CLOSED "
+                    f"{'symbol=' + symbol + ' ' if is_depth else ''}"
+                    f"code={close_code}, reason={close_reason}"
                 )
 
             connection_uptime = (
@@ -5227,7 +5191,8 @@ def collector_loop():
             reconnect_delay = min(
                 reconnect_delay * 2,
                 max_reconnect_delay,
-            )    
+            )
+
     workers = [
         threading.Thread(
             target=run_stream_worker,
@@ -5237,7 +5202,6 @@ def collector_loop():
         )
     ]
 
-    # Each symbol gets its own depth connection.
     for symbol in SYMBOLS:
         depth_url = (
             "wss://fstream.binance.com/public/stream"
