@@ -6032,7 +6032,7 @@ def liquidity_debug():
             "symbol": symbol,
             "orderbook": {
                 "initialized": state.get("initialized"),
-                "synchronized": state.get("synchronized"),
+                "synchronized": state.get("initialized"),
                 "resyncing": state.get("resyncing"),
                 "sequence_errors": state.get("sequence_errors", 0),
                 "bid_levels": len(state.get("bids", {})),
