@@ -1,0 +1,21 @@
+name: Python syntax check
+
+on:
+  pull_request:
+    paths:
+      - "app.py"
+      - ".github/workflows/python-syntax.yml"
+  workflow_dispatch:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile app.py
+        run: python -m py_compile app.py
