@@ -4051,10 +4051,11 @@ def initialize_orderbook(symbol):
             if state.get("initialized", False):
                 state["resyncing"] = False
 
-            elif (
-                collector_state.get("connected", False)
-                and state.get("buffer")
-            ):
+            elif collector_state.get("connected", False):
+                # Keep recovery active even if the event buffer is empty.
+                # A worker can exit after a transient disconnect/error before
+                # a buffered event remains; do not leave the book silently
+                # unsynchronized until another depth event happens to arrive.
                 state["resyncing"] = True
                 restart_initializer = True
 
@@ -4062,6 +4063,9 @@ def initialize_orderbook(symbol):
                 state["resyncing"] = False
 
         if restart_initializer:
+            # Brief backoff prevents rapid thread churn if recovery exits
+            # repeatedly because of a transient external failure.
+            time.sleep(0.5)
             threading.Thread(
                 target=initialize_orderbook,
                 args=(symbol,),
