@@ -662,17 +662,20 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
     state = orderbook[symbol]
     liquidity_history = state.get("liquidity_history", ())
 
-    # Depth streams commonly deliver updates every 100 ms. Avoid scanning
-    # the entire history and both indexes on every single update.
-    last_finalize_sweep = state.get("_last_finalize_sweep_ms")
+    # Throttle expensive sweeps using local monotonic processing time,
+    # not exchange event time. Backlogged/replayed events can have event
+    # timestamps older than the previous event; using those timestamps here
+    # would disable the throttle and repeatedly scan the full history.
+    sweep_clock_ms = time.monotonic_ns() // 1_000_000
+    last_finalize_sweep = state.get("_last_finalize_sweep_monotonic_ms")
     if (
         has_event_time
         and last_finalize_sweep is not None
-        and 0 <= current_time_ms - last_finalize_sweep < 250
+        and 0 <= sweep_clock_ms - last_finalize_sweep < 250
     ):
         return 0
 
-    state["_last_finalize_sweep_ms"] = current_time_ms
+    state["_last_finalize_sweep_monotonic_ms"] = sweep_clock_ms
     finalized_count = 0
 
     for record in liquidity_history:
@@ -719,18 +722,19 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
 
     # Index cleanup is less frequent than accounting finalization. Matcher
     # still checks record finalization and the original time-window rules.
-    last_index_cleanup = state.get("_last_match_index_cleanup_ms")
+    last_index_cleanup = state.get(
+        "_last_match_index_cleanup_monotonic_ms"
+    )
     do_index_cleanup = (
         not has_event_time
         or last_index_cleanup is None
-        or current_time_ms < last_index_cleanup
-        or current_time_ms - last_index_cleanup >= 1000
+        or sweep_clock_ms - last_index_cleanup >= 1000
     )
 
     if not do_index_cleanup:
         return finalized_count
 
-    state["_last_match_index_cleanup_ms"] = current_time_ms
+    state["_last_match_index_cleanup_monotonic_ms"] = sweep_clock_ms
 
     liquidity_index = state.get("liquidity_match_index")
     if isinstance(liquidity_index, dict):
