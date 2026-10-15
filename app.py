@@ -1615,6 +1615,8 @@ def apply_orderbook_event(symbol, event):
         []
     )
 
+    lifecycle_flow_changed = False
+
     for trade in reversed(
         trades_for_lifecycle
     ):
@@ -1698,6 +1700,8 @@ def apply_orderbook_event(symbol, event):
         lifecycle_flow_totals[
             "trade_count"
         ] += 1
+
+        lifecycle_flow_changed = True
 
     # ============================================================
     # CURRENT MARKET REFERENCE BEFORE EVENT
@@ -1915,9 +1919,12 @@ def apply_orderbook_event(symbol, event):
                             "approach_flow_start_time"
                         ] = event_time
 
-                    if lot.get(
-                        "market_approached",
-                        False
+                    if (
+                        lot.get("market_approached", False)
+                        and (
+                            approach_started_now
+                            or lifecycle_flow_changed
+                        )
                     ):
 
                         baseline = lot.get(
