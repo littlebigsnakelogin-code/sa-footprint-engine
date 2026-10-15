@@ -1207,8 +1207,13 @@ def match_trade_to_liquidity_reduction(
         # window of recent trades instead of scanning every indexed price
         # key for every depth reduction (the common hot-path case).
         recent_trades = state.get("trade_history", ())
+        inspected_trades = 0
 
         for trade in reversed(recent_trades):
+            if inspected_trades >= 100:
+                break
+            inspected_trades += 1
+
             if not isinstance(trade, dict):
                 continue
 
