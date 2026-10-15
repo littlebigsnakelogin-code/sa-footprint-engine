@@ -2576,6 +2576,14 @@ def apply_orderbook_event(symbol, event):
                 0.0
             )
 
+            # Binance depth events can repeat unchanged nonzero levels.
+            # They have no book, FIFO, lifecycle, or liquidity-record
+            # transition to account for, so skip their downstream work.
+            # Keep zero-quantity levels on the normal path to preserve
+            # empty FIFO price-level cleanup.
+            if old_quantity == new_quantity and new_quantity > 0.0:
+                continue
+
             # ====================================================
             # REDUCTION CONTEXT
             # ====================================================
