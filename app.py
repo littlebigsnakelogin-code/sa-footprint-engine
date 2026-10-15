@@ -958,9 +958,12 @@ def initialize_orderbook(symbol):
         with lock:
             state = orderbook[symbol]
             state["_init_worker_active"] = False
+
             if state.get("initialized", False):
                 state["resyncing"] = False
-            elif collector_state.get("depth_stream_connected", False) and state.get("buffer"):
+            elif collector_state.get("depth_stream_connected", False):
+                # FIX: Agar uninitialized reh gaya aur buffer empty bhi hai, 
+                # tab bhi recovery flag active rakh kar retry trigger karenge.
                 state["resyncing"] = True
                 restart_init = True
             else:
@@ -973,7 +976,6 @@ def initialize_orderbook(symbol):
                 name=f"orderbook-init-{symbol}-retry",
                 daemon=True,
             ).start()
-
 
 def handle_depth_update(symbol, event):
     try:
