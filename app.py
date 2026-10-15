@@ -1913,16 +1913,16 @@ def apply_orderbook_event(symbol, event):
     )
 
     # Lifecycle metadata scans every live FIFO lot under the collector
-    # lock. Sample this secondary evidence scan at 250 ms to reduce repeated
-    # full-lot walks during rapid best-price movement. Actual depth, FIFO,
-    # trade matching, and pull finalization remain per-event.
+    # lock and can dominate processing when lot history grows. Throttle this
+    # secondary metadata scan to 1000 ms; live depth application, FIFO
+    # accounting, trade matching, and pull finalization remain per-event.
     lifecycle_scan_clock_ms = time.monotonic_ns() // 1_000_000
     last_lifecycle_scan_ms = state.get(
         "_last_lifecycle_scan_monotonic_ms"
     )
     lifecycle_scan_due = (
         last_lifecycle_scan_ms is None
-        or lifecycle_scan_clock_ms - last_lifecycle_scan_ms >= 250
+        or lifecycle_scan_clock_ms - last_lifecycle_scan_ms >= 1000
     )
 
     # ============================================================
