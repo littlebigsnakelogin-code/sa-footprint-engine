@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
+from itertools import islice
 import requests
 import websocket
 from flask import Flask, jsonify, request
@@ -843,13 +844,24 @@ def record_trade_for_execution_matching(
 
     same_price_trade_key = (expected_side, price_key)
 
+    existing_same_price_trade_deque = trade_match_index.get(
+        same_price_trade_key, ()
+    )
+    existing_same_price_trade_count = len(
+        existing_same_price_trade_deque
+    )
+
+    # Diagnostics need only the latest ten examples. Do not copy the
+    # complete same-price trade deque on every incoming market trade.
     existing_same_price_trades = list(
-        trade_match_index.get(same_price_trade_key, ())
+        reversed(list(islice(
+            reversed(existing_same_price_trade_deque), 10
+        )))
     )
 
     existing_same_price_trade_snapshot = []
 
-    for existing_trade in existing_same_price_trades[-10:]:
+    for existing_trade in existing_same_price_trades:
         try:
             existing_trade_time = int(existing_trade.get("time"))
         except (TypeError, ValueError):
@@ -865,13 +877,18 @@ def record_trade_for_execution_matching(
             "time_diff_ms": trade_time - existing_trade_time,
         })
 
-    same_price_liquidity = list(
-        liquidity_match_index.get(same_price_trade_key, ())
+    same_price_liquidity = liquidity_match_index.get(
+        same_price_trade_key, ()
     )
+    same_price_liquidity_count = len(same_price_liquidity)
 
     pending_liquidity_snapshot = []
 
-    for liquidity in same_price_liquidity[-10:]:
+    # As above, snapshot only the latest ten entries for diagnostics;
+    # the execution matcher below continues using the full indexed deque.
+    for liquidity in reversed(list(islice(
+        reversed(same_price_liquidity), 10
+    ))):
         if liquidity.get("finalized"):
             continue
 
@@ -905,12 +922,8 @@ def record_trade_for_execution_matching(
         "is_buyer_maker": is_buyer_maker,
         "expected_side": expected_side,
         "trade_index_key": [expected_side, price_key],
-        "trade_index_key_count_before": len(
-            existing_same_price_trades
-        ),
-        "pending_liquidity_key_count_before": len(
-            same_price_liquidity
-        ),
+        "trade_index_key_count_before": existing_same_price_trade_count,
+        "pending_liquidity_key_count_before": same_price_liquidity_count,
         "existing_same_price_trades": (
             existing_same_price_trade_snapshot
         ),
