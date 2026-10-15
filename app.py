@@ -1726,6 +1726,19 @@ def apply_orderbook_event(symbol, event):
         )
     )
 
+    # Lifecycle metadata scans every live FIFO lot. Depth can update the
+    # best prices many times within a few milliseconds, so coalesce repeated
+    # scans to a 20 ms cadence while always allowing the first scan and
+    # preserving every depth event's book/FIFO/matching accounting.
+    lifecycle_scan_clock_ms = time.monotonic_ns() // 1_000_000
+    last_lifecycle_scan_ms = state.get(
+        "_last_lifecycle_scan_monotonic_ms"
+    )
+    lifecycle_scan_due = (
+        last_lifecycle_scan_ms is None
+        or lifecycle_scan_clock_ms - last_lifecycle_scan_ms >= 20
+    )
+
     # ============================================================
     # UPDATE EXISTING LOT LIFECYCLE
     # ============================================================
@@ -1734,7 +1747,11 @@ def apply_orderbook_event(symbol, event):
     if (
         current_market_reference is not None
         and market_reference_changed
+        and lifecycle_scan_due
     ):
+        state["_last_lifecycle_scan_monotonic_ms"] = (
+            lifecycle_scan_clock_ms
+        )
 
         for lifecycle_side in (
             "bid",
