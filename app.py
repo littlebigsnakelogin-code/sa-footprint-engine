@@ -88,6 +88,8 @@ PRICE_STEP = {
 # ============================================================
 
 lock = threading.RLock()
+# Serialize mutable collector state per symbol; busy books must not block peers.
+symbol_locks = {symbol: threading.RLock() for symbol in SYMBOLS}
 collector_start_lock = threading.Lock()
 
 # Instrument only hot-path lock sections so logs separate lock contention
@@ -99,13 +101,14 @@ _lock_perf = {}
 @contextmanager
 def measured_lock(label, symbol=None):
     wait_started = time.perf_counter()
-    lock.acquire()
+    active_lock = symbol_locks.get(symbol, lock) if symbol else lock
+    active_lock.acquire()
     acquired_at = time.perf_counter()
     try:
         yield
     finally:
         released_at = time.perf_counter()
-        lock.release()
+        active_lock.release()
 
         key = (label, symbol or "ALL")
         wait_ms = (acquired_at - wait_started) * 1000.0
@@ -3613,7 +3616,7 @@ def initialize_orderbook(symbol):
         print(f"[ORDERBOOK INIT] INVALID SYMBOL {symbol}")
         return False
 
-    with lock:
+    with symbol_locks[symbol]:
         state = orderbook[symbol]
 
         if state.get("_init_worker_active", False):
@@ -3633,7 +3636,7 @@ def initialize_orderbook(symbol):
 
     try:
         while True:
-            with lock:
+            with symbol_locks[symbol]:
                 state = orderbook[symbol]
 
                 if not collector_state.get("connected", False):
@@ -3658,7 +3661,7 @@ def initialize_orderbook(symbol):
 
                 try:
                     with snapshot_ws_lock:
-                        with lock:
+                        with symbol_locks[symbol]:
                             if not collector_state.get(
                                 "connected", False
                             ):
@@ -3750,7 +3753,7 @@ def initialize_orderbook(symbol):
             restart_with_fresh_snapshot = False
 
             while True:
-                with lock:
+                with symbol_locks[symbol]:
                     state = orderbook[symbol]
 
                     if not collector_state.get("connected", False):
@@ -3993,7 +3996,7 @@ def initialize_orderbook(symbol):
             f"{type(exc).__name__}: {exc}"
         )
 
-        with lock:
+        with symbol_locks[symbol]:
             state = orderbook[symbol]
             state["initialized"] = False
             state["last_update_id"] = None
@@ -4012,7 +4015,7 @@ def initialize_orderbook(symbol):
     finally:
         restart_initializer = False
 
-        with lock:
+        with symbol_locks[symbol]:
             state = orderbook[symbol]
             state["_init_worker_active"] = False
 
@@ -4063,7 +4066,7 @@ def handle_depth_update(symbol, event):
             f"[ORDERBOOK] INVALID DEPTH EVENT "
             f"{symbol}: {type(exc).__name__}: {exc}"
         )
-        with lock:
+        with symbol_locks[symbol]:
             orderbook[symbol]["sequence_errors"] += 1
         return
 
@@ -4577,7 +4580,7 @@ def store_finished_candle(candle):
     # RAM STORAGE
     # --------------------------------------------------------
 
-    with lock:
+    with symbol_locks[symbol]:
 
         candles[symbol][timeframe].append(
             finished
@@ -4803,7 +4806,7 @@ def handle_message(ws, message):
                 return
 
             # Count actual depth events received for each symbol.
-            with lock:
+            with symbol_locks[symbol]:
                 state = orderbook[symbol]
                 state["_depth_messages_received"] = (
                     state.get("_depth_messages_received", 0) + 1
@@ -5536,7 +5539,7 @@ def api_candles():
         )
     )
 
-    with lock:
+    with symbol_locks[symbol]:
 
         finished = list(
             candles[
@@ -5644,7 +5647,7 @@ def api_footprint():
                 "Provide candle start timestamp",
         }), 400
 
-    with lock:
+    with symbol_locks[symbol]:
 
         # ----------------------------------------------------
         # FINISHED CANDLES
@@ -5741,7 +5744,7 @@ def api_snapshot():
             "message": "Invalid timeframe",
         }), 400
 
-    with lock:
+    with symbol_locks[symbol]:
 
         current = current_candles[
             symbol
@@ -5821,7 +5824,7 @@ def api_orderbook():
         )
     )
 
-    with lock:
+    with symbol_locks[symbol]:
 
         state = orderbook[symbol]
 
@@ -6057,7 +6060,7 @@ def api_scan():
     bid_clusters = defaultdict(float)
     ask_clusters = defaultdict(float)
 
-    with lock:
+    with symbol_locks[symbol]:
         for p, q in orderbook[symbol]["bids"].items():
             bucket = round_price_to_step(float(p), step)
             bid_clusters[bucket] += q
