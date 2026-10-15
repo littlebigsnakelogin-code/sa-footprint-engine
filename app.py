@@ -5015,7 +5015,28 @@ def collector_loop():
             finally:
                 accepting_messages.clear()
 
-                # FIFO sentinel: pehle se queued messages process honge.
+                # Connection band hone par queued events stale ho sakte hain.
+                # Unhe replay karne se reconnect/resync hazaaron messages tak
+                # delay ho sakta hai; depth book neeche invalidate/resync hoga.
+                dropped_messages = 0
+                while True:
+                    try:
+                        processing_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    else:
+                        processing_queue.task_done()
+                        dropped_messages += 1
+
+                if dropped_messages:
+                    print(
+                        f"[COLLECTOR] {role.upper()} DISCARDING STALE QUEUE "
+                        f"{'symbol=' + symbol + ' ' if is_depth else ''}"
+                        f"count={dropped_messages}"
+                    )
+
+                # Processor mein chal raha max ek message finish karega,
+                # phir sentinel se worker cleanly exit karega.
                 processing_queue.put(None)
                 processing_thread.join()
 
