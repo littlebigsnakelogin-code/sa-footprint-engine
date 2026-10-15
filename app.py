@@ -5352,7 +5352,7 @@ def ensure_collector_started():
         collector_thread.start()
 
         print(
-            "[COLLECTOR] Background collector started"
+            f"[COLLECTOR] Background collector started; active_symbols={','.join(SYMBOLS)}"
         )
 
 
