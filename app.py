@@ -41,11 +41,15 @@ app = Flask(__name__)
 # CONFIG
 # ============================================================
 
-# CPU scaling test: collect SOLUSDT, BTCUSDT, and ETHUSDT.
+# All supported trading symbols.
 SYMBOLS = [
-    "SOLUSDT",
     "BTCUSDT",
     "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "AVAXUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
 ]
 
 
