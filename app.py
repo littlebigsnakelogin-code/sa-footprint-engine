@@ -1442,59 +1442,71 @@ def match_trade_to_liquidity_reduction(
         except (KeyError, TypeError, ValueError):
             max_price_distance = 0.0
 
-        # Nearby-price matching is diagnostic-only. Inspect a bounded
-        # window of recent trades instead of scanning every indexed price
-        # key for every depth reduction (the common hot-path case).
-        recent_trades = state.get("trade_history", ())
-        inspected_trades = 0
-
-        # This is diagnostic-only: exact-price execution matching is handled
-        # above and must not be affected by this nearby-price sample. Keep the
-        # sample small because this path runs for every unmatched reduction.
-        for trade in reversed(recent_trades):
-            if inspected_trades >= 20:
-                break
-            inspected_trades += 1
-
-            if not isinstance(trade, dict):
-                continue
-
-            try:
-                trade_time = int(trade["time"])
-                trade_price = float(trade["price"])
-                trade_qty = float(trade.get("quantity", 0.0))
-                remaining_qty = float(
-                    trade.get("remaining_qty", trade_qty)
-                )
-            except (KeyError, TypeError, ValueError):
-                continue
-
-            time_diff_ms = trade_time - reduction_time_int
-            if time_diff_ms < -300 or time_diff_ms > 1500:
-                continue
-
-            price_diff = trade_price - liquidity_price_float
-            if abs(price_diff) > max_price_distance or remaining_qty <= 0:
-                continue
-
-            nearby_trades.append({
-                "price": trade_price,
-                "price_key": round(trade_price, 12),
-                "price_diff": price_diff,
-                "abs_price_diff": abs(price_diff),
-                "quantity": trade_qty,
-                "remaining_qty": remaining_qty,
-                "time": trade_time,
-                "time_diff_ms": time_diff_ms,
-                "is_buyer_maker": trade.get("is_buyer_maker"),
-            })
-
-        nearby_trades.sort(
-            key=lambda item: (
-                item["abs_price_diff"],
-                abs(item["time_diff_ms"]),
-            )
+        # Nearby-price evidence never contributes to executed quantity.
+        # Sample this diagnostic-only scan at most once per 100 ms per symbol;
+        # unmatched reductions remain recorded, and exact-price matching above
+        # is unchanged. This avoids rescanning/sorting recent trades for every
+        # changed depth level during high-volume bursts.
+        diagnostic_clock_ms = time.monotonic_ns() // 1_000_000
+        last_nearby_scan_ms = state.get(
+            "_last_nearby_trade_diagnostic_monotonic_ms"
         )
+        collect_nearby_diagnostics = (
+            last_nearby_scan_ms is None
+            or diagnostic_clock_ms - last_nearby_scan_ms >= 100
+        )
+
+        if collect_nearby_diagnostics:
+            state["_last_nearby_trade_diagnostic_monotonic_ms"] = (
+                diagnostic_clock_ms
+            )
+            recent_trades = state.get("trade_history", ())
+            inspected_trades = 0
+
+            for trade in reversed(recent_trades):
+                if inspected_trades >= 20:
+                    break
+                inspected_trades += 1
+
+                if not isinstance(trade, dict):
+                    continue
+
+                try:
+                    trade_time = int(trade["time"])
+                    trade_price = float(trade["price"])
+                    trade_qty = float(trade.get("quantity", 0.0))
+                    remaining_qty = float(
+                        trade.get("remaining_qty", trade_qty)
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+                time_diff_ms = trade_time - reduction_time_int
+                if time_diff_ms < -300 or time_diff_ms > 1500:
+                    continue
+
+                price_diff = trade_price - liquidity_price_float
+                if abs(price_diff) > max_price_distance or remaining_qty <= 0:
+                    continue
+
+                nearby_trades.append({
+                    "price": trade_price,
+                    "price_key": round(trade_price, 12),
+                    "price_diff": price_diff,
+                    "abs_price_diff": abs(price_diff),
+                    "quantity": trade_qty,
+                    "remaining_qty": remaining_qty,
+                    "time": trade_time,
+                    "time_diff_ms": time_diff_ms,
+                    "is_buyer_maker": trade.get("is_buyer_maker"),
+                })
+
+            nearby_trades.sort(
+                key=lambda item: (
+                    item["abs_price_diff"],
+                    abs(item["time_diff_ms"]),
+                )
+            )
 
         state.setdefault(
             "match_diagnostics",
@@ -1900,19 +1912,17 @@ def apply_orderbook_event(symbol, event):
         )
     )
 
-    # Lifecycle metadata scans every live FIFO lot and runs under the
-    # collector's shared lock. A 20 ms cadence repeatedly walks thousands of
-    # lots across seven symbols and can starve depth/trade queues. This is
-    # evidence metadata only: every book update, FIFO reduction, and execution
-    # match is still processed on every event. Sample lifecycle approach data
-    # at 100 ms to bound this secondary scan's lock cost.
+    # Lifecycle metadata scans every live FIFO lot under the collector
+    # lock. Sample this secondary evidence scan at 250 ms to reduce repeated
+    # full-lot walks during rapid best-price movement. Actual depth, FIFO,
+    # trade matching, and pull finalization remain per-event.
     lifecycle_scan_clock_ms = time.monotonic_ns() // 1_000_000
     last_lifecycle_scan_ms = state.get(
         "_last_lifecycle_scan_monotonic_ms"
     )
     lifecycle_scan_due = (
         last_lifecycle_scan_ms is None
-        or lifecycle_scan_clock_ms - last_lifecycle_scan_ms >= 100
+        or lifecycle_scan_clock_ms - last_lifecycle_scan_ms >= 250
     )
 
     # ============================================================
