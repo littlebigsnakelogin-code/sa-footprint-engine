@@ -733,47 +733,106 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
     state["_last_finalize_sweep_monotonic_ms"] = sweep_clock_ms
     finalized_count = 0
 
-    for record in liquidity_history:
-        if not isinstance(record, dict) or record.get("finalized"):
-            continue
+    # Only reductions younger than the 1500 ms matching window need to be
+    # examined on the hot depth-event path. Scanning all 3000 history records
+    # every 250 ms held the shared collector lock for long periods.
+    pending_finalize = state.setdefault(
+        "_pending_finalize_records",
+        deque(),
+    )
 
-        try:
-            reduced_qty = float(record.get("reduced_qty", 0.0))
-            if reduced_qty <= 0.0:
+    if has_event_time:
+        # New reductions are appended in apply_orderbook_event() order.
+        # Keep not-yet-expired records queued; finalize eligible ones in place.
+        retained_pending = deque()
+        while pending_finalize:
+            record = pending_finalize.popleft()
+            if not isinstance(record, dict) or record.get("finalized"):
                 continue
-            record_time = int(record.get("time", current_time_ms))
-            if current_time_ms - record_time < 1500:
+
+            try:
+                reduced_qty = float(record.get("reduced_qty", 0.0))
+                if reduced_qty <= 0.0:
+                    continue
+                record_time = int(record.get("time", current_time_ms))
+                if current_time_ms - record_time < 1500:
+                    retained_pending.append(record)
+                    continue
+                executed_qty = float(record.get("executed_qty", 0.0))
+            except (TypeError, ValueError, OverflowError):
                 continue
-            executed_qty = float(record.get("executed_qty", 0.0))
-        except (TypeError, ValueError, OverflowError):
-            continue
 
-        executed_qty = max(0.0, min(reduced_qty, executed_qty))
-        unmatched_qty = reduced_qty - executed_qty
-        epsilon = max(reduced_qty, executed_qty) * 1e-12
+            executed_qty = max(0.0, min(reduced_qty, executed_qty))
+            unmatched_qty = reduced_qty - executed_qty
+            epsilon = max(reduced_qty, executed_qty) * 1e-12
 
-        if abs(unmatched_qty) <= epsilon:
-            executed_qty = reduced_qty
-            unmatched_qty = 0.0
-        else:
-            unmatched_qty = max(0.0, unmatched_qty)
+            if abs(unmatched_qty) <= epsilon:
+                executed_qty = reduced_qty
+                unmatched_qty = 0.0
+            else:
+                unmatched_qty = max(0.0, unmatched_qty)
 
-        pulled_qty = unmatched_qty
-        record["executed_qty"] = executed_qty
-        record["unmatched_qty"] = unmatched_qty
-        record["pulled_qty"] = pulled_qty
-        record["pull_pct"] = (pulled_qty / reduced_qty) * 100.0
-        record["finalized"] = True
+            pulled_qty = unmatched_qty
+            record["executed_qty"] = executed_qty
+            record["unmatched_qty"] = unmatched_qty
+            record["pulled_qty"] = pulled_qty
+            record["pull_pct"] = (pulled_qty / reduced_qty) * 100.0
+            record["finalized"] = True
 
-        if executed_qty > 0.0 and pulled_qty > 0.0:
-            record["status"] = "PARTIAL_EXECUTION_PULL"
-        elif executed_qty > 0.0:
-            record["status"] = "EXECUTED"
-        elif pulled_qty > 0.0:
-            record["status"] = "LIQUIDITY_PULLED"
-        else:
-            record["status"] = "REDUCTION_ZERO"
-        finalized_count += 1
+            if executed_qty > 0.0 and pulled_qty > 0.0:
+                record["status"] = "PARTIAL_EXECUTION_PULL"
+            elif executed_qty > 0.0:
+                record["status"] = "EXECUTED"
+            elif pulled_qty > 0.0:
+                record["status"] = "LIQUIDITY_PULLED"
+            else:
+                record["status"] = "REDUCTION_ZERO"
+            finalized_count += 1
+
+        pending_finalize.extend(retained_pending)
+    else:
+        # Explicit debug/manual calls retain full-history recovery semantics.
+        for record in liquidity_history:
+            if not isinstance(record, dict) or record.get("finalized"):
+                continue
+
+            try:
+                reduced_qty = float(record.get("reduced_qty", 0.0))
+                if reduced_qty <= 0.0:
+                    continue
+                record_time = int(record.get("time", current_time_ms))
+                if current_time_ms - record_time < 1500:
+                    continue
+                executed_qty = float(record.get("executed_qty", 0.0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+            executed_qty = max(0.0, min(reduced_qty, executed_qty))
+            unmatched_qty = reduced_qty - executed_qty
+            epsilon = max(reduced_qty, executed_qty) * 1e-12
+
+            if abs(unmatched_qty) <= epsilon:
+                executed_qty = reduced_qty
+                unmatched_qty = 0.0
+            else:
+                unmatched_qty = max(0.0, unmatched_qty)
+
+            pulled_qty = unmatched_qty
+            record["executed_qty"] = executed_qty
+            record["unmatched_qty"] = unmatched_qty
+            record["pulled_qty"] = pulled_qty
+            record["pull_pct"] = (pulled_qty / reduced_qty) * 100.0
+            record["finalized"] = True
+
+            if executed_qty > 0.0 and pulled_qty > 0.0:
+                record["status"] = "PARTIAL_EXECUTION_PULL"
+            elif executed_qty > 0.0:
+                record["status"] = "EXECUTED"
+            elif pulled_qty > 0.0:
+                record["status"] = "LIQUIDITY_PULLED"
+            else:
+                record["status"] = "REDUCTION_ZERO"
+            finalized_count += 1
 
     # Index cleanup is less frequent than accounting finalization. Matcher
     # still checks record finalization and the original time-window rules.
@@ -3287,6 +3346,14 @@ def apply_orderbook_event(symbol, event):
                 ].append(
                     liquidity_record
                 )
+
+                # Track only live reductions for the 1500 ms finalization
+                # window; additions do not need finalization work.
+                if reduced_qty > 0.0:
+                    state.setdefault(
+                        "_pending_finalize_records",
+                        deque(),
+                    ).append(liquidity_record)
 
                 # =================================================
                 # INDEX NEW LIQUIDITY MOVEMENT
