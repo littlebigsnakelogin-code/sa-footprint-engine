@@ -31,7 +31,7 @@ last_turso_cleanup = 0
 app = Flask(__name__)
 
 # ============================================================
-# CONFIG
+# CONFIG (4 OPTIMIZED HIGH-LIQUIDITY SYMBOLS FOR RENDER FREE TIER)
 # ============================================================
 
 SYMBOLS = [
@@ -39,9 +39,6 @@ SYMBOLS = [
     "ETHUSDT",
     "SOLUSDT",
     "XRPUSDT",
-    "AVAXUSDT",
-    "LINKUSDT",
-    "LTCUSDT",
 ]
 
 TIMEFRAMES = {
@@ -62,9 +59,6 @@ PRICE_STEP = {
     "ETHUSDT": 0.1,
     "SOLUSDT": 0.01,
     "XRPUSDT": 0.0001,
-    "AVAXUSDT": 0.01,
-    "LINKUSDT": 0.001,
-    "LTCUSDT": 0.01,
 }
 
 # ============================================================
@@ -113,7 +107,7 @@ orderbook = {
         "initialized": False,
         "resyncing": False,
         "_init_worker_active": False,
-        "buffer": deque(maxlen=2500),
+        "buffer": deque(maxlen=4000), # Increased buffer to hold data during disconnect/reconnect
         "liquidity_history": deque(maxlen=1500),
         "liquidity_lots": {
             "bid": defaultdict(deque),
@@ -222,7 +216,7 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
     level["delta"] = level["buy"] - level["sell"]
 
 # ============================================================
-# BINANCE FUTURES SNAPSHOT (WS API TO BYPASS HTTP 451)
+# BINANCE FUTURES SNAPSHOT (WS API)
 # ============================================================
 
 ORDERBOOK_SNAPSHOT_LIMIT = 1000
@@ -230,7 +224,6 @@ ORDERBOOK_SNAPSHOT_LIMIT = 1000
 def fetch_orderbook_snapshot_ws(symbol):
     SNAPSHOT_DEADLINE = 20
     SOCKET_TIMEOUT = 6
-
     ws = None
     started_at = time.time()
 
@@ -271,7 +264,6 @@ def fetch_orderbook_snapshot_ws(symbol):
                 continue
 
             if response.get("status") != 200:
-                print(f"[SNAPSHOT] API ERROR {symbol}: {response}")
                 return None
 
             result = response.get("result")
@@ -281,16 +273,10 @@ def fetch_orderbook_snapshot_ws(symbol):
                 and isinstance(result.get("bids"), list)
                 and isinstance(result.get("asks"), list)
             ):
-                print(
-                    f"[SNAPSHOT] OK {symbol} lastUpdateId={result['lastUpdateId']} "
-                    f"({time.time() - started_at:.2f}s)"
-                )
                 return result
             return None
-
         return None
-    except Exception as e:
-        print(f"[SNAPSHOT] ERROR {symbol}: {e}")
+    except Exception:
         return None
     finally:
         if ws is not None:
@@ -357,7 +343,6 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
 
         finalized_count += 1
 
-    # Clean Liquidity Match Index
     liquidity_index = state.get("liquidity_match_index")
     if isinstance(liquidity_index, dict):
         history_ids = {id(r) for r in liquidity_history if isinstance(r, dict)}
@@ -371,7 +356,6 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
             else:
                 liquidity_index.pop(key, None)
 
-    # Clean Trade Match Index
     trade_index = state.get("trade_match_index")
     if isinstance(trade_index, dict):
         trade_cutoff = current_time_ms - 300 if has_event_time else None
@@ -415,30 +399,6 @@ def record_trade_for_execution_matching(symbol, price, quantity, trade_time, is_
     liquidity_match_index = state["liquidity_match_index"]
     same_price_key = (expected_side, price_key)
 
-    pending_liquidity = list(liquidity_match_index.get(same_price_key, ()))
-    state["trade_flow_diagnostics"].append({
-        "event": "TRADE_ARRIVAL",
-        "time": trade_time,
-        "symbol": symbol,
-        "price": price,
-        "quantity": quantity,
-        "is_buyer_maker": is_buyer_maker,
-        "expected_side": expected_side,
-        "pending_liquidity_key_count_before": len(pending_liquidity),
-        "pending_same_price_liquidity": [
-            {
-                "price": r.get("price"),
-                "time": r.get("time"),
-                "reduced_qty": r.get("reduced_qty"),
-                "executed_qty": r.get("executed_qty"),
-                "finalized": r.get("finalized"),
-                "status": r.get("status"),
-            }
-            for r in pending_liquidity[-3:]
-            if isinstance(r, dict) and not r.get("finalized")
-        ],
-    })
-
     trade_record = {
         "time": trade_time,
         "price": price,
@@ -448,7 +408,6 @@ def record_trade_for_execution_matching(symbol, price, quantity, trade_time, is_
     }
 
     trade_match_index[same_price_key].append(trade_record)
-
     matching_records = liquidity_match_index.get(same_price_key, ())
     matched_total = 0.0
     epsilon = 1e-12
@@ -549,15 +508,6 @@ def match_trade_to_liquidity_reduction(symbol, liquidity_side, liquidity_price, 
     matched_qty = 0.0
 
     if not trades_at_price:
-        state["match_diagnostics"].append({
-            "symbol": symbol,
-            "side": liquidity_side,
-            "price": str(liquidity_price),
-            "price_key": price_key,
-            "reduced_qty": reduced_qty_float,
-            "reduction_time": reduction_time_int,
-            "reason": "NO_TRADES_AT_PRICE",
-        })
         return 0.0
 
     for trade in trades_at_price:
@@ -582,22 +532,10 @@ def match_trade_to_liquidity_reduction(symbol, liquidity_side, liquidity_price, 
         trade["remaining_qty"] = max(0.0, trade_remaining - qty_to_match)
         matched_qty += qty_to_match
 
-    if matched_qty > 0:
-        state["match_diagnostics"].append({
-            "symbol": symbol,
-            "side": liquidity_side,
-            "price": str(liquidity_price),
-            "price_key": price_key,
-            "reduced_qty": reduced_qty_float,
-            "matched_qty": matched_qty,
-            "reduction_time": reduction_time_int,
-            "reason": "MATCH_SUCCESS",
-        })
-
     return matched_qty
 
 # ============================================================
-# FAST O(1) ORDERBOOK EVENT APPLICATION
+# ORDERBOOK EVENT APPLICATION
 # ============================================================
 
 def apply_orderbook_event(symbol, event):
@@ -728,7 +666,7 @@ def apply_orderbook_event(symbol, event):
     state["last_depth_event_time"] = now_ms()
 
 # ============================================================
-# ORDERBOOK INITIALIZATION & DEPTH HANDLER
+# ORDERBOOK INITIALIZATION & BUFFER AUTO-CATCHUP
 # ============================================================
 
 def initialize_orderbook(symbol):
@@ -875,7 +813,6 @@ def initialize_orderbook(symbol):
                             state["resyncing"] = False
                             state["sequence_errors"] = 0
 
-                            print(f"[ORDERBOOK] SYNCED {symbol} mode={bridge_mode} updateId={previous_u}")
                             return True
 
                     if sequence_error is not None:
@@ -1023,7 +960,7 @@ def finalize_candle(candle):
     return result
 
 # ============================================================
-# TURSO PERSISTENCE
+# TURSO PERSISTENCE (STRICT 48-HOUR RETENTION)
 # ============================================================
 
 def save_candle_to_turso(candle):
@@ -1060,7 +997,8 @@ def _turso_worker_loop():
             if turso_client is None:
                 turso_client = create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
             if job.get("cleanup"):
-                cutoff = int(time.time() * 1000) - (3 * 24 * 60 * 60 * 1000)
+                # 48 Hours cutoff window (2 days)
+                cutoff = int(time.time() * 1000) - (48 * 60 * 60 * 1000)
                 turso_client.execute("DELETE FROM candles WHERE time < ?", (cutoff,))
             else:
                 turso_client.execute(job["sql"], job["args"])
@@ -1190,7 +1128,7 @@ def handle_message(ws, message):
             collector_state["error"] = str(exc)
 
 # ============================================================
-# LIGHTWEIGHT 2-STREAM MULTIPLEXED COLLECTOR
+# LIGHTWEIGHT MULTIPLEXED COLLECTOR
 # ============================================================
 
 def collector_loop():
@@ -1199,6 +1137,7 @@ def collector_loop():
 
     trade_url = f"wss://fstream.binance.com/market/stream?streams={'/'.join(trade_streams)}"
     depth_url = f"wss://fstream.binance.com/public/stream?streams={'/'.join(depth_streams)}"
+
     with lock:
         collector_state["status"] = "connecting"
         collector_state["started_at"] = now_ms()
@@ -1233,7 +1172,6 @@ def collector_loop():
                     collector_state[err_key] = None
                     collector_state["error"] = None
                     update_status()
-                print(f"[COLLECTOR] {role.upper()} STREAM CONNECTED")
 
             def on_message(ws, message):
                 handle_message(ws, message)
@@ -1242,10 +1180,9 @@ def collector_loop():
                 with lock:
                     collector_state[err_key] = str(error)
                     collector_state["error"] = str(error)
-                print(f"[COLLECTOR] {role.upper()} ERROR: {error}")
 
             def on_close(ws, code, msg):
-                print(f"[COLLECTOR] {role.upper()} CLOSED: code={code} msg={msg}")
+                pass
 
             try:
                 ws = websocket.WebSocketApp(
@@ -1317,7 +1254,7 @@ def home():
         "status": "ok",
         "service": "SA Footprint Engine",
         "version": "V3",
-        "message": "Trade + Footprint + Turso engine running",
+        "message": "Trade + Footprint + Turso engine running (4-Symbol Optimized)",
     })
 
 
@@ -1560,63 +1497,141 @@ def api_scan():
     ask_clusters = defaultdict(float)
 
     with lock:
-        for p, q in orderbook[symbol]["bids"].items():
+        finalize_liquidity_records(symbol)
+        state = orderbook[symbol]
+
+        for p, q in state["bids"].items():
             bid_clusters[round_price_to_step(float(p), step)] += q
-        for p, q in orderbook[symbol]["asks"].items():
+        for p, q in state["asks"].items():
             ask_clusters[round_price_to_step(float(p), step)] += q
 
-        current_candle = current_candles[symbol]["1m"]
-        footprint_data = current_candle["footprint"] if current_candle else {}
+        current_1m = current_candles[symbol]["1m"]
+        prev_1m_list = candles[symbol]["1m"]
+        prev_1m = prev_1m_list[-1] if prev_1m_list else None
 
-    HEAVY_ORDER = 5.0
-    MIN_EXECUTION = 1.0
+        footprint_data = current_1m["footprint"] if current_1m else {}
 
-    bids_out = []
-    for p, q in sorted(bid_clusters.items(), reverse=True)[:20]:
-        executed = footprint_data.get(str(p), {}).get("volume", 0.0)
-        delta = footprint_data.get(str(p), {}).get("delta", 0.0)
-        prev_q = previous_cluster_state[symbol]["bids"].get(p, 0.0)
+        # Recent finalized pulls/executions in last 30 seconds for this symbol
+        now_ts = now_ms()
+        recent_Cutoff = now_ts - 30000
+        bucket_pulled = {"bid": defaultdict(float), "ask": defaultdict(float)}
+        bucket_executed = {"bid": defaultdict(float), "ask": defaultdict(float)}
 
-        status = "NORMAL"
-        if prev_q >= HEAVY_ORDER and q < (prev_q * 0.2) and executed < MIN_EXECUTION:
-            status = "LIQUIDITY PULLED (TRAP)"
-        elif executed >= HEAVY_ORDER:
-            status = "ABSORPTION"
+        for rec in state["liquidity_history"]:
+            if not isinstance(rec, dict) or int(rec.get("time", 0)) < recent_Cutoff:
+                continue
+            r_side = rec.get("side")
+            if r_side not in ("bid", "ask"):
+                continue
+            b_price = round_price_to_step(float(rec.get("price", 0.0)), step)
+            bucket_pulled[r_side][b_price] += float(rec.get("pulled_qty", 0.0))
+            bucket_executed[r_side][b_price] += float(rec.get("executed_qty", 0.0))
 
-        bids_out.append({
-            "price_zone": p,
-            "resting_liquidity": round(q, 3),
-            "executed_volume": round(executed, 3),
-            "delta": round(delta, 3),
-            "status": status,
-        })
-        previous_cluster_state[symbol]["bids"][p] = q
+    # =================================================================
+    # ZERO-LOAD DYNAMIC ORDERFLOW THRESHOLD CALCULATION
+    # =================================================================
+    curr_vol = float(current_1m["volume"]) if current_1m else 0.0
+    prev_vol = float(prev_1m["volume"]) if prev_1m else curr_vol
 
-    asks_out = []
-    for p, q in sorted(ask_clusters.items())[:20]:
-        executed = footprint_data.get(str(p), {}).get("volume", 0.0)
-        delta = footprint_data.get(str(p), {}).get("delta", 0.0)
-        prev_q = previous_cluster_state[symbol]["asks"].get(p, 0.0)
+    # Time-weighted rolling 60s orderflow
+    elapsed_sec = max(1.0, ((now_ms() - current_1m["start"]) / 1000.0)) if current_1m else 1.0
+    weight_curr = min(1.0, elapsed_sec / 60.0)
+    rolling_1m_orderflow = (curr_vol * weight_curr) + (prev_vol * (1.0 - weight_curr))
 
-        status = "NORMAL"
-        if prev_q >= HEAVY_ORDER and q < (prev_q * 0.2) and executed < MIN_EXECUTION:
-            status = "LIQUIDITY PULLED (TRAP)"
-        elif executed >= HEAVY_ORDER:
-            status = "ABSORPTION"
+    top_bids = sorted(bid_clusters.items(), reverse=True)[:20]
+    top_asks = sorted(ask_clusters.items())[:20]
 
-        asks_out.append({
-            "price_zone": p,
-            "resting_liquidity": round(q, 3),
-            "executed_volume": round(executed, 3),
-            "delta": round(delta, 3),
-            "status": status,
-        })
-        previous_cluster_state[symbol]["asks"][p] = q
+    visible_bid_depth = sum(q for _, q in top_bids)
+    visible_ask_depth = sum(q for _, q in top_asks)
+    avg_visible_depth = max(1e-6, (visible_bid_depth + visible_ask_depth) / 2.0)
+
+    # Dynamic Heavy Threshold = 15% of Rolling 1m Orderflow OR 8% of Visible 20-Level Book Depth
+    dynamic_heavy_threshold = max(
+        rolling_1m_orderflow * 0.15,
+        avg_visible_depth * 0.08,
+        1e-4
+    )
+    dynamic_min_execution = dynamic_heavy_threshold * 0.20
+
+    def analyze_side(clusters_sorted, side_key):
+        out = []
+        cluster_pulls = []
+
+        for p, q in clusters_sorted:
+            fp_level = footprint_data.get(str(p), {})
+            candle_exec = float(fp_level.get("volume", 0.0))
+            delta = float(fp_level.get("delta", 0.0))
+
+            recent_pull = bucket_pulled[side_key].get(p, 0.0)
+            recent_exec = max(candle_exec, bucket_executed[side_key].get(p, 0.0))
+            prev_q = previous_cluster_state[symbol][side_key + "s"].get(p, 0.0)
+
+            # Calculate % relative to current dynamic orderflow
+            flow_pct = round((max(q, recent_pull, recent_exec) / max(rolling_1m_orderflow, 1e-6)) * 100.0, 1)
+
+            status = "NORMAL"
+            # 1. Heavy Absorption: High execution >= dynamic threshold AND resting liquidity still holds (>= 30% of heavy)
+            if recent_exec >= dynamic_heavy_threshold and q >= (dynamic_heavy_threshold * 0.30):
+                status = "HEAVY ABSORPTION"
+            # 2. Liquidity Pull (Spoof-like Evidence): Heavy order pulled with < 20% execution
+            elif (
+                (recent_pull >= dynamic_heavy_threshold and recent_exec < dynamic_min_execution)
+                or (prev_q >= dynamic_heavy_threshold and q < (prev_q * 0.25) and recent_exec < dynamic_min_execution)
+            ):
+                status = "LIQUIDITY PULLED (TRAP)"
+                cluster_pulls.append((p, max(recent_pull, prev_q - q), recent_exec))
+            # 3. Heavy Resting Wall
+            elif q >= dynamic_heavy_threshold:
+                status = "HEAVY RESTING WALL"
+
+            out.append({
+                "price_zone": p,
+                "resting_liquidity": round(q, 4),
+                "executed_volume": round(recent_exec, 4),
+                "pulled_volume_30s": round(recent_pull, 4),
+                "delta": round(delta, 4),
+                "orderflow_pct": flow_pct,
+                "status": status,
+            })
+            previous_cluster_state[symbol][side_key + "s"][p] = q
+
+        # Multi-level Cluster Pull Detection (Nearby zones pulling together)
+        cluster_alert = None
+        if len(cluster_pulls) >= 2:
+            prices = [x[0] for x in cluster_pulls]
+            total_pulled = sum(x[1] for x in cluster_pulls)
+            total_exec = sum(x[2] for x in cluster_pulls)
+            total_reduced = total_pulled + total_exec
+            pull_pct = round((total_pulled / total_reduced) * 100.0, 1) if total_reduced > 0 else 100.0
+
+            cluster_alert = {
+                "type": "Liquidity Pull / Spoof-like Evidence",
+                "zone": f"{min(prices)} -> {max(prices)}",
+                "levels_affected": len(prices),
+                "pulled_quantity": round(total_pulled, 4),
+                "pull_percentage": f"{pull_pct}%",
+                "aggressive_execution": round(total_exec, 4),
+                "pattern": "Multi-level progressive withdrawal",
+            }
+
+        return out, cluster_alert
+
+    bids_out, bid_cluster_alert = analyze_side(top_bids, "bid")
+    asks_out, ask_cluster_alert = analyze_side(top_asks, "ask")
 
     return jsonify({
         "status": "ok",
         "symbol": symbol,
         "cluster_size": step,
+        "dynamic_metrics": {
+            "rolling_1m_orderflow": round(rolling_1m_orderflow, 4),
+            "avg_visible_book_depth": round(avg_visible_depth, 4),
+            "dynamic_heavy_threshold": round(dynamic_heavy_threshold, 4),
+        },
+        "cluster_pull_evidence": {
+            "bid_side": bid_cluster_alert,
+            "ask_side": ask_cluster_alert,
+        },
         "bids_zone": bids_out,
         "asks_zone": asks_out,
     })
