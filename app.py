@@ -41,9 +41,11 @@ app = Flask(__name__)
 # CONFIG
 # ============================================================
 
-# Minimal-load testing mode: collect SOLUSDT only.
+# CPU scaling test: collect SOLUSDT, BTCUSDT, and ETHUSDT.
 SYMBOLS = [
     "SOLUSDT",
+    "BTCUSDT",
+    "ETHUSDT",
 ]
 
 
