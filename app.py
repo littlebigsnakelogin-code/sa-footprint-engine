@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from itertools import islice
 import requests
 import websocket
@@ -88,6 +89,59 @@ PRICE_STEP = {
 
 lock = threading.RLock()
 collector_start_lock = threading.Lock()
+
+# Instrument only hot-path lock sections so logs separate lock contention
+# from actual processing time. The measured context preserves RLock semantics.
+_lock_perf_guard = threading.Lock()
+_lock_perf = {}
+
+
+@contextmanager
+def measured_lock(label, symbol=None):
+    wait_started = time.perf_counter()
+    lock.acquire()
+    acquired_at = time.perf_counter()
+    try:
+        yield
+    finally:
+        released_at = time.perf_counter()
+        lock.release()
+
+        key = (label, symbol or "ALL")
+        wait_ms = (acquired_at - wait_started) * 1000.0
+        hold_ms = (released_at - acquired_at) * 1000.0
+
+        with _lock_perf_guard:
+            stats = _lock_perf.setdefault(key, {
+                "count": 0,
+                "wait_total_ms": 0.0,
+                "wait_max_ms": 0.0,
+                "hold_total_ms": 0.0,
+                "hold_max_ms": 0.0,
+            })
+            stats["count"] += 1
+            stats["wait_total_ms"] += wait_ms
+            stats["wait_max_ms"] = max(stats["wait_max_ms"], wait_ms)
+            stats["hold_total_ms"] += hold_ms
+            stats["hold_max_ms"] = max(stats["hold_max_ms"], hold_ms)
+
+            if stats["count"] >= 100:
+                count = stats["count"]
+                print(
+                    f"[LOCK PERF] section={label} symbol={symbol or 'ALL'} "
+                    f"n={count} "
+                    f"wait_avg_ms={stats['wait_total_ms'] / count:.2f} "
+                    f"wait_max_ms={stats['wait_max_ms']:.2f} "
+                    f"hold_avg_ms={stats['hold_total_ms'] / count:.2f} "
+                    f"hold_max_ms={stats['hold_max_ms']:.2f}"
+                )
+                stats.update({
+                    "count": 0,
+                    "wait_total_ms": 0.0,
+                    "wait_max_ms": 0.0,
+                    "hold_total_ms": 0.0,
+                    "hold_max_ms": 0.0,
+                })
 
 # Binance Futures snapshot requests ko ek-ek karke execute karenge.
 # Isse startup par 7 simultaneous WS-FAPI connections ke
@@ -3771,7 +3825,7 @@ def handle_depth_update(symbol, event):
     start_initializer = False
     reason = None
 
-    with lock:
+    with measured_lock("depth_apply", symbol):
         state = orderbook[symbol]
 
         # Count events that actually reach this handler.
@@ -4342,7 +4396,7 @@ def process_trade(
     # ----------------------------------------------------
     # handle_depth_update() bhi isi RLock ka use karta hai.
     # Matching state ko concurrent modification se bachao.
-    with lock:
+    with measured_lock("trade_match", symbol):
         record_trade_for_execution_matching(
             symbol,
             price,
@@ -4354,7 +4408,7 @@ def process_trade(
     # ----------------------------------------------------
     # CANDLE PROCESSING
     # ----------------------------------------------------
-    with lock:
+    with measured_lock("trade_candles", symbol):
 
         for timeframe, seconds in TIMEFRAMES.items():
 
