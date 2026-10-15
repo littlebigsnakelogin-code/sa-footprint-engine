@@ -2353,14 +2353,6 @@ def apply_orderbook_event(symbol, event):
                         # entries are older than every lifecycle flow window.
                         break
 
-                    eligible_windows = [
-                        window_ms
-                        for window_ms in window_sizes
-                        if age_ms <= window_ms
-                    ]
-                    if not eligible_windows:
-                        continue
-
                     try:
                         qty = float(
                             trade.get("qty", trade.get("quantity", 0.0))
@@ -2380,7 +2372,10 @@ def apply_orderbook_event(symbol, event):
                     except (TypeError, ValueError, OverflowError):
                         price = None
 
-                    for window_ms in eligible_windows:
+                    for window_ms in window_sizes:
+                        if age_ms > window_ms:
+                            continue
+
                         window = cached_windows[window_ms]
                         if is_buyer_maker is False:
                             window["buy_qty"] += qty
@@ -2404,7 +2399,6 @@ def apply_orderbook_event(symbol, event):
                             window["observed_high"] = (
                                 price if current_high is None
                                 else max(current_high, price)
-                            )
 
                 market_flow_window_cache = cached_windows
 
