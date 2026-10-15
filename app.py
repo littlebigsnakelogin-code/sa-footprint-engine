@@ -2569,6 +2569,17 @@ def apply_orderbook_event(symbol, event):
                 )
             )
 
+            # Binance depth events can repeat unchanged levels. Check this
+            # before computing quantity deltas, since unchanged levels are
+            # common and require no book/FIFO/lifecycle transition.
+            # A zero level still follows cleanup when an old FIFO entry exists.
+            if old_quantity == new_quantity:
+                if new_quantity > 0.0:
+                    continue
+                existing_side_lots = state["liquidity_lots"].get(side, {})
+                if price not in existing_side_lots:
+                    continue
+
             added_qty = max(
                 new_quantity
                 - old_quantity,
@@ -2580,18 +2591,6 @@ def apply_orderbook_event(symbol, event):
                 - new_quantity,
                 0.0
             )
-
-            # Binance depth events can repeat unchanged nonzero levels.
-            # They have no book, FIFO, lifecycle, or liquidity-record
-            # transition to account for, so skip their downstream work.
-            # Keep zero-quantity levels on the normal path to preserve
-            # empty FIFO price-level cleanup.
-            if old_quantity == new_quantity:
-                if new_quantity > 0.0:
-                    continue
-                existing_side_lots = state["liquidity_lots"].get(side, {})
-                if price not in existing_side_lots:
-                    continue
 
             # ====================================================
             # REDUCTION CONTEXT
