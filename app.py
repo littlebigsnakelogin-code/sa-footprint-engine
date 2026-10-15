@@ -2399,6 +2399,7 @@ def apply_orderbook_event(symbol, event):
                             window["observed_high"] = (
                                 price if current_high is None
                                 else max(current_high, price)
+                            )
 
                 market_flow_window_cache = cached_windows
 
