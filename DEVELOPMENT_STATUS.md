@@ -10,7 +10,7 @@ Last updated: 2026-10-15
 - Symbols: BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, AVAXUSDT, LINKUSDT, LTCUSDT.
 - Last user-confirmed deployed SHA in conversation: 2ffd3ceb568255449f9a6d37ed179092497889bd.
 - Current GitHub main SHA checked on 2026-10-15: ccf7d49e12276108260cbd2ba437e78ea005ae8d.
-- These SHAs differ; reconcile the deployed commit and GitHub branch before merging/deploying any PR.
+- GitHub main is exactly 2 commits ahead of the last user-confirmed deployed SHA and 0 commits behind it (GitHub compare verified on 2026-10-15). The optimization PR is based on current main.
 
 ## Current optimization PR
 - Branch: perf/market-flow-single-pass-main
