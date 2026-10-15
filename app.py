@@ -2626,6 +2626,8 @@ def apply_orderbook_event(symbol, event):
                 book[price] = new_quantity
 
             if cache_was_valid:
+                top_of_book_changed = False
+
                 if side == "bid":
                     cached_best = market_cache["best_bid"]
 
@@ -2644,6 +2646,7 @@ def apply_orderbook_event(symbol, event):
                         )
                     ):
                         market_cache["best_bid"] = price_float
+                        top_of_book_changed = True
 
                 else:
                     cached_best = market_cache["best_ask"]
@@ -2663,8 +2666,14 @@ def apply_orderbook_event(symbol, event):
                         )
                     ):
                         market_cache["best_ask"] = price_float
+                        top_of_book_changed = True
 
-                if market_cache["valid"]:
+                # Recalculate the midpoint only when a best price actually
+                # changes. Most depth updates affect non-best levels, so
+                # repeatedly rebuilding the same market reference is wasted
+                # work. If a best level is removed, the existing invalidation
+                # path rescans and rebuilds the cache when next requested.
+                if market_cache["valid"] and top_of_book_changed:
                     cached_bid = market_cache["best_bid"]
                     cached_ask = market_cache["best_ask"]
 
