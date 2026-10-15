@@ -1448,8 +1448,11 @@ def match_trade_to_liquidity_reduction(
         recent_trades = state.get("trade_history", ())
         inspected_trades = 0
 
+        # This is diagnostic-only: exact-price execution matching is handled
+        # above and must not be affected by this nearby-price sample. Keep the
+        # sample small because this path runs for every unmatched reduction.
         for trade in reversed(recent_trades):
-            if inspected_trades >= 100:
+            if inspected_trades >= 20:
                 break
             inspected_trades += 1
 
