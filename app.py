@@ -1203,58 +1203,44 @@ def match_trade_to_liquidity_reduction(
         except (KeyError, TypeError, ValueError):
             max_price_distance = 0.0
 
-        for key, indexed_trades in trade_index.items():
-            if not isinstance(key, tuple) or len(key) != 2:
-                continue
+        # Nearby-price matching is diagnostic-only. Inspect a bounded
+        # window of recent trades instead of scanning every indexed price
+        # key for every depth reduction (the common hot-path case).
+        recent_trades = state.get("trade_history", ())
 
-            indexed_side, indexed_price_key = key
-
-            if indexed_side != expected_side:
+        for trade in reversed(recent_trades):
+            if not isinstance(trade, dict):
                 continue
 
             try:
-                indexed_price = float(indexed_price_key)
-            except (TypeError, ValueError):
+                trade_time = int(trade["time"])
+                trade_price = float(trade["price"])
+                trade_qty = float(trade.get("quantity", 0.0))
+                remaining_qty = float(
+                    trade.get("remaining_qty", trade_qty)
+                )
+            except (KeyError, TypeError, ValueError):
                 continue
 
-            price_diff = indexed_price - liquidity_price_float
-
-            if abs(price_diff) > max_price_distance:
+            time_diff_ms = trade_time - reduction_time_int
+            if time_diff_ms < -300 or time_diff_ms > 1500:
                 continue
 
-            for trade in indexed_trades:
-                if not isinstance(trade, dict):
-                    continue
+            price_diff = trade_price - liquidity_price_float
+            if abs(price_diff) > max_price_distance or remaining_qty <= 0:
+                continue
 
-                try:
-                    trade_time = int(trade["time"])
-                    trade_price = float(trade["price"])
-                    trade_qty = float(trade.get("quantity", 0.0))
-                    remaining_qty = float(
-                        trade.get("remaining_qty", trade_qty)
-                    )
-                except (KeyError, TypeError, ValueError):
-                    continue
-
-                time_diff_ms = trade_time - reduction_time_int
-
-                if time_diff_ms < -300 or time_diff_ms > 1500:
-                    continue
-
-                if remaining_qty <= 0:
-                    continue
-
-                nearby_trades.append({
-                    "price": trade_price,
-                    "price_key": round(trade_price, 12),
-                    "price_diff": price_diff,
-                    "abs_price_diff": abs(price_diff),
-                    "quantity": trade_qty,
-                    "remaining_qty": remaining_qty,
-                    "time": trade_time,
-                    "time_diff_ms": time_diff_ms,
-                    "is_buyer_maker": trade.get("is_buyer_maker"),
-                })
+            nearby_trades.append({
+                "price": trade_price,
+                "price_key": round(trade_price, 12),
+                "price_diff": price_diff,
+                "abs_price_diff": abs(price_diff),
+                "quantity": trade_qty,
+                "remaining_qty": remaining_qty,
+                "time": trade_time,
+                "time_diff_ms": time_diff_ms,
+                "is_buyer_maker": trade.get("is_buyer_maker"),
+            })
 
         nearby_trades.sort(
             key=lambda item: (
@@ -2611,18 +2597,70 @@ def apply_orderbook_event(symbol, event):
             # UPDATE LIVE ORDERBOOK
             # ====================================================
 
+            # Keep the event-local top-of-book cache valid when a
+            # non-best level changes. Previously every changed price level
+            # invalidated it, so each added level rescanned the entire book.
+            cache_was_valid = market_cache["valid"]
+            price_float = float(price)
+
             if new_quantity == 0.0:
-
-                book.pop(
-                    price,
-                    None
-                )
-
+                book.pop(price, None)
             else:
-
                 book[price] = new_quantity
 
-            market_cache["valid"] = False
+            if cache_was_valid:
+                if side == "bid":
+                    cached_best = market_cache["best_bid"]
+
+                    if (
+                        new_quantity == 0.0
+                        and cached_best is not None
+                        and price_float == cached_best
+                    ):
+                        # The best bid was removed; rescan once when needed.
+                        market_cache["valid"] = False
+                    elif (
+                        new_quantity > 0.0
+                        and (
+                            cached_best is None
+                            or price_float > cached_best
+                        )
+                    ):
+                        market_cache["best_bid"] = price_float
+
+                else:
+                    cached_best = market_cache["best_ask"]
+
+                    if (
+                        new_quantity == 0.0
+                        and cached_best is not None
+                        and price_float == cached_best
+                    ):
+                        # The best ask was removed; rescan once when needed.
+                        market_cache["valid"] = False
+                    elif (
+                        new_quantity > 0.0
+                        and (
+                            cached_best is None
+                            or price_float < cached_best
+                        )
+                    ):
+                        market_cache["best_ask"] = price_float
+
+                if market_cache["valid"]:
+                    cached_bid = market_cache["best_bid"]
+                    cached_ask = market_cache["best_ask"]
+
+                    if cached_bid is not None and cached_ask is not None:
+                        market_cache["market_reference"] = (
+                            cached_bid + cached_ask
+                        ) / 2.0
+                    elif cached_bid is not None:
+                        market_cache["market_reference"] = cached_bid
+                    elif cached_ask is not None:
+                        market_cache["market_reference"] = cached_ask
+                    else:
+                        market_cache["market_reference"] = None
 
             # ====================================================
             # FIFO LIQUIDITY LEDGER
