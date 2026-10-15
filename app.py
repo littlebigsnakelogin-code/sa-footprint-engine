@@ -1785,17 +1785,19 @@ def apply_orderbook_event(symbol, event):
         )
     )
 
-    # Lifecycle metadata scans every live FIFO lot. Depth can update the
-    # best prices many times within a few milliseconds, so coalesce repeated
-    # scans to a 20 ms cadence while always allowing the first scan and
-    # preserving every depth event's book/FIFO/matching accounting.
+    # Lifecycle metadata scans every live FIFO lot and runs under the
+    # collector's shared lock. A 20 ms cadence repeatedly walks thousands of
+    # lots across seven symbols and can starve depth/trade queues. This is
+    # evidence metadata only: every book update, FIFO reduction, and execution
+    # match is still processed on every event. Sample lifecycle approach data
+    # at 100 ms to bound this secondary scan's lock cost.
     lifecycle_scan_clock_ms = time.monotonic_ns() // 1_000_000
     last_lifecycle_scan_ms = state.get(
         "_last_lifecycle_scan_monotonic_ms"
     )
     lifecycle_scan_due = (
         last_lifecycle_scan_ms is None
-        or lifecycle_scan_clock_ms - last_lifecycle_scan_ms >= 20
+        or lifecycle_scan_clock_ms - last_lifecycle_scan_ms >= 100
     )
 
     # ============================================================
