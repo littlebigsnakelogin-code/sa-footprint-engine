@@ -2586,8 +2586,12 @@ def apply_orderbook_event(symbol, event):
             # transition to account for, so skip their downstream work.
             # Keep zero-quantity levels on the normal path to preserve
             # empty FIFO price-level cleanup.
-            if old_quantity == new_quantity and new_quantity > 0.0:
-                continue
+            if old_quantity == new_quantity:
+                if new_quantity > 0.0:
+                    continue
+                existing_side_lots = state["liquidity_lots"].get(side, {})
+                if price not in existing_side_lots:
+                    continue
 
             # ====================================================
             # REDUCTION CONTEXT
