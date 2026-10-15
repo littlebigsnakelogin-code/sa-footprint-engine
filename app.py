@@ -41,14 +41,11 @@ app = Flask(__name__)
 # CONFIG
 # ============================================================
 
+# Lightweight testing mode: collect only the three primary symbols.
 SYMBOLS = [
     "BTCUSDT",
     "ETHUSDT",
     "SOLUSDT",
-    "XRPUSDT",
-    "AVAXUSDT",
-    "LINKUSDT",
-    "LTCUSDT",
 ]
 
 
