@@ -1652,11 +1652,14 @@ def apply_orderbook_event(symbol, event):
     # MARKET REFERENCE
     # ============================================================
 
+    # Reuse the best prices from the prior applied event. Scanning every
+    # live book level on every depth message made the hot path O(book depth),
+    # even when the best bid/ask had not changed.
     market_cache = {
-        "valid": False,
-        "best_bid": None,
-        "best_ask": None,
-        "market_reference": None,
+        "valid": bool(state.get("_best_price_cache_valid", False)),
+        "best_bid": state.get("_cached_best_bid"),
+        "best_ask": state.get("_cached_best_ask"),
+        "market_reference": state.get("_cached_market_reference"),
     }
 
     def get_current_market_reference():
@@ -3519,6 +3522,16 @@ def apply_orderbook_event(symbol, event):
     )
     ask_perf_ms = (time.perf_counter() - ask_perf_start) * 1000.0
 
+    # If an event removed the cached best level, rescan only for that
+    # exceptional case; otherwise preserve O(1) best-price lookup next event.
+    if not market_cache["valid"]:
+        get_current_market_reference()
+
+    state["_cached_best_bid"] = market_cache["best_bid"]
+    state["_cached_best_ask"] = market_cache["best_ask"]
+    state["_cached_market_reference"] = market_cache["market_reference"]
+    state["_best_price_cache_valid"] = True
+
     # ============================================================
     # UPDATE SYNC STATE
     # ============================================================
@@ -3851,6 +3864,12 @@ def initialize_orderbook(symbol):
                             # Install snapshot and rebuild FIFO baseline.
                             state["bids"] = snapshot_bids.copy()
                             state["asks"] = snapshot_asks.copy()
+                            # Snapshot replaces the whole book; force one
+                            # fresh best-price calculation on the next event.
+                            state["_best_price_cache_valid"] = False
+                            state["_cached_best_bid"] = None
+                            state["_cached_best_ask"] = None
+                            state["_cached_market_reference"] = None
 
                             state["liquidity_lots"]["bid"].clear()
                             state["liquidity_lots"]["ask"].clear()
@@ -3981,6 +4000,10 @@ def initialize_orderbook(symbol):
             state["last_depth_update_id"] = None
             state["bids"].clear()
             state["asks"].clear()
+            state["_best_price_cache_valid"] = False
+            state["_cached_best_bid"] = None
+            state["_cached_best_ask"] = None
+            state["_cached_market_reference"] = None
             state["liquidity_lots"]["bid"].clear()
             state["liquidity_lots"]["ask"].clear()
 
@@ -4909,6 +4932,10 @@ def collector_loop():
 
         state["bids"].clear()
         state["asks"].clear()
+        state["_best_price_cache_valid"] = False
+        state["_cached_best_bid"] = None
+        state["_cached_best_ask"] = None
+        state["_cached_market_reference"] = None
         state["liquidity_lots"]["bid"].clear()
         state["liquidity_lots"]["ask"].clear()
         state["buffer"].clear()
