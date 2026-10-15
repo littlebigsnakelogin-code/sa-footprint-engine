@@ -834,8 +834,8 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
                 record["status"] = "REDUCTION_ZERO"
             finalized_count += 1
 
-    # Index cleanup is less frequent than accounting finalization. Matcher
-    # still checks record finalization and the original time-window rules.
+    # Live cleanup is incremental: never copy every index key or rebuild
+    # every indexed deque while holding the collector's shared lock.
     last_index_cleanup = state.get(
         "_last_match_index_cleanup_monotonic_ms"
     )
@@ -849,53 +849,147 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         return finalized_count
 
     state["_last_match_index_cleanup_monotonic_ms"] = sweep_clock_ms
-
     liquidity_index = state.get("liquidity_match_index")
-    if isinstance(liquidity_index, dict):
-        history_ids = {
-            id(record)
-            for record in liquidity_history
-            if isinstance(record, dict)
-        }
-        for key, records in list(liquidity_index.items()):
-            retained_records = deque(
-                record
-                for record in records
-                if (
-                    isinstance(record, dict)
-                    and id(record) in history_ids
-                    and not record.get("finalized")
-                )
-            )
-            if retained_records:
-                liquidity_index[key] = retained_records
-            else:
-                liquidity_index.pop(key, None)
-
     trade_index = state.get("trade_match_index")
-    if isinstance(trade_index, dict):
-        trade_cutoff = current_time_ms - 300 if has_event_time else None
-        for key, trades in list(trade_index.items()):
-            retained_trades = deque()
-            for trade in trades:
-                if not isinstance(trade, dict):
-                    continue
-                try:
-                    trade_time = int(trade.get("time"))
-                    remaining_qty = float(
-                        trade.get("remaining_qty", trade.get("quantity", 0.0))
+
+    if not has_event_time:
+        # Explicit debug/manual recovery keeps the previous full-sweep
+        # semantics. This path is not used by live depth events.
+        if isinstance(liquidity_index, dict):
+            history_ids = {
+                id(record)
+                for record in liquidity_history
+                if isinstance(record, dict)
+            }
+            for key, records in list(liquidity_index.items()):
+                retained_records = deque(
+                    record
+                    for record in records
+                    if (
+                        isinstance(record, dict)
+                        and id(record) in history_ids
+                        and not record.get("finalized")
                     )
-                except (TypeError, ValueError, OverflowError):
+                )
+                if retained_records:
+                    liquidity_index[key] = retained_records
+                else:
+                    liquidity_index.pop(key, None)
+
+        if isinstance(trade_index, dict):
+            for key, trades in list(trade_index.items()):
+                retained_trades = deque()
+                for trade in trades:
+                    if not isinstance(trade, dict):
+                        continue
+                    try:
+                        trade_time = int(trade.get("time"))
+                        remaining_qty = float(
+                            trade.get("remaining_qty", trade.get("quantity", 0.0))
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if remaining_qty <= 1e-12:
+                        continue
+                    retained_trades.append(trade)
+                if retained_trades:
+                    trade_index[key] = retained_trades
+                else:
+                    trade_index.pop(key, None)
+
+        # Keep the incremental cursors consistent after a manual recovery.
+        if isinstance(liquidity_index, dict):
+            keys = deque(liquidity_index.keys())
+            state["_liquidity_match_cleanup_keys"] = keys
+            state["_liquidity_match_cleanup_queued"] = set(keys)
+        if isinstance(trade_index, dict):
+            keys = deque(trade_index.keys())
+            state["_trade_match_cleanup_keys"] = keys
+            state["_trade_match_cleanup_queued"] = set(keys)
+        return finalized_count
+
+    trade_cutoff = current_time_ms - 300
+    max_keys_per_sweep = 12
+    max_records_per_key = 64
+
+    def cleanup_index_incrementally(
+        index,
+        queue_name,
+        queued_name,
+        is_liquidity_index,
+    ):
+        if not isinstance(index, dict):
+            return
+
+        cleanup_keys = state.setdefault(queue_name, deque())
+        queued_keys = state.setdefault(queued_name, set())
+        processed_keys = 0
+
+        while cleanup_keys and processed_keys < max_keys_per_sweep:
+            key = cleanup_keys.popleft()
+            queued_keys.discard(key)
+            processed_keys += 1
+
+            records = index.get(key)
+            if not records:
+                index.pop(key, None)
+                continue
+
+            inspected = 0
+            # Index entries are appended in stream order. Removing only stale
+            # entries at the deque head preserves the order and all live
+            # candidates needed by exact-price execution matching.
+            while records and inspected < max_records_per_key:
+                record = records[0]
+                if not isinstance(record, dict):
+                    records.popleft()
+                    inspected += 1
                     continue
-                if remaining_qty <= 1e-12:
-                    continue
-                if trade_cutoff is not None and trade_time < trade_cutoff:
-                    continue
-                retained_trades.append(trade)
-            if retained_trades:
-                trade_index[key] = retained_trades
+
+                if is_liquidity_index:
+                    stale = bool(record.get("finalized"))
+                else:
+                    try:
+                        record_time = int(record.get("time"))
+                        remaining_qty = float(
+                            record.get(
+                                "remaining_qty",
+                                record.get("quantity", 0.0),
+                            )
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        stale = True
+                    else:
+                        stale = (
+                            remaining_qty <= 1e-12
+                            or record_time < trade_cutoff
+                        )
+
+                if not stale:
+                    break
+
+                records.popleft()
+                inspected += 1
+
+            if records:
+                if key not in queued_keys:
+                    cleanup_keys.append(key)
+                    queued_keys.add(key)
             else:
-                trade_index.pop(key, None)
+                index.pop(key, None)
+
+    cleanup_index_incrementally(
+        liquidity_index,
+        "_liquidity_match_cleanup_keys",
+        "_liquidity_match_cleanup_queued",
+        True,
+    )
+    cleanup_index_incrementally(
+        trade_index,
+        "_trade_match_cleanup_keys",
+        "_trade_match_cleanup_queued",
+        False,
+    )
 
     return finalized_count
 
@@ -1061,10 +1155,22 @@ def record_trade_for_execution_matching(
         "is_buyer_maker": is_buyer_maker,
     }
 
+    # Register a price key once so stale trade-index entries can be
+    # cleaned incrementally without copying every index key.
+    trade_index_key = (expected_side, price_key)
+    if trade_index_key not in trade_match_index:
+        cleanup_keys = state.setdefault(
+            "_trade_match_cleanup_keys", deque()
+        )
+        queued_keys = state.setdefault(
+            "_trade_match_cleanup_queued", set()
+        )
+        if trade_index_key not in queued_keys:
+            cleanup_keys.append(trade_index_key)
+            queued_keys.add(trade_index_key)
+
     # Index this trade so later depth reductions can match it.
-    trade_match_index[
-        (expected_side, price_key)
-    ].append(trade_record)
+    trade_match_index[trade_index_key].append(trade_record)
 
     # All live reductions are indexed atomically by apply_orderbook_event()
     # before the shared lock is released. Scanning the entire 3000-record
@@ -3368,11 +3474,23 @@ def apply_orderbook_event(symbol, event):
                         12
                     )
 
-                    liquidity_index[
-                        (
-                            side,
-                            price_key
+                    liquidity_index_key = (
+                        side,
+                        price_key
+                    )
+                    if liquidity_index_key not in liquidity_index:
+                        cleanup_keys = state.setdefault(
+                            "_liquidity_match_cleanup_keys", deque()
                         )
+                        queued_keys = state.setdefault(
+                            "_liquidity_match_cleanup_queued", set()
+                        )
+                        if liquidity_index_key not in queued_keys:
+                            cleanup_keys.append(liquidity_index_key)
+                            queued_keys.add(liquidity_index_key)
+
+                    liquidity_index[
+                        liquidity_index_key
                     ].append(
                         liquidity_record
                     )
