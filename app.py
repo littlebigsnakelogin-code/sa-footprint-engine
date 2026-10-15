@@ -2144,7 +2144,13 @@ def apply_orderbook_event(symbol, event):
                     for window_ms in window_sizes
                 }
 
-                for trade in trades:
+                # trade_history is appended in stream-arrival order.
+                # Walk newest-to-oldest so old trades outside the widest
+                # 10-second window do not consume CPU on every depth event.
+                # Preserve earliest/latest price semantics for each window:
+                # in reverse order, latest is assigned once and earliest is
+                # overwritten as older eligible trades are encountered.
+                for trade in reversed(trades):
                     try:
                         trade_time = int(
                             trade.get("time", trade.get("event_time", 0))
@@ -2156,6 +2162,11 @@ def apply_orderbook_event(symbol, event):
                         continue
 
                     age_ms = event_time - trade_time
+                    if age_ms > 10000:
+                        # Trade history is chronological; all remaining
+                        # entries are older than every lifecycle flow window.
+                        break
+
                     eligible_windows = [
                         window_ms
                         for window_ms in window_sizes
@@ -2194,9 +2205,9 @@ def apply_orderbook_event(symbol, event):
                         window["trade_count"] += 1
 
                         if price is not None:
-                            if window["first_trade_price"] is None:
-                                window["first_trade_price"] = price
-                            window["last_trade_price"] = price
+                            if window["last_trade_price"] is None:
+                                window["last_trade_price"] = price
+                            window["first_trade_price"] = price
 
                             current_low = window["observed_low"]
                             current_high = window["observed_high"]
