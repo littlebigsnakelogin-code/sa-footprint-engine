@@ -1197,9 +1197,8 @@ def collector_loop():
     trade_streams = [f"{s.lower()}@aggTrade" for s in SYMBOLS]
     depth_streams = [f"{s.lower()}@depth@100ms" for s in SYMBOLS]
 
-    trade_url = f"wss://fstream.binance.com/stream?streams={'/'.join(trade_streams)}"
-    depth_url = f"wss://fstream.binance.com/stream?streams={'/'.join(depth_streams)}"
-
+    trade_url = f"wss://fstream.binance.com/market/stream?streams={'/'.join(trade_streams)}"
+    depth_url = f"wss://fstream.binance.com/public/stream?streams={'/'.join(depth_streams)}"
     with lock:
         collector_state["status"] = "connecting"
         collector_state["started_at"] = now_ms()
