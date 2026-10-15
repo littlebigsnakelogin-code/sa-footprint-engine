@@ -1997,18 +1997,17 @@ def apply_orderbook_event(symbol, event):
     # MARKET / FLOW / ADAPTIVE CONTEXT
     # ============================================================
 
+    market_flow_window_cache = None
+
     def get_market_flow_context(
         reduction_price,
         reduction_qty,
         reduction_side,
     ):
+        nonlocal market_flow_window_cache
 
         try:
-
-            reduction_price_float = float(
-                reduction_price
-            )
-
+            reduction_price_float = float(reduction_price)
             (
                 best_bid,
                 best_ask,
@@ -2016,533 +2015,240 @@ def apply_orderbook_event(symbol, event):
             ) = get_current_market_reference()
 
             if market_reference is not None:
-
                 distance_from_market = (
-                    reduction_price_float
-                    - market_reference
+                    reduction_price_float - market_reference
                 )
-
-                abs_distance_from_market = abs(
-                    distance_from_market
-                )
-
+                abs_distance_from_market = abs(distance_from_market)
             else:
-
                 distance_from_market = None
                 abs_distance_from_market = None
 
-            trades = state.get(
-                "trade_history",
-                []
-            )
+            # The trade window aggregates are identical for every changed
+            # price level in this depth event. Build them once, rather than
+            # rescanning trade_history for every reduction.
+            if market_flow_window_cache is None:
+                trades = state.get("trade_history", [])
+                window_sizes = (1000, 3000, 10000)
+                cached_windows = {
+                    window_ms: {
+                        "trade_count": 0,
+                        "buy_qty": 0.0,
+                        "sell_qty": 0.0,
+                        "total_qty": 0.0,
+                        "observed_low": None,
+                        "observed_high": None,
+                        "first_trade_price": None,
+                        "last_trade_price": None,
+                    }
+                    for window_ms in window_sizes
+                }
 
-            context = {
-
-                "reduction_price": (
-                    reduction_price_float
-                ),
-
-                "reduction_qty": float(
-                    reduction_qty
-                ),
-
-                "reduction_side": reduction_side,
-
-                "event_time": event_time,
-
-                "depth_update_id": event_update_id,
-
-                "best_bid": best_bid,
-
-                "best_ask": best_ask,
-
-                "market_reference": market_reference,
-
-                "distance_from_market": (
-                    distance_from_market
-                ),
-
-                "abs_distance_from_market": (
-                    abs_distance_from_market
-                ),
-
-                "windows": {},
-            }
-
-            # Build 1s/3s/10s candidate windows in one pass.
-            # Keep the existing per-window aggregation and validation unchanged.
-            window_sizes = (1000, 3000, 10000)
-            window_trades = {
-                window_ms: []
-                for window_ms in window_sizes
-            }
-
-            for trade in trades:
-                try:
-                    trade_time = int(
-                        trade.get(
-                            "time",
-                            trade.get(
-                                "event_time",
-                                0
-                            )
-                        )
-                    )
-                except Exception:
-                    continue
-
-                if trade_time > event_time:
-                    continue
-
-                age_ms = event_time - trade_time
-                for window_ms in window_sizes:
-                    if age_ms <= window_ms:
-                        window_trades[window_ms].append(trade)
-
-            for window_ms in (
-                1000,
-                3000,
-                10000,
-            ):
-
-                window_start = (
-                    event_time
-                    - window_ms
-                )
-
-                buy_qty = 0.0
-                sell_qty = 0.0
-                total_qty = 0.0
-
-                trade_prices = []
-                trade_count = 0
-
-                for trade in window_trades[window_ms]:
-
+                for trade in trades:
                     try:
-
                         trade_time = int(
-                            trade.get(
-                                "time",
-                                trade.get(
-                                    "event_time",
-                                    0
-                                )
-                            )
+                            trade.get("time", trade.get("event_time", 0))
                         )
-
                     except Exception:
-
                         continue
 
-                    if (
-                        trade_time < window_start
-                        or trade_time > event_time
-                    ):
+                    if trade_time > event_time:
+                        continue
 
+                    age_ms = event_time - trade_time
+                    eligible_windows = [
+                        window_ms
+                        for window_ms in window_sizes
+                        if age_ms <= window_ms
+                    ]
+                    if not eligible_windows:
                         continue
 
                     try:
-
                         qty = float(
-                            trade.get(
-                                "qty",
-                                trade.get(
-                                    "quantity",
-                                    0.0
-                                )
-                            )
+                            trade.get("qty", trade.get("quantity", 0.0))
                         )
-
                     except Exception:
-
                         continue
 
                     if qty <= 0.0:
                         continue
 
-                    try:
-
-                        price = float(
-                            trade.get(
-                                "price"
-                            )
-                        )
-
-                    except Exception:
-
-                        price = None
-
-                    is_buyer_maker = trade.get(
-                        "is_buyer_maker"
-                    )
-
-                    if is_buyer_maker is False:
-
-                        buy_qty += qty
-
-                    elif is_buyer_maker is True:
-
-                        sell_qty += qty
-
-                    else:
-
+                    is_buyer_maker = trade.get("is_buyer_maker")
+                    if is_buyer_maker is not False and is_buyer_maker is not True:
                         continue
 
-                    total_qty += qty
-                    trade_count += 1
+                    try:
+                        price = float(trade.get("price"))
+                    except (TypeError, ValueError, OverflowError):
+                        price = None
 
-                    if price is not None:
+                    for window_ms in eligible_windows:
+                        window = cached_windows[window_ms]
+                        if is_buyer_maker is False:
+                            window["buy_qty"] += qty
+                        else:
+                            window["sell_qty"] += qty
 
-                        trade_prices.append(
-                            price
-                        )
+                        window["total_qty"] += qty
+                        window["trade_count"] += 1
 
-                net_delta = (
-                    buy_qty
-                    - sell_qty
+                        if price is not None:
+                            if window["first_trade_price"] is None:
+                                window["first_trade_price"] = price
+                            window["last_trade_price"] = price
+
+                            current_low = window["observed_low"]
+                            current_high = window["observed_high"]
+                            window["observed_low"] = (
+                                price if current_low is None
+                                else min(current_low, price)
+                            )
+                            window["observed_high"] = (
+                                price if current_high is None
+                                else max(current_high, price)
+                            )
+
+                market_flow_window_cache = cached_windows
+
+            context = {
+                "reduction_price": reduction_price_float,
+                "reduction_qty": float(reduction_qty),
+                "reduction_side": reduction_side,
+                "event_time": event_time,
+                "depth_update_id": event_update_id,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "market_reference": market_reference,
+                "distance_from_market": distance_from_market,
+                "abs_distance_from_market": abs_distance_from_market,
+                "windows": {},
+            }
+
+            for window_ms in (1000, 3000, 10000):
+                base = market_flow_window_cache[window_ms]
+                buy_qty = float(base["buy_qty"])
+                sell_qty = float(base["sell_qty"])
+                total_qty = float(base["total_qty"])
+                trade_count = int(base["trade_count"])
+                observed_low = base["observed_low"]
+                observed_high = base["observed_high"]
+                first_trade_price = base["first_trade_price"]
+                last_trade_price = base["last_trade_price"]
+
+                net_delta = buy_qty - sell_qty
+                flow_imbalance = (
+                    net_delta / total_qty if total_qty > 0.0 else 0.0
                 )
 
-                if total_qty > 0.0:
-
-                    flow_imbalance = (
-                        net_delta
-                        / total_qty
-                    )
-
-                else:
-
-                    flow_imbalance = 0.0
-
-                if trade_prices:
-
-                    observed_low = min(
-                        trade_prices
-                    )
-
-                    observed_high = max(
-                        trade_prices
-                    )
-
-                    observed_range = (
-                        observed_high
-                        - observed_low
-                    )
-
-                    first_trade_price = (
-                        trade_prices[0]
-                    )
-
-                    last_trade_price = (
-                        trade_prices[-1]
-                    )
-
+                if observed_low is not None and observed_high is not None:
+                    observed_range = observed_high - observed_low
                     observed_displacement = (
-                        last_trade_price
-                        - first_trade_price
+                        last_trade_price - first_trade_price
+                        if first_trade_price is not None
+                        and last_trade_price is not None
+                        else 0.0
                     )
-
-                    observed_abs_displacement = abs(
-                        observed_displacement
-                    )
+                    observed_abs_displacement = abs(observed_displacement)
 
                     if (
                         abs_distance_from_market is not None
                         and observed_range > 0.0
                     ):
-
                         distance_to_range_ratio = (
-                            abs_distance_from_market
-                            / observed_range
+                            abs_distance_from_market / observed_range
                         )
-
                     else:
-
                         distance_to_range_ratio = None
-
                 else:
-
-                    observed_low = None
-                    observed_high = None
                     observed_range = 0.0
-                    first_trade_price = None
-                    last_trade_price = None
                     observed_displacement = 0.0
                     observed_abs_displacement = 0.0
                     distance_to_range_ratio = None
 
-                # ------------------------------------------------
-                # RELEVANT FLOW
-                # ------------------------------------------------
-
                 if reduction_side == "ask":
-
                     relevant_flow_qty = buy_qty
                     opposite_flow_qty = sell_qty
-
                 else:
-
                     relevant_flow_qty = sell_qty
                     opposite_flow_qty = buy_qty
 
-                # ------------------------------------------------
-                # LIQUIDITY / FLOW FACTOR
-                #
-                # bounded:
-                #
-                # R = liquidity / relevant_flow
-                # LF = R / (R + 1)
-                # ------------------------------------------------
-
                 if relevant_flow_qty > 0.0:
-
                     liquidity_flow_ratio = (
-                        float(reduction_qty)
-                        / relevant_flow_qty
+                        float(reduction_qty) / relevant_flow_qty
                     )
-
                     flow_factor = (
-                        liquidity_flow_ratio
-                        / (
-                            liquidity_flow_ratio
-                            + 1.0
-                        )
+                        liquidity_flow_ratio / (liquidity_flow_ratio + 1.0)
                     )
-
                 else:
-
                     liquidity_flow_ratio = None
                     flow_factor = 0.0
-
-                # ------------------------------------------------
-                # DISTANCE FACTOR
-                #
-                # D = distance / observed_range
-                # DF = 1 / (1 + D)
-                # ------------------------------------------------
 
                 if (
                     abs_distance_from_market is not None
                     and observed_range > 0.0
                 ):
-
-                    distance_factor = (
-                        1.0
-                        / (
-                            1.0
-                            + (
-                                abs_distance_from_market
-                                / observed_range
-                            )
-                        )
+                    distance_factor = 1.0 / (
+                        1.0 + (abs_distance_from_market / observed_range)
                     )
-
                 else:
-
                     distance_factor = 0.0
 
-                context["windows"][
-                    str(window_ms)
-                ] = {
-
+                context["windows"][str(window_ms)] = {
                     "window_ms": window_ms,
-
                     "trade_count": trade_count,
-
-                    "aggressive_buy_qty": (
-                        buy_qty
-                    ),
-
-                    "aggressive_sell_qty": (
-                        sell_qty
-                    ),
-
-                    "total_aggressive_qty": (
-                        total_qty
-                    ),
-
-                    "relevant_aggressive_flow_qty": (
-                        relevant_flow_qty
-                    ),
-
-                    "opposite_aggressive_flow_qty": (
-                        opposite_flow_qty
-                    ),
-
-                    "net_aggressive_delta": (
-                        net_delta
-                    ),
-
-                    "flow_imbalance": (
-                        flow_imbalance
-                    ),
-
-                    "observed_low": (
-                        observed_low
-                    ),
-
-                    "observed_high": (
-                        observed_high
-                    ),
-
-                    "observed_range": (
-                        observed_range
-                    ),
-
-                    "first_trade_price": (
-                        first_trade_price
-                    ),
-
-                    "last_trade_price": (
-                        last_trade_price
-                    ),
-
-                    "observed_displacement": (
-                        observed_displacement
-                    ),
-
-                    "observed_abs_displacement": (
-                        observed_abs_displacement
-                    ),
-
-                    "distance_to_observed_range_ratio": (
-                        distance_to_range_ratio
-                    ),
-
-                    "liquidity_flow_ratio": (
-                        liquidity_flow_ratio
-                    ),
-
-                    "flow_factor": (
-                        flow_factor
-                    ),
-
-                    "distance_factor": (
-                        distance_factor
-                    ),
+                    "aggressive_buy_qty": buy_qty,
+                    "aggressive_sell_qty": sell_qty,
+                    "total_aggressive_qty": total_qty,
+                    "relevant_aggressive_flow_qty": relevant_flow_qty,
+                    "opposite_aggressive_flow_qty": opposite_flow_qty,
+                    "net_aggressive_delta": net_delta,
+                    "flow_imbalance": flow_imbalance,
+                    "observed_low": observed_low,
+                    "observed_high": observed_high,
+                    "observed_range": observed_range,
+                    "first_trade_price": first_trade_price,
+                    "last_trade_price": last_trade_price,
+                    "observed_displacement": observed_displacement,
+                    "observed_abs_displacement": observed_abs_displacement,
+                    "distance_to_observed_range_ratio": distance_to_range_ratio,
+                    "liquidity_flow_ratio": liquidity_flow_ratio,
+                    "flow_factor": flow_factor,
+                    "distance_factor": distance_factor,
                 }
 
-            # ====================================================
-            # WEIGHTED ADAPTIVE FACTORS
-            # ====================================================
-
             windows = context["windows"]
-
             weighted_flow_factor = (
-                0.50
-                * float(
-                    windows["1000"].get(
-                        "flow_factor",
-                        0.0
-                    )
-                )
-                +
-                0.30
-                * float(
-                    windows["3000"].get(
-                        "flow_factor",
-                        0.0
-                    )
-                )
-                +
-                0.20
-                * float(
-                    windows["10000"].get(
-                        "flow_factor",
-                        0.0
-                    )
-                )
+                0.50 * float(windows["1000"].get("flow_factor", 0.0))
+                + 0.30 * float(windows["3000"].get("flow_factor", 0.0))
+                + 0.20 * float(windows["10000"].get("flow_factor", 0.0))
             )
-
             weighted_distance_factor = (
-                0.50
-                * float(
-                    windows["1000"].get(
-                        "distance_factor",
-                        0.0
-                    )
-                )
-                +
-                0.30
-                * float(
-                    windows["3000"].get(
-                        "distance_factor",
-                        0.0
-                    )
-                )
-                +
-                0.20
-                * float(
-                    windows["10000"].get(
-                        "distance_factor",
-                        0.0
-                    )
-                )
+                0.50 * float(windows["1000"].get("distance_factor", 0.0))
+                + 0.30 * float(windows["3000"].get("distance_factor", 0.0))
+                + 0.20 * float(windows["10000"].get("distance_factor", 0.0))
             )
 
-            # ----------------------------------------------------
-            # APPROACH PRESSURE
-            #
-            # This is calculated later from the lifecycle lot.
-            # Keep context field available now.
-            # ----------------------------------------------------
-
-            context[
-                "adaptive"
-            ] = {
-
-                "flow_factor": (
-                    weighted_flow_factor
-                ),
-
-                "distance_factor": (
-                    weighted_distance_factor
-                ),
-
+            context["adaptive"] = {
+                "flow_factor": weighted_flow_factor,
+                "distance_factor": weighted_distance_factor,
                 "approach_factor": 0.0,
-
                 "significance_score": (
-                    0.50
-                    * weighted_flow_factor
-                    +
-                    0.25
-                    * weighted_distance_factor
+                    0.50 * weighted_flow_factor
+                    + 0.25 * weighted_distance_factor
                 ),
-
-                "classification": (
-                    "normal"
-                ),
+                "classification": "normal",
             }
-
             return context
 
         except Exception as exc:
-
             return {
-
-                "error": (
-                    "market_flow_context_failed"
-                ),
-
+                "error": "market_flow_context_failed",
                 "message": str(exc),
-
                 "event_time": event_time,
-
-                "depth_update_id": (
-                    event_update_id
-                ),
-
-                "reduction_price": (
-                    str(reduction_price)
-                ),
-
-                "reduction_qty": (
-                    float(reduction_qty)
-                ),
-
-                "reduction_side": (
-                    reduction_side
-                ),
+                "depth_update_id": event_update_id,
+                "reduction_price": str(reduction_price),
+                "reduction_qty": float(reduction_qty),
+                "reduction_side": reduction_side,
             }
 
     # ============================================================
