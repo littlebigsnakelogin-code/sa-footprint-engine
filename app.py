@@ -1384,6 +1384,7 @@ def apply_orderbook_event(symbol, event):
         - Koi fixed BTC / dollar / distance threshold use nahi hota.
     """
 
+    apply_perf_start = time.perf_counter()
     state = orderbook[symbol]
 
     event_update_id = int(event["u"])
@@ -1395,10 +1396,12 @@ def apply_orderbook_event(symbol, event):
     # FINALIZE EXPIRED LIQUIDITY REDUCTIONS
     # ============================================================
 
+    finalize_perf_start = time.perf_counter()
     finalize_liquidity_records(
         symbol,
         event_time
     )
+    finalize_perf_ms = (time.perf_counter() - finalize_perf_start) * 1000.0
 
     # ============================================================
     # LIQUIDITY MATCH INDEX
@@ -1652,6 +1655,7 @@ def apply_orderbook_event(symbol, event):
     # UPDATE EXISTING LOT LIFECYCLE
     # ============================================================
 
+    lifecycle_perf_start = time.perf_counter()
     if (
         current_market_reference is not None
         and market_reference_changed
@@ -1992,6 +1996,8 @@ def apply_orderbook_event(symbol, event):
         state[
             "lifecycle_last_market_reference"
         ] = current_market_reference
+
+    lifecycle_perf_ms = (time.perf_counter() - lifecycle_perf_start) * 1000.0
 
     # ============================================================
     # MARKET / FLOW / ADAPTIVE CONTEXT
@@ -3200,21 +3206,25 @@ def apply_orderbook_event(symbol, event):
     # BIDS
     # ============================================================
 
+    bid_perf_start = time.perf_counter()
     process_side(
         "bid",
         event.get("b", []),
         state["bids"],
     )
+    bid_perf_ms = (time.perf_counter() - bid_perf_start) * 1000.0
 
     # ============================================================
     # ASKS
     # ============================================================
 
+    ask_perf_start = time.perf_counter()
     process_side(
         "ask",
         event.get("a", []),
         state["asks"],
     )
+    ask_perf_ms = (time.perf_counter() - ask_perf_start) * 1000.0
 
     # ============================================================
     # UPDATE SYNC STATE
@@ -3231,6 +3241,50 @@ def apply_orderbook_event(symbol, event):
     state["last_depth_event_time"] = (
         now_ms()
     )
+
+    # Aggregate timing and log only once per 100 applied depth events.
+    perf = state.setdefault("_apply_perf", {
+        "count": 0, "total_ms": 0.0, "max_ms": 0.0,
+        "finalize_ms": 0.0, "finalize_max_ms": 0.0,
+        "lifecycle_ms": 0.0, "lifecycle_max_ms": 0.0,
+        "bid_ms": 0.0, "bid_max_ms": 0.0,
+        "ask_ms": 0.0, "ask_max_ms": 0.0,
+    })
+    apply_perf_ms = (time.perf_counter() - apply_perf_start) * 1000.0
+    perf["count"] += 1
+    perf["total_ms"] += apply_perf_ms
+    perf["max_ms"] = max(perf["max_ms"], apply_perf_ms)
+    for key, value in (
+        ("finalize_ms", finalize_perf_ms),
+        ("lifecycle_ms", lifecycle_perf_ms),
+        ("bid_ms", bid_perf_ms),
+        ("ask_ms", ask_perf_ms),
+    ):
+        perf[key] += value
+        max_key = key.replace("_ms", "_max_ms")
+        perf[max_key] = max(perf[max_key], value)
+
+    if perf["count"] >= 100:
+        count = perf["count"]
+        print(
+            f"[PERF] {symbol} n={count} "
+            f"apply_avg_ms={perf['total_ms'] / count:.2f} "
+            f"apply_max_ms={perf['max_ms']:.2f} "
+            f"finalize_avg_ms={perf['finalize_ms'] / count:.2f} "
+            f"finalize_max_ms={perf['finalize_max_ms']:.2f} "
+            f"lifecycle_avg_ms={perf['lifecycle_ms'] / count:.2f} "
+            f"lifecycle_max_ms={perf['lifecycle_max_ms']:.2f} "
+            f"bid_avg_ms={perf['bid_ms'] / count:.2f} "
+            f"bid_max_ms={perf['bid_max_ms']:.2f} "
+            f"ask_avg_ms={perf['ask_ms'] / count:.2f} "
+            f"ask_max_ms={perf['ask_max_ms']:.2f}"
+        )
+        for key in (
+            "count", "total_ms", "max_ms", "finalize_ms",
+            "finalize_max_ms", "lifecycle_ms", "lifecycle_max_ms",
+            "bid_ms", "bid_max_ms", "ask_ms", "ask_max_ms",
+        ):
+            perf[key] = 0 if key == "count" else 0.0
 
 
 def initialize_orderbook(symbol):
