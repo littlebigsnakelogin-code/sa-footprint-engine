@@ -909,7 +909,7 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         return finalized_count
 
     trade_cutoff = current_time_ms - 300
-    max_keys_per_sweep = 12
+    max_keys_per_sweep = 128
     max_records_per_key = 64
 
     def cleanup_index_incrementally(
