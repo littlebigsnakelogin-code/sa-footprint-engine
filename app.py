@@ -41,10 +41,8 @@ app = Flask(__name__)
 # CONFIG
 # ============================================================
 
-# Lightweight testing mode: collect only the three primary symbols.
+# Minimal-load testing mode: collect SOLUSDT only.
 SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
     "SOLUSDT",
 ]
 
