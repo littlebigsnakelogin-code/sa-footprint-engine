@@ -1461,7 +1461,7 @@ def home():
 <div class="topbar">
     <span class="brand">⚡ SA ORDERFLOW</span>
     <select id="symSel" onchange="setSym(this.value)">
-        <option value="BTCUSDT">BTCUSDT</option>
+        <option value="BTCUSDT" selected>BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
         <option value="SOLUSDT">SOLUSDT</option>
         <option value="XRPUSDT">XRPUSDT</option>
@@ -1512,14 +1512,14 @@ const wrap = document.getElementById('wrap');
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d', { alpha: false });
 
-let symbol = 'BTCUSDT';
+const STEP_MAP = { BTCUSDT: 1.0, ETHUSDT: 0.1, SOLUSDT: 0.01, XRPUSDT: 0.0001 };
+
+let symbol = document.getElementById('symSel').value || 'BTCUSDT';
 let tf = '1m';
-let tickMultMode = 'auto';
+let tickMultMode = document.getElementById('tickMultSel').value || 'auto';
 let candles = [];
 let obData = { bids: [], asks: [] };
-let rawStep = 1.0;
-
-const STEP_MAP = { BTCUSDT: 1.0, ETHUSDT: 0.1, SOLUSDT: 0.01, XRPUSDT: 0.0001 };
+let rawStep = STEP_MAP[symbol] || 1.0;
 
 let candleW = 240;
 let panX = 0;
@@ -1678,7 +1678,6 @@ function fmt(v) {
     return v.toFixed(2);
 }
 
-// Group raw footprint levels into larger price buckets so digits ALWAYS fit without clipping candle!
 function groupFootprint(fpRaw, low, high, effStep, closePx) {
     const map = new Map();
     const arr = Array.isArray(fpRaw) ? fpRaw : Object.values(fpRaw || {});
@@ -1711,7 +1710,11 @@ function groupFootprint(fpRaw, low, high, effStep, closePx) {
 function drawLoop() {
     if (needsRender) {
         needsRender = false;
-        drawAll();
+        try {
+            drawAll();
+        } catch (err) {
+            console.error("Render error:", err);
+        }
     }
     requestAnimationFrame(drawLoop);
 }
@@ -1743,7 +1746,6 @@ function drawAll() {
     }
     if (vis.length === 0) return;
 
-    // Auto-fit Y-Axis so ALL visible candles (even huge 100pt BTC candles) fit top-to-bottom!
     if (minP === null || maxP === null) {
         let lo = Infinity, hi = -Infinity;
         const focusSet = vis.slice(0, Math.min(vis.length, 4));
@@ -1758,7 +1760,6 @@ function drawAll() {
 
     const pSpan = Math.max(maxP - minP, rawStep);
 
-    // DYNAMIC TICK MULTIPLIER: Ensures rowH is ALWAYS >= 14px so Footprint Digits NEVER disappear!
     let mult = 1;
     if (tickMultMode === 'auto') {
         const maxRowsOnScreen = Math.max(12, Math.floor(chartH / 15));
@@ -1832,7 +1833,6 @@ function drawAll() {
         const normPullCut = Math.max(avgPull * 0.45, 0.001);
         const heavyPullCut = Math.max(avgPull * 1.5, maxPull * 0.50);
 
-        // VAH / VAL Value Area
         if (c.vah != null && c.val != null) {
             const yVah = pToY(c.vah + effStep * 0.5);
             const yVal = pToY(c.val - effStep * 0.5);
@@ -1855,7 +1855,6 @@ function drawAll() {
             }
         }
 
-        // Left OHLC Bar
         const barX = boxL + 3;
         ctx.strokeStyle = col;
         ctx.lineWidth = 2;
@@ -1865,7 +1864,6 @@ function drawAll() {
         ctx.fillStyle = col;
         ctx.fillRect(barX - 3, Math.min(yO, yC), 6, Math.max(Math.abs(yC - yO), 2));
 
-        // Center Spine
         ctx.strokeStyle = '#262c3d';
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -1885,17 +1883,15 @@ function drawAll() {
             const cellH = Math.max(rowH - 1, 2);
             const topY = py - cellH * 0.5;
 
-            const sellV = l.sell || 0; // Executed on Bid
-            const buyV = l.buy || 0;   // Executed on Ask
+            const sellV = l.sell || 0;
+            const buyV = l.buy || 0;
             const totV = l.volume || 0;
             const bPull = l.bid_pulled || 0;
             const aPull = l.ask_pulled || 0;
 
-            // Percentages: Pull% = Pulled / (Pulled + Executed on that side)
             const bPullPct = bPull > 0 ? Math.round((bPull / (bPull + sellV)) * 100) : 0;
             const aPullPct = aPull > 0 ? Math.round((aPull / (aPull + buyV)) * 100) : 0;
 
-            // Absorption % = Passive side share of total volume at this level
             const bAbsPct = totV > 0 ? Math.round((sellV / totV) * 100) : 0;
             const aAbsPct = totV > 0 ? Math.round((buyV / totV) * 100) : 0;
 
@@ -1952,7 +1948,6 @@ function drawAll() {
                 ctx.strokeRect(spineX - halfW, topY, halfW * 2, cellH);
             }
 
-            // Check Mouse Hover for Detailed X-Ray HUD
             if (curX >= boxL && curX <= boxR && curY >= topY && curY <= topY + cellH) {
                 hoveredCellInfo = {
                     price: l.price, effStep, sellV, buyV, bPull, aPull,
@@ -1966,19 +1961,16 @@ function drawAll() {
             if (canPrint) {
                 ctx.textBaseline = 'middle';
 
-                // Center-Left: Executed Sell Vol
                 ctx.font = (sellImb || isPoc) ? 'bold 10px monospace' : '10px monospace';
                 ctx.fillStyle = sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb');
                 ctx.textAlign = 'right';
                 ctx.fillText(fmt(sellV), spineX - 3, py);
 
-                // Center-Right: Executed Buy Vol
                 ctx.font = (buyImb || isPoc) ? 'bold 10px monospace' : '10px monospace';
                 ctx.fillStyle = buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#e0e3eb');
                 ctx.textAlign = 'left';
                 ctx.fillText(fmt(buyV), spineX + 3, py);
 
-                // FAR-LEFT: Bid Side Tag with Exec/Pull/% Stats!
                 let leftTag = '';
                 let leftCol = '#fff';
                 if (bidAbsType === 'heavy') { leftTag = `H-B.ABS(${bAbsPct}%)`; leftCol = '#00e5ff'; }
@@ -1999,7 +1991,6 @@ function drawAll() {
                     ctx.fillText(leftTag, spineX - halfW + 2, py);
                 }
 
-                // FAR-RIGHT: Ask Side Tag with Exec/Pull/% Stats!
                 let rightTag = '';
                 let rightCol = '#fff';
                 if (askAbsType === 'heavy') { rightTag = `H-A.ABS(${aAbsPct}%)`; rightCol = '#ff9100'; }
@@ -2027,7 +2018,6 @@ function drawAll() {
             }
         });
 
-        // Candle Top/Bottom Summary Badges with Exact Qty & %
         let botYBanner = yL + 6;
         if (candleW >= 70) {
             ctx.font = 'bold 9px monospace';
@@ -2050,7 +2040,6 @@ function drawAll() {
             }
         }
 
-        // Compact Floating Transparent Delta Pill
         if (candleW >= 55) {
             const pillW = Math.min(candleW * 0.88, 142);
             const pillH = 28;
@@ -2085,11 +2074,11 @@ function drawAll() {
         }
     });
 
-    // TOP-LEFT X-RAY INSPECTOR HUD (Shows Exact Exec / Pulled / % on Mouse Hover + Active Scale Info)
+    // TOP-LEFT X-RAY INSPECTOR HUD
     ctx.fillStyle = 'rgba(17, 21, 31, 0.90)';
-    ctx.fillRect(8, 8, 370, hoveredCellInfo ? 54 : 24);
+    ctx.fillRect(8, 8, 385, hoveredCellInfo ? 54 : 24);
     ctx.strokeStyle = '#2962ff';
-    ctx.strokeRect(8, 8, 370, hoveredCellInfo ? 54 : 24);
+    ctx.strokeRect(8, 8, 385, hoveredCellInfo ? 54 : 24);
     ctx.fillStyle = '#00e5ff';
     ctx.font = 'bold 11px monospace';
     ctx.textAlign = 'left';
@@ -2139,6 +2128,7 @@ function drawAll() {
         ctx.fillText(lastC.close.toFixed(dec), yAxisX + 5, curPy);
     }
 
+    // FIXED CROSSHAIR (Removed undefined mouseY typo that froze PC browser!)
     if (curX > 0 && curX < chartW && curY > 0 && curY < chartH) {
         ctx.strokeStyle = 'rgba(255,255,255,0.25)';
         ctx.setLineDash([2, 2]);
@@ -2149,7 +2139,7 @@ function drawAll() {
         ctx.setLineDash([]);
 
         ctx.fillStyle = '#2962ff';
-        ctx.fillRect(yAxisX, curPy - 10 === mouseY ? 0 : curY - 10, YAXIS_W, 20);
+        ctx.fillRect(yAxisX, curY - 10, YAXIS_W, 20);
         ctx.fillStyle = '#fff';
         ctx.fillText(yToP(curY).toFixed(dec), yAxisX + 5, curY);
     }
@@ -2165,7 +2155,6 @@ function drawAll() {
     ctx.moveTo(domX, 0); ctx.lineTo(domX, H);
     ctx.stroke();
 
-    // Header: BID (EXEC) | PRICE | ASK (EXEC)
     ctx.fillStyle = '#161b26';
     ctx.fillRect(domX, 0, DOM_W, 26);
     ctx.font = 'bold 10px monospace';
@@ -2179,12 +2168,10 @@ function drawAll() {
     ctx.textAlign = 'right';
     ctx.fillText('ASK [EXEC/PULL]', domX + DOM_W - 6, 14);
 
-    // Build Unified Price Ladder centered around Current Live Candle Close
-    const centerP = Math.round(lastC.close / effStep) * effStep;
+    const centerP = Math.floor(lastC.close / effStep + 1e-9) * effStep;
     const ladderRows = Math.floor((H - 32) / 18);
     const halfRows = Math.floor(ladderRows / 2);
 
-    // Aggregate Live Orderbook Bids & Asks into effStep buckets
     const bidMap = new Map();
     const askMap = new Map();
     (obData.bids || []).forEach(b => {
@@ -2198,7 +2185,6 @@ function drawAll() {
         askMap.set(k, (askMap.get(k) || 0) + a.quantity);
     });
 
-    // Current Candle Footprint Map for Executed & Pulled at each price
     const curFpList = groupFootprint(lastC.footprint, centerP - effStep * halfRows, centerP + effStep * halfRows, effStep, lastC.close);
     const fpMap = new Map();
     curFpList.forEach(l => fpMap.set(l.price.toFixed(6), l));
@@ -2213,7 +2199,7 @@ function drawAll() {
         if (aq > maxDomRest) maxDomRest = aq;
     }
 
-    const colW = (DOM_W - 74) * 0.5; // Left Bid Column Width & Right Ask Column Width
+    const colW = (DOM_W - 74) * 0.5;
     const pxColLeft = domX + colW;
     const pxColRight = pxColLeft + 74;
 
@@ -2229,7 +2215,6 @@ function drawAll() {
 
         const isCurrentRow = Math.abs(p - centerP) < effStep * 0.4;
 
-        // Row Background
         if (isCurrentRow) {
             ctx.fillStyle = 'rgba(255, 235, 59, 0.16)';
             ctx.fillRect(domX, ry, DOM_W, rH);
@@ -2238,13 +2223,11 @@ function drawAll() {
             ctx.fillRect(domX, ry, DOM_W, rH);
         }
 
-        // Center Price Column Box
         ctx.fillStyle = isCurrentRow ? '#ffeb3b' : '#8b93a7';
         ctx.font = isCurrentRow ? 'bold 10px monospace' : '10px monospace';
         ctx.textAlign = 'center';
         ctx.fillText(p.toFixed(dec), domX + DOM_W * 0.5, ry + 9);
 
-        // LEFT SIDE: BIDS (Green bar grows left from center price column)
         if (bRest > 0 || fpLvl.sell > 0 || fpLvl.bid_pulled > 0) {
             const bPct = Math.min(1, bRest / maxDomRest);
             ctx.fillStyle = bPct > 0.6 ? 'rgba(0, 230, 118, 0.38)' : 'rgba(0, 230, 118, 0.18)';
@@ -2258,7 +2241,6 @@ function drawAll() {
             ctx.fillText(`${fmt(bRest)} ${execTxt}${pullTxt}`, pxColLeft - 4, ry + 9);
         }
 
-        // RIGHT SIDE: ASKS (Red bar grows right from center price column)
         if (aRest > 0 || fpLvl.buy > 0 || fpLvl.ask_pulled > 0) {
             const aPct = Math.min(1, aRest / maxDomRest);
             ctx.fillStyle = aPct > 0.6 ? 'rgba(255, 23, 68, 0.38)' : 'rgba(255, 23, 68, 0.18)';
@@ -2275,7 +2257,6 @@ function drawAll() {
         ry += rH;
     }
 
-    // Vertical Divider Lines for Center Price Column in DOM
     ctx.strokeStyle = '#232838';
     ctx.beginPath();
     ctx.moveTo(pxColLeft, 26); ctx.lineTo(pxColLeft, H);
@@ -2289,7 +2270,6 @@ requestAnimationFrame(drawLoop);
 </script>
 </body>
 </html>"""
-
 
 @app.route("/hello")
 def hello():
