@@ -296,6 +296,8 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
             "volume": 0.0,
             "trades": 0,
             "pulled_qty": 0.0,
+            "bid_pulled": 0.0,
+            "ask_pulled": 0.0,
             "status": "NORMAL",
         }
         candle["footprint"][key] = level
@@ -311,7 +313,7 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
 
 
 def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty, status_str):
-    """Stamps pull/absorption metadata ONLY near the active candle price range to prevent RAM bloat."""
+    """Stamps Bid-Pull and Ask-Pull separately near active candle price range."""
     step = PRICE_STEP.get(symbol, 1.0)
     try:
         p_float = float(price_str)
@@ -319,13 +321,12 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
         return
     bucket_price = round_price_to_step(p_float, step)
     key = str(bucket_price)
-    max_distance = step * 25  # Only stamp within 25 price steps of candle High/Low
+    max_distance = step * 25
 
     with lock:
         for tf in TIMEFRAMES.keys():
             curr = current_candles[symbol][tf]
             if curr is not None and "footprint" in curr:
-                # Ignore far-away orderbook noise
                 if bucket_price < (curr["low"] - max_distance) or bucket_price > (curr["high"] + max_distance):
                     continue
 
@@ -339,13 +340,20 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
                         "volume": 0.0,
                         "trades": 0,
                         "pulled_qty": 0.0,
+                        "bid_pulled": 0.0,
+                        "ask_pulled": 0.0,
                         "status": "NORMAL",
                     }
                     curr["footprint"][key] = level
-                
+
                 if pulled_qty > 0.0:
-                    level["pulled_qty"] = round(float(level.get("pulled_qty", 0.0)) + float(pulled_qty), 4)
-                
+                    p_val = float(pulled_qty)
+                    level["pulled_qty"] = round(float(level.get("pulled_qty", 0.0)) + p_val, 4)
+                    if side == "bid":
+                        level["bid_pulled"] = round(float(level.get("bid_pulled", 0.0)) + p_val, 4)
+                    else:
+                        level["ask_pulled"] = round(float(level.get("ask_pulled", 0.0)) + p_val, 4)
+
                 if status_str in ("LIQUIDITY_PULLED", "HEAVY ABSORPTION", "PARTIAL_EXECUTION_PULL"):
                     level["status"] = status_str
 
@@ -1405,7 +1413,7 @@ def home():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>SA Institutional Footprint & Trap Engine</title>
+<title>SA Institutional Orderflow & Side-Trap Engine</title>
 <style>
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
     body {
@@ -1423,27 +1431,27 @@ def home():
         border-bottom: 1px solid #232838;
         display: flex;
         align-items: center;
-        padding: 0 10px;
-        gap: 6px;
-        font-size: 12px;
+        padding: 0 8px;
+        gap: 5px;
+        font-size: 11px;
     }
-    .brand { color: #00e5ff; font-weight: bold; margin-right: 6px; font-size: 13px; }
+    .brand { color: #00e5ff; font-weight: bold; margin-right: 4px; font-size: 12px; }
     select, .btn {
         background: #1a2030;
         color: #d1d4dc;
         border: 1px solid #2c3347;
-        padding: 3px 8px;
+        padding: 3px 6px;
         border-radius: 3px;
         font-family: monospace;
-        font-size: 12px;
+        font-size: 11px;
         cursor: pointer;
     }
     .btn.active { background: #2962ff; color: #fff; border-color: #2962ff; font-weight: bold; }
-    .sep { width: 1px; height: 20px; background: #232838; margin: 0 4px; }
-    .legend { display: flex; gap: 10px; font-size: 11px; align-items: center; margin-left: 8px; }
-    .lg-box { padding: 1px 5px; border-radius: 2px; font-weight: bold; font-size: 10px; }
-    .status-right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
-    .live-px { font-size: 14px; font-weight: bold; padding: 2px 6px; background: #1a2030; border-radius: 3px; }
+    .sep { width: 1px; height: 20px; background: #232838; margin: 0 3px; }
+    .legend { display: flex; gap: 6px; font-size: 10px; align-items: center; margin-left: 4px; flex-wrap: wrap; }
+    .lg { padding: 1px 4px; border-radius: 2px; font-weight: bold; }
+    .status-right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+    .live-px { font-size: 13px; font-weight: bold; padding: 2px 6px; background: #1a2030; border-radius: 3px; }
     #wrap { flex: 1; position: relative; overflow: hidden; background: #090b10; }
     canvas { display: block; cursor: crosshair; }
 </style>
@@ -1451,7 +1459,7 @@ def home():
 <body>
 
 <div class="topbar">
-    <span class="brand">⚡ SA TRAP-SCANNER PRO</span>
+    <span class="brand">⚡ SA ORDERFLOW</span>
     <select id="symSel" onchange="setSym(this.value)">
         <option value="BTCUSDT">BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
@@ -1473,10 +1481,11 @@ def home():
     <button class="btn" onclick="resetCamera()">Auto-Fit</button>
 
     <div class="legend">
-        <span class="lg-box" style="background:#d500f9;color:#fff;">P = PULLED (SPOOF)</span>
-        <span class="lg-box" style="background:#ff9100;color:#000;">ABS = ABSORPTION</span>
-        <span class="lg-box" style="border:1px solid #ffeb3b;color:#ffeb3b;">POC</span>
-        <span class="lg-box" style="border:1px solid #29b6f6;color:#29b6f6;">VAH/VAL</span>
+        <span class="lg" style="background:#00e5ff;color:#000;">H-B.ABS (Floor)</span>
+        <span class="lg" style="background:#ff9100;color:#000;">H-A.ABS (Ceiling)</span>
+        <span class="lg" style="background:#d500f9;color:#fff;">H-BP (Bid Pull)</span>
+        <span class="lg" style="background:#aa00ff;color:#fff;">H-AP (Ask Pull)</span>
+        <span class="lg" style="color:#84ffff;border:1px solid #00e5ff;">b-abs/a-abs</span>
     </div>
 
     <div class="status-right">
@@ -1498,8 +1507,7 @@ let candles = [];
 let scan = { bids_zone: [], asks_zone: [], cluster_size: 1.0 };
 let step = 1.0;
 
-// Wide default candle so every level's Sell | Buy + Pull/Absorb prints clearly
-let candleW = 185;
+let candleW = 215;
 let panX = 0;
 let minP = null;
 let maxP = null;
@@ -1511,8 +1519,7 @@ let needsRender = true;
 
 const DOM_W = 265;
 const YAXIS_W = 74;
-const DELTA_H = 82;
-const TIME_H = 20;
+const TIME_H = 20; // Full vertical space for candles! No fixed bottom box!
 
 function resize() {
     cv.width = wrap.clientWidth;
@@ -1535,7 +1542,7 @@ function resetCamera() {
     panX = 0;
     minP = null;
     maxP = null;
-    candleW = 185;
+    candleW = 215;
     needsRender = true;
 }
 
@@ -1558,7 +1565,7 @@ window.addEventListener('mousemove', e => {
         const dy = curY - lastY;
         panX += dx;
         if (minP !== null && maxP !== null) {
-            const chartH = cv.height - DELTA_H - TIME_H;
+            const chartH = cv.height - TIME_H;
             const shift = (dy / chartH) * (maxP - minP);
             minP += shift;
             maxP += shift;
@@ -1591,7 +1598,7 @@ cv.addEventListener('wheel', e => {
         }
     } else {
         const z = e.deltaY < 0 ? 1.14 : 0.88;
-        candleW = Math.max(30, Math.min(360, candleW * z));
+        candleW = Math.max(35, Math.min(390, candleW * z));
         if (minP !== null && maxP !== null) {
             const mid = (maxP + minP) * 0.5;
             let half = (maxP - minP) * 0.5 * (e.deltaY < 0 ? 0.93 : 1.07);
@@ -1607,7 +1614,7 @@ async function fetchData() {
     fetching = true;
     try {
         const [cRes, sRes] = await Promise.all([
-            fetch(`/api/candles?symbol=${symbol}&timeframe=${tf}&limit=30`),
+            fetch(`/api/candles?symbol=${symbol}&timeframe=${tf}&limit=28`),
             fetch(`/api/scan?symbol=${symbol}`)
         ]);
         const cData = await cRes.json();
@@ -1658,7 +1665,7 @@ function drawAll() {
     const W = cv.width;
     const H = cv.height;
     const chartW = W - DOM_W - YAXIS_W;
-    const chartH = H - DELTA_H - TIME_H;
+    const chartH = H - TIME_H; // Full height!
     const dec = step < 0.01 ? 4 : (step < 1 ? 2 : 1);
 
     ctx.fillStyle = '#090b10';
@@ -1667,7 +1674,7 @@ function drawAll() {
     if (!candles || candles.length === 0) {
         ctx.fillStyle = '#6c738a';
         ctx.font = '13px monospace';
-        ctx.fillText('Loading Institutional Footprint...', chartW / 2 - 90, chartH / 2);
+        ctx.fillText('Loading Side-Specific Orderflow...', chartW / 2 - 100, chartH / 2);
         return;
     }
 
@@ -1688,8 +1695,8 @@ function drawAll() {
             if (c.high > hi) hi = c.high;
         });
         const span = Math.max(hi - lo, step * 8);
-        minP = lo - span * 0.15;
-        maxP = hi + span * 0.15;
+        minP = lo - span * 0.22; // Extra bottom breathing room for floating delta pill
+        maxP = hi + span * 0.14;
     }
 
     const pSpan = Math.max(maxP - minP, step);
@@ -1720,31 +1727,44 @@ function drawAll() {
         const yO = pToY(c.open);
         const yC = pToY(c.close);
 
-        const boxW = candleW * 0.92;
+        const boxW = candleW * 0.94;
         const boxL = cx - boxW / 2;
         const boxR = cx + boxW / 2;
         const spineX = cx;
 
         const fpRaw = Array.isArray(c.footprint) ? c.footprint : Object.values(c.footprint || {});
-        // Keep levels within candle High/Low + 2 ticks
         const fp = fpRaw.filter(l => l.price >= c.low - step * 2 && l.price <= c.high + step * 2);
 
-        let maxV = 1;
-        let maxPullInCandle = 0;
+        let maxV = 1, sumV = 0;
+        let maxPull = 0.001, sumPull = 0;
+        let pullCount = 0;
+
         fp.forEach(l => {
-            if (l.volume > maxV) maxV = l.volume;
-            if ((l.pulled_qty || 0) > maxPullInCandle) maxPullInCandle = l.pulled_qty;
+            const v = l.volume || 0;
+            if (v > maxV) maxV = v;
+            sumV += v;
+            const p = (l.bid_pulled || 0) + (l.ask_pulled || 0) || (l.pulled_qty || 0);
+            if (p > 0) {
+                if (p > maxPull) maxPull = p;
+                sumPull += p;
+                pullCount++;
+            }
         });
 
-        // Dynamic thresholds for Heavy Pull & Heavy Absorption per candle
-        const heavyPullCut = Math.max(maxPullInCandle * 0.35, 0.1);
-        const heavyAbsCut = maxV * 0.55;
+        const avgV = fp.length > 0 ? sumV / fp.length : 1;
+        const avgPull = pullCount > 0 ? sumPull / pullCount : 0.1;
 
-        // VAH / VAL Value Area Box
+        const normAbsCut = Math.max(avgV * 1.15, maxV * 0.30);
+        const heavyAbsCut = Math.max(avgV * 2.0, maxV * 0.60);
+
+        const normPullCut = Math.max(avgPull * 0.5, 0.001);
+        const heavyPullCut = Math.max(avgPull * 1.6, maxPull * 0.55);
+
+        // VAH / VAL Value Area
         if (c.vah != null && c.val != null) {
             const yVah = pToY(c.vah + step * 0.5);
             const yVal = pToY(c.val - step * 0.5);
-            ctx.fillStyle = 'rgba(41, 182, 246, 0.07)';
+            ctx.fillStyle = 'rgba(41, 182, 246, 0.06)';
             ctx.fillRect(boxL, yVah, boxW, Math.max(2, yVal - yVah));
 
             ctx.strokeStyle = '#29b6f6';
@@ -1754,12 +1774,12 @@ function drawAll() {
             ctx.moveTo(boxL, yVal); ctx.lineTo(boxR, yVal);
             ctx.stroke();
 
-            if (candleW >= 70) {
+            if (candleW >= 75) {
                 ctx.fillStyle = '#29b6f6';
                 ctx.font = 'bold 9px monospace';
                 ctx.textAlign = 'left';
-                ctx.fillText(`VAH`, boxL + 8, yVah - 3);
-                ctx.fillText(`VAL`, boxL + 8, yVal + 9);
+                ctx.fillText(`VAH`, boxL + 6, yVah - 3);
+                ctx.fillText(`VAL`, boxL + 6, yVal + 9);
             }
         }
 
@@ -1781,12 +1801,13 @@ function drawAll() {
         ctx.stroke();
 
         const halfW = (boxW - 10) * 0.5;
-        const canPrint = candleW >= 75 && rowH >= 10;
+        const canPrint = candleW >= 80 && rowH >= 10;
 
-        let bottomDefense = false;
-        let topDefense = false;
+        let heavyBidAbsCount = 0;
+        let heavyAskAbsCount = 0;
+        let heavyBidPullCount = 0;
+        let heavyAskPullCount = 0;
 
-        // Draw Every Price Level Inside Candle
         fp.forEach(l => {
             const py = pToY(l.price);
             if (py < -20 || py > chartH + 20) return;
@@ -1796,44 +1817,62 @@ function drawAll() {
 
             const sellV = l.sell || 0;
             const buyV = l.buy || 0;
-            const totV = l.volume || 0;
-            const pulled = l.pulled_qty || 0;
+
+            let bPull = l.bid_pulled || 0;
+            let aPull = l.ask_pulled || 0;
+            if (bPull === 0 && aPull === 0 && (l.pulled_qty || 0) > 0) {
+                if (l.price <= c.close) bPull = l.pulled_qty;
+                else aPull = l.pulled_qty;
+            }
+
+            let bidAbsType = null;
+            if (sellV >= heavyAbsCut && (sellV >= buyV * 1.15 || l.price <= c.close)) {
+                bidAbsType = 'heavy';
+                heavyBidAbsCount++;
+            } else if (sellV >= normAbsCut && sellV >= buyV * 1.1) {
+                bidAbsType = 'norm';
+            }
+
+            let askAbsType = null;
+            if (buyV >= heavyAbsCut && (buyV >= sellV * 1.15 || l.price >= c.close)) {
+                askAbsType = 'heavy';
+                heavyAskAbsCount++;
+            } else if (buyV >= normAbsCut && buyV >= sellV * 1.1) {
+                askAbsType = 'norm';
+            }
+
+            let bidPullType = bPull >= heavyPullCut ? 'heavy' : (bPull >= normPullCut ? 'norm' : null);
+            let askPullType = aPull >= heavyPullCut ? 'heavy' : (aPull >= normPullCut ? 'norm' : null);
+            if (bidPullType === 'heavy') heavyBidPullCount++;
+            if (askPullType === 'heavy') heavyAskPullCount++;
+
+            if (bidAbsType === 'heavy') {
+                ctx.fillStyle = 'rgba(0, 229, 255, 0.22)';
+                ctx.fillRect(spineX - halfW, topY, halfW, cellH);
+            } else if (bidPullType === 'heavy') {
+                ctx.fillStyle = 'rgba(213, 0, 249, 0.22)';
+                ctx.fillRect(spineX - halfW, topY, halfW, cellH);
+            }
+
+            if (askAbsType === 'heavy') {
+                ctx.fillStyle = 'rgba(255, 145, 0, 0.25)';
+                ctx.fillRect(spineX, topY, halfW, cellH);
+            } else if (askPullType === 'heavy') {
+                ctx.fillStyle = 'rgba(170, 0, 255, 0.22)';
+                ctx.fillRect(spineX, topY, halfW, cellH);
+            }
 
             const sellRatio = Math.min(1, sellV / maxV);
             const buyRatio = Math.min(1, buyV / maxV);
-
             const sellImb = sellV > buyV * 2.5 && sellV > 0;
             const buyImb = buyV > sellV * 2.5 && buyV > 0;
 
-            // Detect Heavy Pull & Heavy Absorption at THIS exact level
-            const isHeavyPull = pulled >= heavyPullCut;
-            const isHeavyAbs = (totV >= heavyAbsCut && Math.min(buyV, sellV) >= totV * 0.25) || (l.status && l.status.includes('ABSORPTION'));
+            ctx.fillStyle = sellImb ? 'rgba(255, 23, 68, 0.55)' : 'rgba(242, 54, 69, 0.25)';
+            ctx.fillRect(spineX - halfW * sellRatio, topY, halfW * sellRatio, cellH);
 
-            // Check if absorption/pull happened in lower 35% (Bullish Defense) or upper 35% (Bearish Defense)
-            const relPos = (c.high > c.low) ? (l.price - c.low) / (c.high - c.low) : 0.5;
-            if (relPos <= 0.35 && (isHeavyAbs || (sellImb && c.close > l.price))) bottomDefense = true;
-            if (relPos >= 0.65 && (isHeavyAbs || (buyImb && c.close < l.price))) topDefense = true;
+            ctx.fillStyle = buyImb ? 'rgba(0, 230, 118, 0.55)' : 'rgba(8, 153, 129, 0.25)';
+            ctx.fillRect(spineX, topY, halfW * buyRatio, cellH);
 
-            // Level Background Highlight if Heavy Pull or Heavy Absorption
-            if (isHeavyAbs) {
-                ctx.fillStyle = 'rgba(255, 145, 0, 0.22)';
-                ctx.fillRect(spineX - halfW, topY, halfW * 2, cellH);
-            } else if (isHeavyPull) {
-                ctx.fillStyle = 'rgba(213, 0, 249, 0.18)';
-                ctx.fillRect(spineX - halfW, topY, halfW * 2, cellH);
-            }
-
-            // Left Sell Volume Bar
-            const sW = halfW * sellRatio;
-            ctx.fillStyle = sellImb ? 'rgba(255, 23, 68, 0.60)' : 'rgba(242, 54, 69, 0.28)';
-            ctx.fillRect(spineX - sW, topY, sW, cellH);
-
-            // Right Buy Volume Bar
-            const bW = halfW * buyRatio;
-            ctx.fillStyle = buyImb ? 'rgba(0, 230, 118, 0.60)' : 'rgba(8, 153, 129, 0.28)';
-            ctx.fillRect(spineX, topY, bW, cellH);
-
-            // POC Yellow Box
             const isPoc = c.poc != null && Math.abs(l.price - c.poc) < step * 0.4;
             if (isPoc) {
                 ctx.strokeStyle = '#ffeb3b';
@@ -1841,95 +1880,140 @@ function drawAll() {
                 ctx.strokeRect(spineX - halfW, topY, halfW * 2, cellH);
             }
 
-            // Print Exact Sell | Buy + Level Tags (P:qty / ABS / POC)
             if (canPrint) {
                 ctx.textBaseline = 'middle';
 
-                // Left Side: Sell Volume
                 ctx.font = (sellImb || isPoc) ? 'bold 10px monospace' : '10px monospace';
-                ctx.fillStyle = sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#d1d4dc');
+                ctx.fillStyle = sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb');
                 ctx.textAlign = 'right';
                 ctx.fillText(fmt(sellV), spineX - 3, py);
 
-                // Right Side: Buy Volume
                 ctx.font = (buyImb || isPoc) ? 'bold 10px monospace' : '10px monospace';
-                ctx.fillStyle = buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#d1d4dc');
+                ctx.fillStyle = buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#e0e3eb');
                 ctx.textAlign = 'left';
                 ctx.fillText(fmt(buyV), spineX + 3, py);
 
-                // Level-Specific Tag on Far Left/Right of the Cell!
-                ctx.font = 'bold 9px monospace';
-                if (isHeavyPull && pulled > 0) {
-                    ctx.fillStyle = '#ff4081';
-                    ctx.textAlign = 'left';
-                    ctx.fillText(`P:${fmt(pulled)}`, spineX - halfW + 1, py);
+                let leftTag = '';
+                let leftCol = '#fff';
+                if (bidAbsType === 'heavy') { leftTag = 'H-B.ABS'; leftCol = '#00e5ff'; }
+                else if (bidAbsType === 'norm') { leftTag = 'b-abs'; leftCol = '#84ffff'; }
+
+                if (bidPullType === 'heavy') {
+                    leftTag = leftTag ? `${leftTag}|H-BP:${fmt(bPull)}` : `H-BP:${fmt(bPull)}`;
+                    leftCol = '#ff4081';
+                } else if (bidPullType === 'norm') {
+                    leftTag = leftTag ? `${leftTag}|bp:${fmt(bPull)}` : `bp:${fmt(bPull)}`;
+                    if (!bidAbsType) leftCol = '#ff80ab';
                 }
-                if (isHeavyAbs) {
-                    ctx.fillStyle = '#ffab00';
+
+                if (leftTag) {
+                    ctx.font = (bidAbsType === 'heavy' || bidPullType === 'heavy') ? 'bold 9px monospace' : '9px monospace';
+                    ctx.fillStyle = leftCol;
+                    ctx.textAlign = 'left';
+                    ctx.fillText(leftTag, spineX - halfW + 2, py);
+                }
+
+                let rightTag = '';
+                let rightCol = '#fff';
+                if (askAbsType === 'heavy') { rightTag = 'H-A.ABS'; rightCol = '#ff9100'; }
+                else if (askAbsType === 'norm') { rightTag = 'a-abs'; rightCol = '#ffd180'; }
+
+                if (askPullType === 'heavy') {
+                    rightTag = rightTag ? `${rightTag}|H-AP:${fmt(aPull)}` : `H-AP:${fmt(aPull)}`;
+                    rightCol = '#e040fb';
+                } else if (askPullType === 'norm') {
+                    rightTag = rightTag ? `${rightTag}|ap:${fmt(aPull)}` : `ap:${fmt(aPull)}`;
+                    if (!askAbsType) rightCol = '#ea80fc';
+                }
+
+                if (!rightTag && isPoc) {
+                    rightTag = 'POC';
+                    rightCol = '#ffeb3b';
+                }
+
+                if (rightTag) {
+                    ctx.font = (askAbsType === 'heavy' || askPullType === 'heavy' || isPoc) ? 'bold 9px monospace' : '9px monospace';
+                    ctx.fillStyle = rightCol;
                     ctx.textAlign = 'right';
-                    ctx.fillText(`ABS`, boxR - 2, py);
-                } else if (isPoc) {
-                    ctx.fillStyle = '#ffeb3b';
-                    ctx.textAlign = 'right';
-                    ctx.fillText(`POC`, boxR - 2, py);
+                    ctx.fillText(rightTag, boxR - 2, py);
                 }
             }
         });
 
-        // SMART INSTITUTIONAL TRAP & DEFENSE SIGNAL ON CANDLE TOP/BOTTOM
-        // 1. Bullish Absorption / Delta Trap (Sellers trapped at low, candle closes up or defends low)
-        const bullTrapRev = bottomDefense && (c.close >= c.open || (c.delta < 0 && c.close > (c.high + c.low) * 0.5));
-        // 2. Bearish Absorption / Delta Trap (Buyers trapped at high, candle closes down or defends high)
-        const bearTrapRev = topDefense && (c.close <= c.open || (c.delta > 0 && c.close < (c.high + c.low) * 0.5));
+        // CANDLE-TOP & CANDLE-BOTTOM BANNERS + COMPACT TRANSPARENT FLOATING DELTA PILL
+        let botYBanner = yL + 6;
 
-        if (candleW >= 65) {
+        if (candleW >= 70) {
             ctx.font = 'bold 9px monospace';
             ctx.textAlign = 'center';
 
-            if (bullTrapRev) {
-                ctx.fillStyle = '#00e676';
-                ctx.fillRect(cx - 46, yL + 4, 92, 13);
+            let topYBanner = yH - 14;
+            if (heavyAskAbsCount > 0 && c.close < c.high - step) {
+                ctx.fillStyle = 'rgba(255, 145, 0, 0.88)';
+                ctx.fillRect(cx - 56, topYBanner, 112, 12);
                 ctx.fillStyle = '#000';
-                ctx.fillText('▲ ABSORB DEF (BUY)', cx, yL + 11);
+                ctx.fillText('▼ ASK ABSORBED (SWEEP)', cx, topYBanner + 6);
+                topYBanner -= 14;
             }
-            if (bearTrapRev) {
-                ctx.fillStyle = '#ff1744';
-                ctx.fillRect(cx - 46, yH - 17, 92, 13);
+            if (heavyAskPullCount > 0) {
+                ctx.fillStyle = 'rgba(170, 0, 255, 0.85)';
+                ctx.fillRect(cx - 54, topYBanner, 108, 12);
                 ctx.fillStyle = '#fff';
-                ctx.fillText('▼ ABSORB TRAP (SELL)', cx, yH - 10);
+                ctx.fillText('⚡ ASK PULLED (FAKE RES)', cx, topYBanner + 6);
+            }
+
+            if (heavyBidAbsCount > 0 && c.close > c.low + step) {
+                ctx.fillStyle = 'rgba(0, 229, 255, 0.88)';
+                ctx.fillRect(cx - 56, botYBanner, 112, 12);
+                ctx.fillStyle = '#000';
+                ctx.fillText('▲ BID ABSORBED (FLOOR)', cx, botYBanner + 6);
+                botYBanner += 14;
+            }
+            if (heavyBidPullCount > 0) {
+                ctx.fillStyle = 'rgba(213, 0, 249, 0.85)';
+                ctx.fillRect(cx - 54, botYBanner, 108, 12);
+                ctx.fillStyle = '#fff';
+                ctx.fillText('⚡ BID PULLED (FAKE SUP)', cx, botYBanner + 6);
+                botYBanner += 14;
             }
         }
 
-        // Bottom Delta + CVD + Volume Footer
-        const dTop = chartH + 2;
-        ctx.fillStyle = '#10141d';
-        ctx.fillRect(cx - candleW * 0.5, dTop, candleW, DELTA_H - 2);
-        ctx.strokeStyle = '#202636';
-        ctx.strokeRect(cx - candleW * 0.5, dTop, candleW, DELTA_H - 2);
-
-        ctx.fillStyle = c.delta >= 0 ? 'rgba(0, 230, 118, 0.25)' : 'rgba(255, 82, 82, 0.25)';
-        ctx.fillRect(cx - candleW * 0.46, dTop + 2, candleW * 0.92, 17);
-
+        // FLOATING TRANSPARENT DELTA / VOLUME / CVD PILL RIGHT UNDER CANDLE LOW
         if (candleW >= 55) {
+            const pillW = Math.min(candleW * 0.88, 136);
+            const pillH = 28;
+            // Clamp Y so if user zooms in heavily, pill stays visible near bottom of chart transparently
+            const pillY = Math.min(botYBanner + 2, chartH - pillH - 4);
+            const pillX = cx - pillW * 0.5;
+
+            // Ultra-lightweight semi-transparent glass background
+            ctx.fillStyle = 'rgba(14, 18, 28, 0.68)';
+            ctx.fillRect(pillX, pillY, pillW, pillH);
+
+            ctx.strokeStyle = c.delta >= 0 ? 'rgba(0, 230, 118, 0.45)' : 'rgba(255, 82, 82, 0.45)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(pillX, pillY, pillW, pillH);
+
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
 
-            ctx.font = 'bold 10px monospace';
+            // Line 1: Delta & Total Vol
+            ctx.font = 'bold 9px monospace';
             ctx.fillStyle = c.delta >= 0 ? '#00e676' : '#ff5252';
-            ctx.fillText(`Δ ${c.delta >= 0 ? '+' : ''}${fmt(c.delta)}`, cx, dTop + 11);
+            ctx.fillText(`Δ${c.delta >= 0 ? '+' : ''}${fmt(c.delta)} | V:${fmt(c.volume)}`, cx, pillY + 8);
 
-            ctx.font = '10px monospace';
-            ctx.fillStyle = '#d1d4dc';
-            ctx.fillText(`Vol:${fmt(c.volume)} | P:${fmt(maxPullInCandle)}`, cx, dTop + 29);
+            // Line 2: CVD & Buy/Sell Split
+            ctx.font = '9px monospace';
+            ctx.fillStyle = '#b0b8c8';
+            ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} B:${fmt(c.buy_volume)}`, cx, pillY + 20);
+        }
 
-            ctx.fillStyle = cvd >= 0 ? '#29b6f6' : '#ff80ab';
-            ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)}`, cx, dTop + 46);
-
-            ctx.fillStyle = '#ffeb3b';
-            ctx.fillText(`POC:${c.poc ? c.poc.toFixed(dec) : '--'}`, cx, dTop + 63);
-
+        // Time Axis Label at very bottom
+        if (candleW >= 55) {
             const tStr = new Date(c.start).toTimeString().slice(0, 5);
             ctx.fillStyle = '#6c738a';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
             ctx.fillText(tStr, cx, H - TIME_H * 0.5);
         }
     });
@@ -1985,7 +2069,7 @@ function drawAll() {
         ctx.fillText(yToP(curY).toFixed(dec), yAxisX + 5, curY);
     }
 
-    // Right-Side Live Orderbook & Wall Ladder
+    // Right-Side Live Orderbook Ladder
     const domX = chartW + YAXIS_W;
     ctx.fillStyle = '#0d1017';
     ctx.fillRect(domX, 0, DOM_W, H);
@@ -2027,14 +2111,14 @@ function drawAll() {
         ctx.fillText(`${fmt(a.resting_liquidity)} (${fmt(a.executed_volume)})`, domX + 80, ry + 9);
 
         if (a.status.includes('PULLED')) {
-            ctx.fillStyle = '#d500f9'; ctx.fillRect(domX + 200, ry + 1, 58, rH - 4);
-            ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.fillText('PULLED', domX + 210, ry + 9);
+            ctx.fillStyle = '#aa00ff'; ctx.fillRect(domX + 196, ry + 1, 62, rH - 4);
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.fillText('ASK PULL', domX + 204, ry + 9);
         } else if (a.status.includes('ABSORPTION')) {
-            ctx.fillStyle = '#ff9100'; ctx.fillRect(domX + 200, ry + 1, 58, rH - 4);
-            ctx.fillStyle = '#000'; ctx.font = 'bold 9px monospace'; ctx.fillText('ABSORB', domX + 210, ry + 9);
+            ctx.fillStyle = '#ff9100'; ctx.fillRect(domX + 196, ry + 1, 62, rH - 4);
+            ctx.fillStyle = '#000'; ctx.font = 'bold 9px monospace'; ctx.fillText('ASK ABS', domX + 206, ry + 9);
         } else if (a.resting_liquidity >= topAskCut && a.resting_liquidity > 0) {
-            ctx.fillStyle = '#2962ff'; ctx.fillRect(domX + 200, ry + 1, 58, rH - 4);
-            ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.fillText('ASK WALL', domX + 206, ry + 9);
+            ctx.fillStyle = '#2962ff'; ctx.fillRect(domX + 196, ry + 1, 62, rH - 4);
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.fillText('ASK WALL', domX + 204, ry + 9);
         }
         ry += rH;
     });
@@ -2059,14 +2143,14 @@ function drawAll() {
         ctx.fillText(`${fmt(b.resting_liquidity)} (${fmt(b.executed_volume)})`, domX + 80, ry + 9);
 
         if (b.status.includes('PULLED')) {
-            ctx.fillStyle = '#d500f9'; ctx.fillRect(domX + 200, ry + 1, 58, rH - 4);
-            ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.fillText('PULLED', domX + 210, ry + 9);
+            ctx.fillStyle = '#d500f9'; ctx.fillRect(domX + 196, ry + 1, 62, rH - 4);
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 9px monospace'; ctx.fillText('BID PULL', domX + 204, ry + 9);
         } else if (b.status.includes('ABSORPTION')) {
-            ctx.fillStyle = '#ff9100'; ctx.fillRect(domX + 200, ry + 1, 58, rH - 4);
-            ctx.fillStyle = '#000'; ctx.font = 'bold 9px monospace'; ctx.fillText('ABSORB', domX + 210, ry + 9);
+            ctx.fillStyle = '#00e5ff'; ctx.fillRect(domX + 196, ry + 1, 62, rH - 4);
+            ctx.fillStyle = '#000'; ctx.font = 'bold 9px monospace'; ctx.fillText('BID ABS', domX + 206, ry + 9);
         } else if (b.resting_liquidity >= topBidCut && b.resting_liquidity > 0) {
-            ctx.fillStyle = '#00b0ff'; ctx.fillRect(domX + 200, ry + 1, 58, rH - 4);
-            ctx.fillStyle = '#000'; ctx.font = 'bold 9px monospace'; ctx.fillText('BID WALL', domX + 206, ry + 9);
+            ctx.fillStyle = '#00b0ff'; ctx.fillRect(domX + 196, ry + 1, 62, rH - 4);
+            ctx.fillStyle = '#000'; ctx.font = 'bold 9px monospace'; ctx.fillText('BID WALL', domX + 204, ry + 9);
         }
         ry += rH;
     });
