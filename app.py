@@ -1400,274 +1400,804 @@ def before_request():
 # ============================================================
 
 from flask import Flask, jsonify, request, render_template_string # agar render_template_string na ho toh import mein jod lena
-
 @app.route("/")
 def home():
-    html_content = """
-<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SA Footprint & Liquidity UI</title>
-    <style>
-        body {
-            background-color: #121212;
-            color: #e0e0e0;
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 10px;
-        }
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: #1e1e1e;
-            padding: 10px 15px;
-            border-radius: 5px;
-            margin-bottom: 10px;
-        }
-        .controls span {
-            margin-right: 5px;
-            font-weight: bold;
-            color: #888;
-        }
-        button {
-            background: #2a2a2a;
-            color: #fff;
-            border: 1px solid #444;
-            padding: 6px 12px;
-            cursor: pointer;
-            border-radius: 3px;
-            margin-right: 4px;
-        }
-        button.active {
-            background: #00adb5;
-            border-color: #00adb5;
-            color: #000;
-            font-weight: bold;
-        }
-        button:hover {
-            background: #333;
-        }
-        .main-container {
-            display: flex;
-            gap: 10px;
-        }
-        .chart-panel {
-            flex: 3;
-            background: #181818;
-            border: 1px solid #333;
-            border-radius: 5px;
-            padding: 10px;
-            position: relative;
-        }
-        .orderbook-panel {
-            flex: 1;
-            background: #181818;
-            border: 1px solid #333;
-            border-radius: 5px;
-            padding: 10px;
-            max-height: 600px;
-            overflow-y: auto;
-        }
-        canvas {
-            width: 100%;
-            height: 500px;
-            background: #0f0f0f;
-            display: block;
-        }
-        .ob-table {
-            width: 100%;
-            font-size: 12px;
-            text-align: right;
-            border-collapse: collapse;
-        }
-        .ob-table th { color: #888; border-bottom: 1px solid #333; padding: 4px; }
-        .ob-table td { padding: 3px 4px; }
-        .bid-row { color: #26a69a; }
-        .ask-row { color: #ef5350; }
-        .status-bar {
-            margin-top: 10px;
-            background: #1e1e1e;
-            padding: 8px;
-            border-radius: 4px;
-            font-size: 13px;
-            display: flex;
-            justify-content: space-between;
-        }
-    </style>
+<meta charset="UTF-8">
+<title>SA Institutional Footprint Terminal</title>
+<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body {
+        background: #0b0e14;
+        color: #d1d4dc;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        overflow: hidden;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+    }
+    /* TOP TRADINGVIEW BAR */
+    .topbar {
+        height: 42px;
+        background: #131722;
+        border-bottom: 1px solid #2a2e39;
+        display: flex;
+        align-items: center;
+        padding: 0 10px;
+        gap: 8px;
+        font-size: 12px;
+    }
+    .brand {
+        font-weight: 800;
+        color: #00bcd4;
+        letter-spacing: 0.5px;
+        margin-right: 6px;
+        font-size: 13px;
+    }
+    select, .btn {
+        background: #1e222d;
+        color: #d1d4dc;
+        border: 1px solid #2a2e39;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-size: 12px;
+        cursor: pointer;
+        outline: none;
+    }
+    select:hover, .btn:hover { background: #2a2e39; }
+    .btn.active {
+        background: #2962ff;
+        color: #fff;
+        border-color: #2962ff;
+        font-weight: 600;
+    }
+    .sep { width: 1px; height: 22px; background: #2a2e39; margin: 0 4px; }
+    .live-metrics {
+        margin-left: auto;
+        display: flex;
+        gap: 14px;
+        align-items: center;
+        font-family: monospace;
+        font-size: 12px;
+    }
+    .price-badge {
+        font-size: 14px;
+        font-weight: bold;
+        padding: 2px 8px;
+        border-radius: 3px;
+        background: #1e222d;
+    }
+    /* MAIN WORKSPACE */
+    .workspace {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+    }
+    .chart-wrap {
+        flex: 1;
+        position: relative;
+        background: #0b0e14;
+        overflow: hidden;
+    }
+    canvas {
+        display: block;
+        cursor: crosshair;
+    }
+    /* RIGHT ORDERFLOW / DOM PANEL */
+    .dom-panel {
+        width: 310px;
+        background: #131722;
+        border-left: 1px solid #2a2e39;
+        display: flex;
+        flex-direction: column;
+        font-size: 11px;
+    }
+    .dom-header {
+        padding: 7px 10px;
+        background: #1e222d;
+        border-bottom: 1px solid #2a2e39;
+        font-weight: bold;
+        display: flex;
+        justify-content: space-between;
+        color: #9ba2b0;
+    }
+    .dom-section-title {
+        padding: 4px 8px;
+        background: #181c27;
+        color: #787b86;
+        font-size: 10px;
+        font-weight: bold;
+        text-transform: uppercase;
+        border-bottom: 1px solid #2a2e39;
+        border-top: 1px solid #2a2e39;
+    }
+    .dom-list {
+        flex: 1;
+        overflow-y: auto;
+        font-family: monospace;
+    }
+    .dom-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 2px 8px;
+        position: relative;
+        height: 20px;
+        border-bottom: 1px solid rgba(42,46,57,0.3);
+    }
+    .dom-bar {
+        position: absolute;
+        top: 1px;
+        bottom: 1px;
+        right: 0;
+        z-index: 0;
+        opacity: 0.22;
+    }
+    .dom-cell { position: relative; z-index: 1; }
+    .ask-text { color: #f23645; }
+    .bid-text { color: #089981; }
+    .wall-badge {
+        font-size: 9px;
+        padding: 1px 4px;
+        border-radius: 2px;
+        font-weight: bold;
+    }
+    .badge-pull { background: #e91e63; color: #fff; }
+    .badge-abs { background: #ff9800; color: #000; }
+    .badge-wall { background: #2962ff; color: #fff; }
+    .spread-box {
+        padding: 5px 10px;
+        background: #1e222d;
+        text-align: center;
+        font-weight: bold;
+        font-family: monospace;
+        border-top: 1px solid #2a2e39;
+        border-bottom: 1px solid #2a2e39;
+        color: #ffeb3b;
+    }
+    /* HELP OVERLAY */
+    .hint-box {
+        position: absolute;
+        top: 8px;
+        left: 10px;
+        background: rgba(19, 23, 34, 0.85);
+        border: 1px solid #2a2e39;
+        padding: 5px 10px;
+        border-radius: 4px;
+        font-size: 11px;
+        color: #9ba2b0;
+        pointer-events: none;
+    }
+</style>
 </head>
 <body>
 
-    <header>
-        <div>
-            <h2>SA Footprint Engine UI</h2>
-        </div>
-        <div class="controls">
-            <span>Symbol:</span>
-            <button class="sym-btn active" onclick="setSymbol('BTCUSDT')">BTC</button>
-            <button class="sym-btn" onclick="setSymbol('ETHUSDT')">ETH</button>
-            <button class="sym-btn" onclick="setSymbol('SOLUSDT')">SOL</button>
-            <button class="sym-btn" onclick="setSymbol('XRPUSDT')">XRP</button>
-        </div>
-        <div class="controls">
-            <span>TF:</span>
-            <button class="tf-btn active" onclick="setTimeframe('1m')">1m</button>
-            <button class="tf-btn" onclick="setTimeframe('3m')">3m</button>
-            <button class="tf-btn" onclick="setTimeframe('5m')">5m</button>
-            <button class="tf-btn" onclick="setTimeframe('15m')">15m</button>
-            <button class="tf-btn" onclick="setTimeframe('1h')">1h</button>
-        </div>
-    </header>
+<div class="topbar">
+    <span class="brand">⚡ SA FOOTPRINT PRO</span>
 
-    <div class="main-container">
-        <div class="chart-panel">
-            <h3 id="chart-title">BTCUSDT - 1m</h3>
-            <canvas id="footprintCanvas"></canvas>
-        </div>
-        
-        <div class="orderbook-panel">
-            <h3>Live Orderbook & Walls</h3>
-            <table class="ob-table" id="obTable">
-                <thead>
-                    <tr><th>Price</th><th>Size</th></tr>
-                </thead>
-                <tbody id="obBody">
-                    <tr><td colspan="2" style="text-align:center;">Loading...</td></tr>
-                </tbody>
-            </table>
+    <select id="symSelect" onchange="changeSymbol(this.value)">
+        <option value="BTCUSDT">BTCUSDT (Step: 1.0)</option>
+        <option value="ETHUSDT">ETHUSDT (Step: 0.1)</option>
+        <option value="SOLUSDT">SOLUSDT (Step: 0.01)</option>
+        <option value="XRPUSDT">XRPUSDT (Step: 0.0001)</option>
+    </select>
+
+    <div class="sep"></div>
+
+    <div id="tfGroup">
+        <button class="btn active" onclick="changeTF('1m', this)">1m</button>
+        <button class="btn" onclick="changeTF('3m', this)">3m</button>
+        <button class="btn" onclick="changeTF('5m', this)">5m</button>
+        <button class="btn" onclick="changeTF('15m', this)">15m</button>
+        <button class="btn" onclick="changeTF('30m', this)">30m</button>
+        <button class="btn" onclick="changeTF('1h', this)">1h</button>
+        <button class="btn" onclick="changeTF('4h', this)">4h</button>
+        <button class="btn" onclick="changeTF('1d', this)">1d</button>
+    </div>
+
+    <div class="sep"></div>
+
+    <select id="fpMode" onchange="changeFpMode(this.value)">
+        <option value="bidask">Footprint: Sell x Buy</option>
+        <option value="delta">Footprint: Delta + Pulls</option>
+        <option value="volume">Footprint: Total Vol + Pulls</option>
+    </select>
+
+    <button class="btn" onclick="resetView()">Auto-Fit (Reset)</button>
+
+    <div class="live-metrics">
+        <span id="syncBadge" style="color:#089981;">● SYNCED</span>
+        <span id="livePrice" class="price-badge">--</span>
+    </div>
+</div>
+
+<div class="workspace">
+    <div class="chart-wrap" id="chartWrap">
+        <canvas id="chartCanvas"></canvas>
+        <div class="hint-box" id="chartInfo">
+            Scroll: Zoom In/Out | Drag Chart: Move | Drag Price Axis: Scale Y | Double-Click: Auto-Fit
         </div>
     </div>
 
-    <div class="status-bar">
-        <span id="backend-status">Connecting to Render Backend...</span>
-        <span id="last-update">Last Update: --</span>
+    <div class="dom-panel">
+        <div class="dom-header">
+            <span>PRICE ZONE</span>
+            <span>RESTING / EXEC</span>
+            <span>SIGNAL</span>
+        </div>
+        <div class="dom-section-title">Heavy Ask Clusters (Sell Walls)</div>
+        <div class="dom-list" id="asksList"></div>
+        <div class="spread-box" id="spreadBox">LIVE SPREAD</div>
+        <div class="dom-section-title">Heavy Bid Clusters (Buy Walls)</div>
+        <div class="dom-list" id="bidsList"></div>
     </div>
+</div>
 
-    <script>
-        const API_BASE = ""; // Same origin (Render backend)
+<script>
+const canvas = document.getElementById('chartCanvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+const wrap = document.getElementById('chartWrap');
 
-        let currentSymbol = "BTCUSDT";
-        let currentTimeframe = "1m";
-        let canvas = document.getElementById("footprintCanvas");
-        let ctx = canvas.getContext("2d");
+let symbol = 'BTCUSDT';
+let timeframe = '1m';
+let fpMode = 'bidask';
 
-        function resizeCanvas() {
-            canvas.width = canvas.parentElement.clientWidth - 20;
-            canvas.height = 500;
+let candles = [];
+let scanData = { bids_zone: [], asks_zone: [] };
+let priceStep = 1.0;
+
+// Viewport Camera State (Pan & Zoom)
+let candleSpacing = 115; // Wide enough to show Footprint numbers by default!
+let panOffsetX = 0;      // Pixels shifted horizontally
+let manualMinP = null;
+let manualMaxP = null;
+
+// Mouse Interaction State
+let isDraggingChart = false;
+let isDraggingYAxis = false;
+let dragStartX = 0;
+let dragStartY = 0;
+let mouseX = -1;
+let mouseY = -1;
+
+const PRICE_AXIS_W = 78;
+const DELTA_PANEL_H = 72;
+const TIME_AXIS_H = 22;
+
+function resizeCanvas() {
+    canvas.width = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+    requestAnimationFrame(render);
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+function changeSymbol(val) {
+    symbol = val;
+    resetView();
+    fetchAll();
+}
+
+function changeTF(tf, btn) {
+    timeframe = tf;
+    document.querySelectorAll('#tfGroup .btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    resetView();
+    fetchAll();
+}
+
+function changeFpMode(val) {
+    fpMode = val;
+    requestAnimationFrame(render);
+}
+
+function resetView() {
+    panOffsetX = 0;
+    manualMinP = null;
+    manualMaxP = null;
+    candleSpacing = 115;
+    requestAnimationFrame(render);
+}
+
+// ---------------- MOUSE PAN & ZOOM ----------------
+canvas.addEventListener('mousedown', e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    dragStartX = x;
+    dragStartY = y;
+
+    if (x > canvas.width - PRICE_AXIS_W) {
+        isDraggingYAxis = true;
+    } else {
+        isDraggingChart = true;
+    }
+});
+
+window.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    mouseX = x;
+    mouseY = y;
+
+    if (isDraggingChart) {
+        const dx = x - dragStartX;
+        const dy = y - dragStartY;
+        panOffsetX += dx;
+
+        if (manualMinP !== null && manualMaxP !== null) {
+            const chartH = canvas.height - DELTA_PANEL_H - TIME_AXIS_H;
+            const range = manualMaxP - manualMinP;
+            const priceShift = (dy / chartH) * range;
+            manualMinP += priceShift;
+            manualMaxP += priceShift;
         }
-        window.addEventListener('resize', resizeCanvas);
-        resizeCanvas();
-
-        function setSymbol(sym) {
-            currentSymbol = sym;
-            document.querySelectorAll('.sym-btn').forEach(b => b.classList.remove('active'));
-            event.target.classList.add('active');
-            document.getElementById('chart-title').innerText = `${currentSymbol} - ${currentTimeframe}`;
-            fetchData();
-        }
-
-        function setTimeframe(tf) {
-            currentTimeframe = tf;
-            document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
-            event.target.classList.add('active');
-            document.getElementById('chart-title').innerText = `${currentSymbol} - ${currentTimeframe}`;
-            fetchData();
-        }
-
-        async function fetchData() {
-            try {
-                let res = await fetch(`${API_BASE}/api/candles?symbol=${currentSymbol}&timeframe=${currentTimeframe}&limit=50`);
-                let data = await res.json();
-
-                if (data.status === "ok") {
-                    drawChart(data.candles);
-                    document.getElementById('backend-status').innerText = "Status: Connected (Cloud Synchronized)";
-                    document.getElementById('last-update').innerText = "Last Update: " + new Date().toLocaleTimeString();
-                }
-
-                let obRes = await fetch(`${API_BASE}/api/orderbook?symbol=${currentSymbol}&limit=15`);
-                let obData = await obRes.json();
-                if (obData.status === "ok") {
-                    drawOrderbook(obData);
-                }
-
-            } catch (err) {
-                console.error(err);
-                document.getElementById('backend-status').innerText = "Status: Error Connecting to Backend";
+        dragStartX = x;
+        dragStartY = y;
+        requestAnimationFrame(render);
+    } else if (isDraggingYAxis) {
+        const dy = y - dragStartY;
+        if (manualMinP !== null && manualMaxP !== null) {
+            const mid = (manualMaxP + manualMinP) / 2;
+            let half = (manualMaxP - manualMinP) / 2;
+            half *= (1 + dy * 0.005);
+            if (half > priceStep * 2) {
+                manualMinP = mid - half;
+                manualMaxP = mid + half;
             }
         }
+        dragStartY = y;
+        requestAnimationFrame(render);
+    } else {
+        requestAnimationFrame(render);
+    }
+});
 
-        function drawChart(candles) {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            if (!candles || candles.length === 0) return;
+window.addEventListener('mouseup', () => {
+    isDraggingChart = false;
+    isDraggingYAxis = false;
+});
 
-            let width = canvas.width;
-            let height = canvas.height;
-            let candleWidth = width / candles.length;
+canvas.addEventListener('dblclick', () => resetView());
 
-            let minPrice = Math.min(...candles.map(c => c.low));
-            let maxPrice = Math.max(...candles.map(c => c.high));
-            let priceRange = maxPrice - minPrice || 1;
+canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
+    candleSpacing = Math.max(12, Math.min(260, candleSpacing * zoomFactor));
+    requestAnimationFrame(render);
+}, { passive: false });
 
-            function priceToY(p) {
-                return height - ((p - minPrice) / priceRange) * (height - 40) - 20;
+// ---------------- DATA FETCHING ----------------
+async function fetchAll() {
+    try {
+        const [cRes, sRes] = await Promise.all([
+            fetch(`/api/candles?symbol=${symbol}&timeframe=${timeframe}&limit=120`),
+            fetch(`/api/scan?symbol=${symbol}`)
+        ]);
+        const cJson = await cRes.json();
+        const sJson = await sRes.json();
+
+        if (cJson.status === 'ok' && Array.isArray(cJson.candles)) {
+            candles = cJson.candles;
+            if (candles.length > 0) {
+                const last = candles[candles.length - 1];
+                const pEl = document.getElementById('livePrice');
+                pEl.innerText = last.close;
+                pEl.style.color = last.close >= last.open ? '#089981' : '#f23645';
             }
+        }
+        if (sJson.status === 'ok') {
+            scanData = sJson;
+            priceStep = sJson.cluster_size || 1.0;
+            renderDOM(sJson);
+        }
+        document.getElementById('syncBadge').innerText = '● LIVE SYNCED';
+        document.getElementById('syncBadge').style.color = '#089981';
+        requestAnimationFrame(render);
+    } catch (err) {
+        document.getElementById('syncBadge').innerText = '● RECONNECTING...';
+        document.getElementById('syncBadge').style.color = '#ff9800';
+    }
+}
 
-            candles.forEach((c, i) => {
-                let x = i * candleWidth + candleWidth / 2;
-                let yHigh = priceToY(c.high);
-                let yLow = priceToY(c.low);
-                let yOpen = priceToY(c.open);
-                let yClose = priceToY(c.close);
+// ---------------- RIGHT PANEL: VISUAL ORDERFLOW DOM ----------------
+function renderDOM(data) {
+    const asksEl = document.getElementById('asksList');
+    const bidsEl = document.getElementById('bidsList');
+    const asks = (data.asks_zone || []).slice(0, 18).reverse();
+    const bids = (data.bids_zone || []).slice(0, 18);
 
-                let isGreen = c.close >= c.open;
-                ctx.strokeStyle = isGreen ? '#26a69a' : '#ef5350';
-                ctx.fillStyle = ctx.strokeStyle;
+    let maxRest = 1;
+    asks.concat(bids).forEach(z => {
+        if (z.resting_liquidity > maxRest) maxRest = z.resting_liquidity;
+    });
 
+    // Find top 2 heavy walls on each side
+    const sortedAskWalls = [...asks].sort((a,b) => b.resting_liquidity - a.resting_liquidity);
+    const heavyAskCut = sortedAskWalls[1] ? sortedAskWalls[1].resting_liquidity : 999999;
+
+    const sortedBidWalls = [...bids].sort((a,b) => b.resting_liquidity - a.resting_liquidity);
+    const heavyBidCut = sortedBidWalls[1] ? sortedBidWalls[1].resting_liquidity : 999999;
+
+    const decimals = priceStep < 0.01 ? 4 : (priceStep < 1 ? 2 : 1);
+
+    asksEl.innerHTML = asks.map(a => {
+        const pct = Math.min(100, (a.resting_liquidity / maxRest) * 100);
+        let badge = '';
+        if (a.status.includes('PULLED')) badge = `<span class="wall-badge badge-pull">PULLED</span>`;
+        else if (a.status.includes('ABSORPTION')) badge = `<span class="wall-badge badge-abs">ABSORB</span>`;
+        else if (a.resting_liquidity >= heavyAskCut && a.resting_liquidity > 0) badge = `<span class="wall-badge badge-wall">WALL</span>`;
+
+        return `<div class="dom-row">
+            <div class="dom-bar" style="width:${pct}%; background:#f23645;"></div>
+            <span class="dom-cell ask-text">${Number(a.price_zone).toFixed(decimals)}</span>
+            <span class="dom-cell">${a.resting_liquidity} <small style="color:#787b86;">(${a.executed_volume})</small></span>
+            <span class="dom-cell">${badge}</span>
+        </div>`;
+    }).join('');
+
+    bidsEl.innerHTML = bids.map(b => {
+        const pct = Math.min(100, (b.resting_liquidity / maxRest) * 100);
+        let badge = '';
+        if (b.status.includes('PULLED')) badge = `<span class="wall-badge badge-pull">PULLED</span>`;
+        else if (b.status.includes('ABSORPTION')) badge = `<span class="wall-badge badge-abs">ABSORB</span>`;
+        else if (b.resting_liquidity >= heavyBidCut && b.resting_liquidity > 0) badge = `<span class="wall-badge badge-wall">WALL</span>`;
+
+        return `<div class="dom-row">
+            <div class="dom-bar" style="width:${pct}%; background:#089981;"></div>
+            <span class="dom-cell bid-text">${Number(b.price_zone).toFixed(decimals)}</span>
+            <span class="dom-cell">${b.resting_liquidity} <small style="color:#787b86;">(${b.executed_volume})</small></span>
+            <span class="dom-cell">${badge}</span>
+        </div>`;
+    }).join('');
+
+    if (candles.length > 0) {
+        const last = candles[candles.length - 1];
+        document.getElementById('spreadBox').innerText = `${symbol} @ ${last.close} | Δ ${last.delta.toFixed(2)}`;
+    }
+}
+
+// ---------------- MAIN CANVAS FOOTPRINT ENGINE ----------------
+function getFootprintArray(fp) {
+    if (!fp) return [];
+    if (Array.isArray(fp)) return fp;
+    return Object.values(fp);
+}
+
+function render() {
+    const W = canvas.width;
+    const H = canvas.height;
+    const chartW = W - PRICE_AXIS_W;
+    const chartH = H - DELTA_PANEL_H - TIME_AXIS_H;
+
+    // Clear Background
+    ctx.fillStyle = '#0b0e14';
+    ctx.fillRect(0, 0, W, H);
+
+    if (!candles || candles.length === 0) {
+        ctx.fillStyle = '#787b86';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('Loading Institutional Footprint Data...', chartW / 2 - 110, chartH / 2);
+        return;
+    }
+
+    // Calculate visible candles based on X pan & spacing
+    const rightAnchorX = chartW - 90 + panOffsetX;
+    const visibleCandles = [];
+
+    for (let i = candles.length - 1; i >= 0; i--) {
+        const offsetFromLast = candles.length - 1 - i;
+        const cx = rightAnchorX - offsetFromLast * candleSpacing;
+        if (cx + candleSpacing < 0) break;
+        if (cx - candleSpacing <= chartW) {
+            visibleCandles.push({ candle: candles[i], cx, index: i });
+        }
+    }
+
+    if (visibleCandles.length === 0) return;
+
+    // Auto-compute Y price bounds if not manually scaled
+    if (manualMinP === null || manualMaxP === null) {
+        let minP = Infinity, maxP = -Infinity;
+        visibleCandles.forEach(({ candle }) => {
+            if (candle.low < minP) minP = candle.low;
+            if (candle.high > maxP) maxP = candle.high;
+        });
+        const pad = Math.max((maxP - minP) * 0.12, priceStep * 4);
+        manualMinP = minP - pad;
+        manualMaxP = maxP + pad;
+    }
+
+    const minP = manualMinP;
+    const maxP = manualMaxP;
+    const priceRange = Math.max(maxP - minP, priceStep);
+
+    function priceToY(p) {
+        return chartH - ((p - minP) / priceRange) * chartH;
+    }
+    function yToPrice(y) {
+        return minP + ((chartH - y) / chartH) * priceRange;
+    }
+
+    const decimals = priceStep < 0.01 ? 4 : (priceStep < 1 ? 2 : 1);
+
+    // 1. Horizontal Grid Lines & Price Axis Labels
+    const gridSteps = 10;
+    ctx.strokeStyle = '#181c27';
+    ctx.lineWidth = 1;
+    ctx.font = '11px monospace';
+    ctx.fillStyle = '#787b86';
+
+    for (let i = 0; i <= gridSteps; i++) {
+        const y = (chartH / gridSteps) * i;
+        const p = yToPrice(y);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(chartW, y);
+        ctx.stroke();
+    }
+
+    // Row height for 1 priceStep
+    const rowH = Math.abs(priceToY(minP + priceStep) - priceToY(minP));
+    const showFpText = candleSpacing >= 65 && rowH >= 11;
+
+    // 2. Render Each Visible Candle + Footprint Table
+    let cvd = 0;
+    visibleCandles.slice().reverse().forEach(({ candle, cx }) => {
+        cvd += (candle.delta || 0);
+        const isBull = candle.close >= candle.open;
+        const mainColor = isBull ? '#089981' : '#f23645';
+
+        const yHigh = priceToY(candle.high);
+        const yLow = priceToY(candle.low);
+        const yOpen = priceToY(candle.open);
+        const yClose = priceToY(candle.close);
+
+        const fpList = getFootprintArray(candle.footprint).filter(
+            lvl => lvl.price >= candle.low - priceStep * 3 && lvl.price <= candle.high + priceStep * 3
+        );
+
+        let maxLvlVol = 1;
+        fpList.forEach(l => { if (l.volume > maxLvlVol) maxLvlVol = l.volume; });
+
+        if (candleSpacing >= 45) {
+            // PRO FOOTPRINT MODE: Left thin OHLC bar + Footprint Cluster Box
+            const boxW = candleSpacing * 0.86;
+            const boxLeft = cx - boxW / 2;
+            const ohlcX = boxLeft + 4;
+
+            // Thin OHLC Wick & Body on Left Spine
+            ctx.strokeStyle = mainColor;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(ohlcX, yHigh);
+            ctx.lineTo(ohlcX, yLow);
+            ctx.stroke();
+
+            ctx.fillStyle = mainColor;
+            const bTop = Math.min(yOpen, yClose);
+            const bH = Math.max(Math.abs(yClose - yOpen), 2);
+            ctx.fillRect(ohlcX - 2.5, bTop, 5, bH);
+
+            // VAH / VAL Value Area Shaded Zone
+            if (candle.vah != null && candle.val != null) {
+                const yVah = priceToY(candle.vah + priceStep / 2);
+                const yVal = priceToY(candle.val - priceStep / 2);
+                ctx.fillStyle = 'rgba(41, 98, 255, 0.08)';
+                ctx.fillRect(boxLeft + 8, yVah, boxW - 10, Math.max(2, yVal - yVah));
+
+                // VAH & VAL Horizontal Lines
+                ctx.strokeStyle = 'rgba(41, 98, 255, 0.65)';
+                ctx.lineWidth = 1;
                 ctx.beginPath();
-                ctx.moveTo(x, yHigh);
-                ctx.lineTo(x, yLow);
+                ctx.moveTo(boxLeft + 8, yVah);
+                ctx.lineTo(boxLeft + boxW, yVah);
+                ctx.moveTo(boxLeft + 8, yVal);
+                ctx.lineTo(boxLeft + boxW, yVal);
                 ctx.stroke();
+            }
 
-                let bodyY = Math.min(yOpen, yClose);
-                let bodyHeight = Math.max(Math.abs(yOpen - yClose), 2);
-                ctx.fillRect(x - candleWidth * 0.3, bodyY, candleWidth * 0.6, bodyHeight);
+            // Draw Each Price Level Cell Inside Candle
+            fpList.forEach(lvl => {
+                const py = priceToY(lvl.price);
+                const cellH = Math.max(rowH - 1, 2);
+                const cellTop = py - cellH / 2;
+                const cellLeft = boxLeft + 9;
+                const cellW = boxW - 10;
 
-                if (c.poc) {
-                    let yPoc = priceToY(c.poc);
-                    ctx.fillStyle = '#ffeb3b';
-                    ctx.fillRect(x - candleWidth * 0.35, yPoc - 1, candleWidth * 0.7, 2);
+                const volPct = Math.min(1, (lvl.volume || 0) / maxLvlVol);
+                const lvlDelta = (lvl.buy || 0) - (lvl.sell || 0);
+
+                // Background Heatmap Bar inside cell
+                ctx.fillStyle = lvlDelta >= 0
+                    ? `rgba(8, 153, 129, ${0.12 + volPct * 0.45})`
+                    : `rgba(242, 54, 69, ${0.12 + volPct * 0.45})`;
+                ctx.fillRect(cellLeft, cellTop, cellW * volPct, cellH);
+
+                // POC Highlight (Yellow Border)
+                if (candle.poc != null && Math.abs(lvl.price - candle.poc) < priceStep * 0.4) {
+                    ctx.strokeStyle = '#ffeb3b';
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeRect(cellLeft, cellTop, cellW, cellH);
+                }
+
+                // Pulled Liquidity Trap / Absorption Highlight Marker
+                if (lvl.pulled_qty && lvl.pulled_qty > 0 && (lvl.volume > 0 || lvl.price >= candle.low && lvl.price <= candle.high)) {
+                    ctx.fillStyle = '#e91e63';
+                    ctx.fillRect(cellLeft + cellW - 4, cellTop, 4, cellH);
+                }
+
+                // Print Bid x Ask or Delta Numbers when zoomed in
+                if (showFpText) {
+                    ctx.font = '10px monospace';
+                    ctx.textBaseline = 'middle';
+                    const midX = cellLeft + cellW / 2;
+
+                    if (fpMode === 'bidask') {
+                        // Left = Sell, Right = Buy
+                        ctx.fillStyle = lvl.sell > lvl.buy * 2.5 ? '#ff5252' : '#d1d4dc';
+                        ctx.textAlign = 'right';
+                        ctx.fillText(formatQty(lvl.sell), midX - 3, py);
+
+                        ctx.fillStyle = '#555';
+                        ctx.textAlign = 'center';
+                        ctx.fillText('x', midX, py);
+
+                        ctx.fillStyle = lvl.buy > lvl.sell * 2.5 ? '#00e676' : '#d1d4dc';
+                        ctx.textAlign = 'left';
+                        ctx.fillText(formatQty(lvl.buy), midX + 3, py);
+                    } else if (fpMode === 'delta') {
+                        ctx.fillStyle = lvlDelta >= 0 ? '#00e676' : '#ff5252';
+                        ctx.textAlign = 'center';
+                        const pullTxt = lvl.pulled_qty > 0 ? ` [P:${formatQty(lvl.pulled_qty)}]` : '';
+                        ctx.fillText(`${lvlDelta >= 0 ? '+' : ''}${formatQty(lvlDelta)}${pullTxt}`, midX, py);
+                    } else {
+                        ctx.fillStyle = '#ffffff';
+                        ctx.textAlign = 'center';
+                        const pullTxt = lvl.pulled_qty > 0 ? ` P:${formatQty(lvl.pulled_qty)}` : '';
+                        ctx.fillText(`${formatQty(lvl.volume)}${pullTxt}`, midX, py);
+                    }
                 }
             });
+
+        } else {
+            // COMPACT CANDLE MODE (When Zoomed Out)
+            const bodyW = Math.max(candleSpacing * 0.65, 3);
+            ctx.strokeStyle = mainColor;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(cx, yHigh);
+            ctx.lineTo(cx, yLow);
+            ctx.stroke();
+
+            ctx.fillStyle = mainColor;
+            const bTop = Math.min(yOpen, yClose);
+            const bH = Math.max(Math.abs(yClose - yOpen), 2);
+            ctx.fillRect(cx - bodyW / 2, bTop, bodyW, bH);
+
+            if (candle.poc != null) {
+                const yPoc = priceToY(candle.poc);
+                ctx.fillStyle = '#ffeb3b';
+                ctx.fillRect(cx - bodyW / 2 - 1, yPoc - 1, bodyW + 2, 2.5);
+            }
         }
 
-        function drawOrderbook(ob) {
-            let tbody = document.getElementById('obBody');
-            tbody.innerHTML = "";
+        // 3. BOTTOM DELTA & VOLUME STATS BAR (Exocharts Footer)
+        const footerTop = chartH + 2;
+        ctx.fillStyle = '#131722';
+        ctx.fillRect(cx - candleSpacing / 2, footerTop, candleSpacing, DELTA_PANEL_H - 2);
+        ctx.strokeStyle = '#2a2e39';
+        ctx.strokeRect(cx - candleSpacing / 2, footerTop, candleSpacing, DELTA_PANEL_H - 2);
 
-            let asks = ob.asks.slice().reverse();
-            asks.forEach(a => {
-                let row = `<tr class="ask-row"><td>${a.price.toFixed(2)}</td><td>${a.quantity.toFixed(3)}</td></tr>`;
-                tbody.innerHTML += row;
-            });
+        if (candleSpacing >= 45) {
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
 
-            tbody.innerHTML += `<tr><td colspan="2" style="background:#222; text-align:center; font-size:10px;">SPREAD / LIVE</td></tr>`;
+            // Row 1: Delta
+            ctx.fillStyle = candle.delta >= 0 ? '#089981' : '#f23645';
+            ctx.fillText(`Δ ${formatQty(candle.delta)}`, cx, footerTop + 6);
 
-            ob.bids.forEach(b => {
-                let row = `<tr class="bid-row"><td>${b.price.toFixed(2)}</td><td>${b.quantity.toFixed(3)}</td></tr>`;
-                tbody.innerHTML += row;
-            });
+            // Row 2: Volume
+            ctx.fillStyle = '#d1d4dc';
+            ctx.fillText(`V ${formatQty(candle.volume)}`, cx, footerTop + 24);
+
+            // Row 3: POC
+            ctx.fillStyle = '#ffeb3b';
+            ctx.fillText(`POC ${candle.poc ? candle.poc.toFixed(decimals) : '--'}`, cx, footerTop + 42);
         }
 
-        setInterval(fetchData, 2000);
-        fetchData();
-    </script>
+        // 4. TIME AXIS LABELS
+        const timeY = H - TIME_AXIS_H + 5;
+        if (candleSpacing >= 55) {
+            const dt = new Date(candle.start);
+            const tStr = dt.toTimeString().slice(0, 5);
+            ctx.fillStyle = '#787b86';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(tStr, cx, timeY);
+        }
+    });
+
+    // 5. RIGHT-SIDE PRICE SCALE (Y-AXIS)
+    ctx.fillStyle = '#131722';
+    ctx.fillRect(chartW, 0, PRICE_AXIS_W, H);
+    ctx.strokeStyle = '#2a2e39';
+    ctx.beginPath();
+    ctx.moveTo(chartW, 0);
+    ctx.lineTo(chartW, H);
+    ctx.stroke();
+
+    ctx.fillStyle = '#9ba2b0';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= gridSteps; i++) {
+        const y = (chartH / gridSteps) * i;
+        const p = yToPrice(y);
+        ctx.fillText(p.toFixed(decimals), chartW + 6, y);
+    }
+
+    // Current Live Price Line & Tag on Y-Axis
+    if (candles.length > 0) {
+        const last = candles[candles.length - 1];
+        const curY = priceToY(last.close);
+        if (curY >= 0 && curY <= chartH) {
+            const isUp = last.close >= last.open;
+            ctx.strokeStyle = isUp ? '#089981' : '#f23645';
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(0, curY);
+            ctx.lineTo(chartW, curY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = isUp ? '#089981' : '#f23645';
+            ctx.fillRect(chartW, curY - 10, PRICE_AXIS_W, 20);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 11px monospace';
+            ctx.fillText(last.close.toFixed(decimals), chartW + 6, curY);
+        }
+    }
+
+    // 6. CROSSHAIR & HOVER INSPECTOR
+    if (mouseX > 0 && mouseX < chartW && mouseY > 0 && mouseY < chartH) {
+        ctx.strokeStyle = 'rgba(209, 212, 220, 0.35)';
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(mouseX, 0);
+        ctx.lineTo(mouseX, chartH);
+        ctx.moveTo(0, mouseY);
+        ctx.lineTo(chartW, mouseY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const hoverPrice = yToPrice(mouseY);
+        ctx.fillStyle = '#2a2e39';
+        ctx.fillRect(chartW, mouseY - 10, PRICE_AXIS_W, 20);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(hoverPrice.toFixed(decimals), chartW + 6, mouseY);
+    }
+}
+
+function formatQty(val) {
+    if (val === undefined || val === null) return '0';
+    const abs = Math.abs(val);
+    if (abs >= 1000) return (val / 1000).toFixed(1) + 'K';
+    if (abs >= 100) return val.toFixed(0);
+    if (abs >= 1) return val.toFixed(1);
+    return val.toFixed(2);
+}
+
+// Fast 1-second live polling without memory leak
+setInterval(fetchAll, 1000);
+fetchAll();
+</script>
 </body>
-</html>
-    """
-    return html_content
+</html>"""
 
 @app.route("/hello")
 def hello():
