@@ -84,7 +84,7 @@ TIMEFRAMES = {
     "1d": 86400,
 }
 
-ROLLING_SECONDS = 48 * 60 * 60  # 48 Hours RAM Window
+ROLLING_SECONDS = 12 * 60 * 60  # 12 Hours in RAM (48H stays in Turso DB)
 
 PRICE_STEP = {
     "BTCUSDT": 1.0,
@@ -139,17 +139,17 @@ orderbook = {
         "initialized": False,
         "resyncing": False,
         "_init_worker_active": False,
-        "buffer": deque(maxlen=4000),
-        "liquidity_history": deque(maxlen=1500),
+        "buffer": deque(maxlen=1000),
+        "liquidity_history": deque(maxlen=300),
         "liquidity_lots": {
             "bid": defaultdict(deque),
             "ask": defaultdict(deque),
         },
-        "trade_history": deque(maxlen=1500),
+        "trade_history": deque(maxlen=300),
         "trade_match_index": defaultdict(deque),
         "liquidity_match_index": defaultdict(deque),
-        "trade_flow_diagnostics": deque(maxlen=200),
-        "match_diagnostics": deque(maxlen=200),
+        "trade_flow_diagnostics": deque(maxlen=50),
+        "match_diagnostics": deque(maxlen=50),
         "last_depth_event_time": None,
         "last_depth_update_id": None,
         "sequence_errors": 0,
@@ -172,7 +172,7 @@ def load_historical_candles_from_turso():
     if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return
     try:
-        cutoff = int(time.time() * 1000) - (48 * 60 * 60 * 1000)
+        cutoff = int(time.time() * 1000) - (ROLLING_SECONDS * 1000)
         with create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as client:
             res = client.execute(
                 "SELECT symbol, tf, time, open, high, low, close, delta, totalVol, buyVol, sellVol, trades, poc, pocVol, vah, val, valueAreaVol, footprint FROM candles WHERE time >= ? ORDER BY time ASC",
@@ -186,7 +186,14 @@ def load_historical_candles_from_turso():
                         continue
                     try:
                         fp_list = json.loads(fp_json) if fp_json else []
-                        fp_dict = {str(item["price"]): item for item in fp_list}
+                        step = PRICE_STEP.get(sym, 1.0)
+                        margin = step * 30
+                        # Filter out old garbage far-away price levels from RAM
+                        fp_dict = {
+                            str(item["price"]): item
+                            for item in fp_list
+                            if (l - margin) <= float(item.get("price", 0)) <= (h + margin)
+                        }
                     except Exception:
                         fp_dict = {}
 
@@ -304,7 +311,7 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
 
 
 def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty, status_str):
-    """Stamps pull/absorption metadata directly into active current candles across all timeframes."""
+    """Stamps pull/absorption metadata ONLY near the active candle price range to prevent RAM bloat."""
     step = PRICE_STEP.get(symbol, 1.0)
     try:
         p_float = float(price_str)
@@ -312,11 +319,16 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
         return
     bucket_price = round_price_to_step(p_float, step)
     key = str(bucket_price)
+    max_distance = step * 25  # Only stamp within 25 price steps of candle High/Low
 
     with lock:
         for tf in TIMEFRAMES.keys():
             curr = current_candles[symbol][tf]
             if curr is not None and "footprint" in curr:
+                # Ignore far-away orderbook noise
+                if bucket_price < (curr["low"] - max_distance) or bucket_price > (curr["high"] + max_distance):
+                    continue
+
                 level = curr["footprint"].get(key)
                 if level is None:
                     level = {
@@ -332,7 +344,7 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
                     curr["footprint"][key] = level
                 
                 if pulled_qty > 0.0:
-                    level["pulled_qty"] = float(level.get("pulled_qty", 0.0)) + float(pulled_qty)
+                    level["pulled_qty"] = round(float(level.get("pulled_qty", 0.0)) + float(pulled_qty), 4)
                 
                 if status_str in ("LIQUIDITY_PULLED", "HEAVY ABSORPTION", "PARTIAL_EXECUTION_PULL"):
                     level["status"] = status_str
