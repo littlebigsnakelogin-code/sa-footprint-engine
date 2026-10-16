@@ -1621,14 +1621,28 @@ cv.addEventListener('dblclick', resetCamera);
 cv.addEventListener('wheel', e => {
     e.preventDefault();
     const chartRight = cv.width - DOM_W - YAXIS_W;
+    const chartH = cv.height - TIME_H;
+    const zoomIn = e.deltaY < 0;
+
     if (curX >= chartRight && curX <= chartRight + YAXIS_W) {
-        scaleY(e.deltaY < 0 ? 0.86 : 1.16);
+        // Y-Axis only zoom
+        scaleY(zoomIn ? 0.84 : 1.19);
     } else if (curX < chartRight) {
-        if (e.shiftKey) {
-            scaleY(e.deltaY < 0 ? 0.86 : 1.16);
-        } else {
-            const z = e.deltaY < 0 ? 1.14 : 0.88;
-            candleW = Math.max(45, Math.min(420, candleW * z));
+        // 1. Zoom Candle Width (X-Axis)
+        const zx = zoomIn ? 1.15 : 0.87;
+        candleW = Math.max(45, Math.min(480, candleW * zx));
+
+        // 2. Simultaneously Zoom Price Scale (Y-Axis) anchored at Mouse Cursor Y
+        // So Auto-Fit automatically unfolds 10x -> 5x -> 2x -> 1x Micro Levels!
+        if (!e.shiftKey && minP !== null && maxP !== null) {
+            const zy = zoomIn ? 0.85 : 1.18;
+            const span = maxP - minP;
+            const newSpan = Math.max(rawStep * 6, span * zy);
+            const mouseRatio = Math.max(0.1, Math.min(0.9, (chartH - curY) / chartH));
+            const mousePrice = minP + span * mouseRatio;
+
+            minP = mousePrice - newSpan * mouseRatio;
+            maxP = minP + newSpan;
         }
     }
     needsRender = true;
