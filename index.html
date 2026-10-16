@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SA Footprint & Liquidity UI</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 10px;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #1e1e1e;
+            padding: 10px 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        .controls span {
+            margin-right: 5px;
+            font-weight: bold;
+            color: #888;
+        }
+        button {
+            background: #2a2a2a;
+            color: #fff;
+            border: 1px solid #444;
+            padding: 6px 12px;
+            cursor: pointer;
+            border-radius: 3px;
+            margin-right: 4px;
+        }
+        button.active {
+            background: #00adb5;
+            border-color: #00adb5;
+            color: #000;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #333;
+        }
+        .main-container {
+            display: flex;
+            gap: 10px;
+        }
+        .chart-panel {
+            flex: 3;
+            background: #181818;
+            border: 1px solid #333;
+            border-radius: 5px;
+            padding: 10px;
+            position: relative;
+        }
+        .orderbook-panel {
+            flex: 1;
+            background: #181818;
+            border: 1px solid #333;
+            border-radius: 5px;
+            padding: 10px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        canvas {
+            width: 100%;
+            height: 500px;
+            background: #0f0f0f;
+            display: block;
+        }
+        .ob-table {
+            width: 100%;
+            font-size: 12px;
+            text-align: right;
+            border-collapse: collapse;
+        }
+        .ob-table th { color: #888; border-bottom: 1px solid #333; padding: 4px; }
+        .ob-table td { padding: 3px 4px; }
+        .bid-row { color: #26a69a; }
+        .ask-row { color: #ef5350; }
+        .status-bar {
+            margin-top: 10px;
+            background: #1e1e1e;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            display: flex;
+            justify-content: space-between;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div>
+            <h2>SA Footprint Engine UI</h2>
+        </div>
+        <div class="controls">
+            <span>Symbol:</span>
+            <button class="sym-btn active" onclick="setSymbol('BTCUSDT')">BTC</button>
+            <button class="sym-btn" onclick="setSymbol('ETHUSDT')">ETH</button>
+            <button class="sym-btn" onclick="setSymbol('SOLUSDT')">SOL</button>
+            <button class="sym-btn" onclick="setSymbol('XRPUSDT')">XRP</button>
+        </div>
+        <div class="controls">
+            <span>TF:</span>
+            <button class="tf-btn active" onclick="setTimeframe('1m')">1m</button>
+            <button class="tf-btn" onclick="setTimeframe('3m')">3m</button>
+            <button class="tf-btn" onclick="setTimeframe('5m')">5m</button>
+            <button class="tf-btn" onclick="setTimeframe('15m')">15m</button>
+            <button class="tf-btn" onclick="setTimeframe('1h')">1h</button>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <div class="chart-panel">
+            <h3 id="chart-title">BTCUSDT - 1m</h3>
+            <canvas id="footprintCanvas"></canvas>
+        </div>
+        
+        <div class="orderbook-panel">
+            <h3>Live Orderbook & Walls</h3>
+            <table class="ob-table" id="obTable">
+                <thead>
+                    <tr><th>Price</th><th>Size</th></tr>
+                </thead>
+                <tbody id="obBody">
+                    <tr><td colspan="2" style="text-align:center;">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="status-bar">
+        <span id="backend-status">Connecting to Render Backend...</span>
+        <span id="last-update">Last Update: --</span>
+    </div>
+
+    <script>
+        // Render Backend Base URL (Tera live backend URL)
+        const API_BASE = "https://sa-footprint-engine.onrender.com";
+
+        let currentSymbol = "BTCUSDT";
+        let currentTimeframe = "1m";
+        let canvas = document.getElementById("footprintCanvas");
+        let ctx = canvas.getContext("2d");
+
+        // Resize canvas resolution to match display size
+        function resizeCanvas() {
+            canvas.width = canvas.parentElement.clientWidth - 20;
+            canvas.height = 500;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        function setSymbol(sym) {
+            currentSymbol = sym;
+            document.querySelectorAll('.sym-btn').forEach(b => b.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('chart-title').innerText = `${currentSymbol} - ${currentTimeframe}`;
+            fetchData();
+        }
+
+        function setTimeframe(tf) {
+            currentTimeframe = tf;
+            document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('chart-title').innerText = `${currentSymbol} - ${currentTimeframe}`;
+            fetchData();
+        }
+
+        async function fetchData() {
+            try {
+                // Fetch Candles & Footprint
+                let res = await fetch(`${API_BASE}/api/candles?symbol=${currentSymbol}&timeframe=${currentTimeframe}&limit=50`);
+                let data = await res.json();
+
+                if (data.status === "ok") {
+                    drawChart(data.candles);
+                    document.getElementById('backend-status').innerText = "Status: Connected (Cloud Synchronized)";
+                    document.getElementById('last-update').innerText = "Last Update: " + new Date().toLocaleTimeString();
+                }
+
+                // Fetch Orderbook
+                let obRes = await fetch(`${API_BASE}/api/orderbook?symbol=${currentSymbol}&limit=15`);
+                let obData = await obRes.json();
+                if (obData.status === "ok") {
+                    drawOrderbook(obData);
+                }
+
+            } catch (err) {
+                console.error(err);
+                document.getElementById('backend-status').innerText = "Status: Error Connecting to Backend";
+            }
+        }
+
+        function drawChart(candles) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!candles || candles.length === 0) return;
+
+            let width = canvas.width;
+            let height = canvas.height;
+            let candleWidth = width / candles.length;
+
+            let minPrice = Math.min(...candles.map(c => c.low));
+            let maxPrice = Math.max(...candles.map(c => c.high));
+            let priceRange = maxPrice - minPrice || 1;
+
+            function priceToY(p) {
+                return height - ((p - minPrice) / priceRange) * (height - 40) - 20;
+            }
+
+            // Draw Candles & POC lines
+            candles.forEach((c, i) => {
+                let x = i * candleWidth + candleWidth / 2;
+                let yHigh = priceToY(c.high);
+                let yLow = priceToY(c.low);
+                let yOpen = priceToY(c.open);
+                let yClose = priceToY(c.close);
+
+                let isGreen = c.close >= c.open;
+                ctx.strokeStyle = isGreen ? '#26a69a' : '#ef5350';
+                ctx.fillStyle = ctx.strokeStyle;
+
+                // Wick
+                ctx.beginPath();
+                ctx.moveTo(x, yHigh);
+                ctx.lineTo(x, yLow);
+                ctx.stroke();
+
+                // Body
+                let bodyY = Math.min(yOpen, yClose);
+                let bodyHeight = Math.max(Math.abs(yOpen - yClose), 2);
+                ctx.fillRect(x - candleWidth * 0.3, bodyY, candleWidth * 0.6, bodyHeight);
+
+                // Draw POC Marker if available
+                if (c.poc) {
+                    let yPoc = priceToY(c.poc);
+                    ctx.fillStyle = '#ffeb3b';
+                    ctx.fillRect(x - candleWidth * 0.35, yPoc - 1, candleWidth * 0.7, 2);
+                }
+            });
+        }
+
+        function drawOrderbook(ob) {
+            let tbody = document.getElementById('obBody');
+            tbody.innerHTML = "";
+
+            // Asks (Reverse order so highest is on top)
+            let asks = ob.asks.slice().reverse();
+            asks.forEach(a => {
+                let row = `<tr class="ask-row"><td>${a.price.toFixed(2)}</td><td>${a.quantity.toFixed(3)}</td></tr>`;
+                tbody.innerHTML += row;
+            });
+
+            // Divider
+            tbody.innerHTML += `<tr><td colspan="2" style="background:#222; text-align:center; font-size:10px;">SPREAD / LIVE</td></tr>`;
+
+            // Bids
+            ob.bids.forEach(b => {
+                let row = `<tr class="bid-row"><td>${b.price.toFixed(2)}</td><td>${b.quantity.toFixed(3)}</td></tr>`;
+                tbody.innerHTML += row;
+            });
+        }
+
+        // Poll data every 2 seconds (Lightweight on P4 PC)
+        setInterval(fetchData, 2000);
+        fetchData();
+    </script>
+</body>
+</html>
