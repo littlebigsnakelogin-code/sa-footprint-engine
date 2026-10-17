@@ -1625,15 +1625,11 @@ cv.addEventListener('wheel', e => {
     const zoomIn = e.deltaY < 0;
 
     if (curX >= chartRight && curX <= chartRight + YAXIS_W) {
-        // Y-Axis only zoom
         scaleY(zoomIn ? 0.84 : 1.19);
     } else if (curX < chartRight) {
-        // 1. Zoom Candle Width (X-Axis)
         const zx = zoomIn ? 1.15 : 0.87;
         candleW = Math.max(45, Math.min(480, candleW * zx));
 
-        // 2. Simultaneously Zoom Price Scale (Y-Axis) anchored at Mouse Cursor Y
-        // So Auto-Fit automatically unfolds 10x -> 5x -> 2x -> 1x Micro Levels!
         if (!e.shiftKey && minP !== null && maxP !== null) {
             const zy = zoomIn ? 0.85 : 1.18;
             const span = maxP - minP;
@@ -1655,7 +1651,7 @@ async function fetchData() {
     try {
         const [cRes, obRes] = await Promise.all([
             fetch(`/api/candles?symbol=${symbol}&timeframe=${tf}&limit=25`),
-            fetch(`/api/orderbook?symbol=${symbol}&limit=100`)
+            fetch(`/api/orderbook?symbol=${symbol}&limit=1000`)
         ]);
         const cData = await cRes.json();
         const oData = await obRes.json();
@@ -1792,7 +1788,6 @@ function drawAll() {
     const yToP = y => minP + ((chartH - y) / chartH) * pSpan;
     const rowH = Math.max(3, Math.abs(pToY(minP + effStep) - pToY(minP)));
 
-    // Grid
     ctx.strokeStyle = '#131722';
     ctx.lineWidth = 1;
     const gCount = 10;
@@ -2142,7 +2137,6 @@ function drawAll() {
         ctx.fillText(lastC.close.toFixed(dec), yAxisX + 5, curPy);
     }
 
-    // FIXED CROSSHAIR (Removed undefined mouseY typo that froze PC browser!)
     if (curX > 0 && curX < chartW && curY > 0 && curY < chartH) {
         ctx.strokeStyle = 'rgba(255,255,255,0.25)';
         ctx.setLineDash([2, 2]);
@@ -2159,7 +2153,7 @@ function drawAll() {
     }
 
     // =========================================================================
-    // 8. UNIFIED CENTER-PRICE DOM LADDER (LEFT=BIDS, CENTER=PRICE, RIGHT=ASKS)
+    // 8. FULL-DEPTH UNIFIED DOM LADDER (FILLED TOP-TO-BOTTOM WITH HEATMAP BARS)
     // =========================================================================
     const domX = chartW + YAXIS_W;
     ctx.fillStyle = '#0d1017';
@@ -2174,98 +2168,118 @@ function drawAll() {
     ctx.font = 'bold 10px monospace';
     ctx.fillStyle = '#00e676';
     ctx.textAlign = 'left';
-    ctx.fillText('BID [EXEC/PULL]', domX + 6, 14);
+    ctx.fillText('RESTING BID [E]', domX + 6, 14);
     ctx.fillStyle = '#ffeb3b';
     ctx.textAlign = 'center';
     ctx.fillText('PRICE', domX + DOM_W * 0.5, 14);
     ctx.fillStyle = '#ff5252';
     ctx.textAlign = 'right';
-    ctx.fillText('ASK [EXEC/PULL]', domX + DOM_W - 6, 14);
+    ctx.fillText('RESTING ASK [E]', domX + DOM_W - 6, 14);
 
-    const centerP = Math.floor(lastC.close / effStep + 1e-9) * effStep;
     const ladderRows = Math.floor((H - 32) / 18);
     const halfRows = Math.floor(ladderRows / 2);
 
+    let domStep = effStep;
+    const bidsArr = obData.bids || [];
+    const asksArr = obData.asks || [];
+    if (bidsArr.length > 1 && asksArr.length > 1) {
+        const minBookBid = bidsArr[bidsArr.length - 1].price;
+        const maxBookAsk = asksArr[asksArr.length - 1].price;
+        const maxBookSpan = Math.max(lastC.close - minBookBid, maxBookAsk - lastC.close);
+        if (maxBookSpan > 0 && (halfRows * domStep) > maxBookSpan * 1.15) {
+            domStep = Math.max(rawStep, Math.floor((maxBookSpan / halfRows) / rawStep) * rawStep);
+        }
+    }
+
+    const centerP = Math.floor(lastC.close / domStep + 1e-9) * domStep;
+
     const bidMap = new Map();
     const askMap = new Map();
-    (obData.bids || []).forEach(b => {
-        const bp = Math.floor(b.price / effStep + 1e-9) * effStep;
+    bidsArr.forEach(b => {
+        const bp = Math.floor(b.price / domStep + 1e-9) * domStep;
         const k = bp.toFixed(6);
         bidMap.set(k, (bidMap.get(k) || 0) + b.quantity);
     });
-    (obData.asks || []).forEach(a => {
-        const ap = Math.floor(a.price / effStep + 1e-9) * effStep;
+    asksArr.forEach(a => {
+        const ap = Math.floor(a.price / domStep + 1e-9) * domStep;
         const k = ap.toFixed(6);
         askMap.set(k, (askMap.get(k) || 0) + a.quantity);
     });
 
-    const curFpList = groupFootprint(lastC.footprint, centerP - effStep * halfRows, centerP + effStep * halfRows, effStep, lastC.close);
+    const curFpList = groupFootprint(lastC.footprint, centerP - domStep * (halfRows + 2), centerP + domStep * (halfRows + 2), domStep, lastC.close);
     const fpMap = new Map();
     curFpList.forEach(l => fpMap.set(l.price.toFixed(6), l));
 
     let maxDomRest = 1;
+    const allBookVals = [];
     for (let idx = -halfRows; idx <= halfRows; idx++) {
-        const p = centerP + idx * effStep;
+        const p = centerP + idx * domStep;
         const k = p.toFixed(6);
         const bq = bidMap.get(k) || 0;
         const aq = askMap.get(k) || 0;
         if (bq > maxDomRest) maxDomRest = bq;
         if (aq > maxDomRest) maxDomRest = aq;
+        if (bq > 0) allBookVals.push(bq);
+        if (aq > 0) allBookVals.push(aq);
     }
+    allBookVals.sort((a, b) => b - a);
+    const heavyWallCut = allBookVals[Math.min(3, Math.max(0, allBookVals.length - 1))] || maxDomRest * 0.7;
 
-    const colW = (DOM_W - 74) * 0.5;
+    const colW = (DOM_W - 72) * 0.5;
     const pxColLeft = domX + colW;
-    const pxColRight = pxColLeft + 74;
+    const pxColRight = pxColLeft + 72;
 
     let ry = 28;
     const rH = 18;
 
     for (let idx = halfRows; idx >= -halfRows; idx--) {
-        const p = centerP + idx * effStep;
+        const p = centerP + idx * domStep;
         const k = p.toFixed(6);
         const bRest = bidMap.get(k) || 0;
         const aRest = askMap.get(k) || 0;
         const fpLvl = fpMap.get(k) || { buy: 0, sell: 0, bid_pulled: 0, ask_pulled: 0 };
 
-        const isCurrentRow = Math.abs(p - centerP) < effStep * 0.4;
+        const isCurrentRow = Math.abs(p - centerP) < domStep * 0.4;
 
         if (isCurrentRow) {
-            ctx.fillStyle = 'rgba(255, 235, 59, 0.16)';
+            ctx.fillStyle = 'rgba(255, 235, 59, 0.18)';
             ctx.fillRect(domX, ry, DOM_W, rH);
         } else {
             ctx.fillStyle = idx % 2 === 0 ? '#0d1017' : '#10141d';
             ctx.fillRect(domX, ry, DOM_W, rH);
         }
 
-        ctx.fillStyle = isCurrentRow ? '#ffeb3b' : '#8b93a7';
+        ctx.fillStyle = isCurrentRow ? '#ffeb3b' : (p > lastC.close ? '#ff8a80' : '#69f0ae');
         ctx.font = isCurrentRow ? 'bold 10px monospace' : '10px monospace';
         ctx.textAlign = 'center';
         ctx.fillText(p.toFixed(dec), domX + DOM_W * 0.5, ry + 9);
 
         if (bRest > 0 || fpLvl.sell > 0 || fpLvl.bid_pulled > 0) {
             const bPct = Math.min(1, bRest / maxDomRest);
-            ctx.fillStyle = bPct > 0.6 ? 'rgba(0, 230, 118, 0.38)' : 'rgba(0, 230, 118, 0.18)';
+            const isWall = bRest >= heavyWallCut && bRest > 0;
+            ctx.fillStyle = isWall ? 'rgba(0, 229, 255, 0.45)' : 'rgba(0, 230, 118, 0.22)';
             ctx.fillRect(pxColLeft - colW * bPct, ry + 1, colW * bPct, rH - 2);
 
-            ctx.font = bPct > 0.6 ? 'bold 10px monospace' : '10px monospace';
-            ctx.fillStyle = '#00e676';
+            ctx.font = isWall ? 'bold 10px monospace' : '10px monospace';
+            ctx.fillStyle = isWall ? '#00e5ff' : '#00e676';
             ctx.textAlign = 'right';
-            const execTxt = fpLvl.sell > 0 ? `[E:${fmt(fpLvl.sell)}]` : '';
-            const pullTxt = fpLvl.bid_pulled > 0 ? `P:${fmt(fpLvl.bid_pulled)}` : '';
-            ctx.fillText(`${fmt(bRest)} ${execTxt}${pullTxt}`, pxColLeft - 4, ry + 9);
+            const execTxt = fpLvl.sell > 0 ? ` [E:${fmt(fpLvl.sell)}]` : '';
+            const wallTxt = isWall ? '★' : '';
+            ctx.fillText(`${wallTxt}${fmt(bRest)}${execTxt}`, pxColLeft - 4, ry + 9);
         }
 
         if (aRest > 0 || fpLvl.buy > 0 || fpLvl.ask_pulled > 0) {
             const aPct = Math.min(1, aRest / maxDomRest);
-            ctx.fillStyle = aPct > 0.6 ? 'rgba(255, 23, 68, 0.38)' : 'rgba(255, 23, 68, 0.18)';
+            const isWall = aRest >= heavyWallCut && aRest > 0;
+            ctx.fillStyle = isWall ? 'rgba(255, 145, 0, 0.48)' : 'rgba(255, 23, 68, 0.22)';
             ctx.fillRect(pxColRight, ry + 1, colW * aPct, rH - 2);
 
-            ctx.font = aPct > 0.6 ? 'bold 10px monospace' : '10px monospace';
-            ctx.fillStyle = '#ff5252';
+            ctx.font = isWall ? 'bold 10px monospace' : '10px monospace';
+            ctx.fillStyle = isWall ? '#ffab00' : '#ff5252';
             ctx.textAlign = 'left';
-            const execTxt = fpLvl.buy > 0 ? `[E:${fmt(fpLvl.buy)}]` : '';
-            const pullTxt = fpLvl.ask_pulled > 0 ? `P:${fmt(fpLvl.ask_pulled)}` : '';
-            ctx.fillText(`${fmt(aRest)} ${execTxt}${pullTxt}`, pxColRight + 4, ry + 9);
+            const execTxt = fpLvl.buy > 0 ? ` [E:${fmt(fpLvl.buy)}]` : '';
+            const wallTxt = isWall ? '★' : '';
+            ctx.fillText(`${wallTxt}${fmt(aRest)}${execTxt}`, pxColRight + 4, ry + 9);
         }
 
         ry += rH;
@@ -2284,6 +2298,7 @@ requestAnimationFrame(drawLoop);
 </script>
 </body>
 </html>"""
+
 
 @app.route("/hello")
 def hello():
@@ -2425,9 +2440,9 @@ def api_orderbook():
     if symbol not in SYMBOLS:
         return jsonify({"status": "error", "message": "Invalid symbol"}), 400
     try:
-        limit = max(1, min(int(request.args.get("limit", 20)), 100))
+        limit = max(1, min(int(request.args.get("limit", 500)), 1000))
     except ValueError:
-        limit = 20
+        limit = 500
 
     with lock:
         state = orderbook[symbol]
