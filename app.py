@@ -1499,6 +1499,32 @@ def home():
     .live-px { font-size: 13px; font-weight: bold; padding: 2px 6px; background: #1a2030; border-radius: 3px; }
     #wrap { flex: 1; position: relative; overflow: hidden; background: #090b10; touch-action: none; }
     canvas { display: block; cursor: crosshair; touch-action: none; }
+
+    /* TRADINGVIEW STYLE FLOATING SLIDE HANDLE TAB */
+    .dom-slide-tab {
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 30;
+        background: rgba(41, 98, 255, 0.92);
+        color: #ffffff;
+        border: 1px solid #00e5ff;
+        border-right: none;
+        padding: 12px 5px;
+        border-radius: 6px 0 0 6px;
+        cursor: pointer;
+        font-weight: bold;
+        font-size: 11px;
+        writing-mode: vertical-rl;
+        text-orientation: mixed;
+        letter-spacing: 1px;
+        box-shadow: -3px 0 10px rgba(0,0,0,0.6);
+        transition: right 0.15s ease, background 0.15s ease;
+    }
+    .dom-slide-tab:hover {
+        background: #00b0ff;
+        color: #000;
+    }
 </style>
 </head>
 <body>
@@ -1537,7 +1563,7 @@ def home():
     <button class="btn" onclick="scaleX(1.18)">X+</button>
     <button class="btn" onclick="scaleX(0.84)">X-</button>
     <button class="btn" onclick="resetCamera()">Fit</button>
-    <button class="btn active" id="domToggleBtn" onclick="toggleDOM()">DOM: ON</button>
+    <button class="btn" id="domToggleBtn" onclick="toggleDOM()">DOM</button>
 
     <div class="legend">
         <span class="lg" style="background:#00e5ff;color:#000;">H-B.ABS</span>
@@ -1569,12 +1595,17 @@ def home():
     </div>
 </div>
 
-<div id="wrap"><canvas id="cv"></canvas></div>
+<div id="wrap">
+    <canvas id="cv"></canvas>
+    <!-- FLOATING TRADINGVIEW-STYLE SLIDE BUTTON -->
+    <div id="domSlideTab" class="dom-slide-tab" onclick="toggleDOM()" title="Slide Orderbook Open/Close">❮ DOM</div>
+</div>
 
 <script>
 const wrap = document.getElementById('wrap');
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d', { alpha: false });
+const slideTab = document.getElementById('domSlideTab');
 
 const STEP_MAP = { BTCUSDT: 1.0, ETHUSDT: 0.1, SOLUSDT: 0.01, XRPUSDT: 0.0001 };
 
@@ -1586,14 +1617,15 @@ let obData = { bids: [], asks: [] };
 let rawStep = STEP_MAP[symbol] || 1.0;
 
 let isMobile = window.innerWidth < 768;
-let showDOM = true;
-let candleW = isMobile ? 155 : 235;
+// On mobile, start with DOM hidden so user gets 100% full-screen chart immediately!
+let showDOM = !isMobile;
+let candleW = isMobile ? 165 : 235;
 let panX = 0;
 let minP = null;
 let maxP = null;
-let domScrollRows = 0; // Allows scrolling Orderbook up and down!
+let domScrollRows = 0;
 
-let dragMode = null; // 'chart' | 'yaxis' | 'dom'
+let dragMode = null;
 let lastX = 0, lastY = 0;
 let curX = -1, curY = -1;
 let pinchDist = null;
@@ -1602,10 +1634,27 @@ let needsRender = true;
 const TIME_H = 20;
 const PILL_SAFE_H = 54;
 
+function updateSlideTabUI() {
+    isMobile = cv.width < 768;
+    const domW = !showDOM ? 0 : (isMobile ? Math.min(200, Math.floor(cv.width * 0.52)) : 300);
+    const btn = document.getElementById('domToggleBtn');
+    if (showDOM) {
+        slideTab.style.right = domW + 'px';
+        slideTab.innerText = '❯ HIDE';
+        btn.innerText = 'DOM: ON';
+        btn.classList.add('active');
+    } else {
+        slideTab.style.right = '0px';
+        slideTab.innerText = '❮ DOM';
+        btn.innerText = 'DOM: OFF';
+        btn.classList.remove('active');
+    }
+}
+
 function getLayout() {
     isMobile = cv.width < 768;
     const yAxisW = isMobile ? 58 : 74;
-    const domW = !showDOM ? 0 : (isMobile ? Math.min(185, Math.floor(cv.width * 0.44)) : 300);
+    const domW = !showDOM ? 0 : (isMobile ? Math.min(200, Math.floor(cv.width * 0.52)) : 300);
     const chartW = Math.max(100, cv.width - domW - yAxisW);
     const chartH = cv.height - TIME_H - PILL_SAFE_H;
     return { yAxisW, domW, chartW, chartH };
@@ -1614,6 +1663,7 @@ function getLayout() {
 function resize() {
     cv.width = wrap.clientWidth;
     cv.height = wrap.clientHeight;
+    updateSlideTabUI();
     needsRender = true;
 }
 window.addEventListener('resize', resize);
@@ -1621,9 +1671,7 @@ resize();
 
 function toggleDOM() {
     showDOM = !showDOM;
-    const btn = document.getElementById('domToggleBtn');
-    btn.innerText = showDOM ? 'DOM: ON' : 'DOM: OFF';
-    btn.classList.toggle('active', showDOM);
+    updateSlideTabUI();
     needsRender = true;
 }
 
@@ -1662,7 +1710,7 @@ function resetCamera() {
     minP = null;
     maxP = null;
     domScrollRows = 0;
-    candleW = window.innerWidth < 768 ? 155 : 235;
+    candleW = window.innerWidth < 768 ? 165 : 235;
     needsRender = true;
 }
 
@@ -1689,13 +1737,11 @@ function applyDrag(dx, dy) {
             if (half >= rawStep * 2) { minP = mid - half; maxP = mid + half; }
         }
     } else if (dragMode === 'dom') {
-        // Scroll DOM ladder rows up/down smoothly
         domScrollRows += (dy / 14);
     }
     needsRender = true;
 }
 
-// ---------------- MOUSE CONTROLS ----------------
 cv.addEventListener('mousedown', e => {
     const r = cv.getBoundingClientRect();
     lastX = e.clientX - r.left;
@@ -1722,7 +1768,7 @@ cv.addEventListener('dblclick', e => {
     const r = cv.getBoundingClientRect();
     const x = e.clientX - r.left;
     if (detectZone(x) === 'dom') {
-        domScrollRows = 0; // Reset DOM scroll to center live price
+        domScrollRows = 0;
         needsRender = true;
     } else {
         resetCamera();
@@ -1736,7 +1782,6 @@ cv.addEventListener('wheel', e => {
     const zoomIn = e.deltaY < 0;
 
     if (zone === 'dom') {
-        // Scroll Orderbook Ladder up/down with Mouse Wheel!
         domScrollRows += (e.deltaY > 0 ? -3 : 3);
     } else if (zone === 'yaxis') {
         scaleY(zoomIn ? 0.84 : 1.19);
@@ -1756,7 +1801,6 @@ cv.addEventListener('wheel', e => {
     needsRender = true;
 }, { passive: false });
 
-// ---------------- MOBILE TOUCH & PINCH-ZOOM CONTROLS ----------------
 cv.addEventListener('touchstart', e => {
     e.preventDefault();
     const r = cv.getBoundingClientRect();
@@ -2418,7 +2462,6 @@ function drawAll() {
         }
     });
 
-    // TOP-LEFT X-RAY INSPECTOR HUD (Adaptive width for Mobile)
     const hudW = Math.min(chartW - 12, 410);
     ctx.fillStyle = 'rgba(17, 21, 31, 0.88)';
     ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 52 : 22);
@@ -2437,7 +2480,6 @@ function drawAll() {
         ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%)`, 12, 48);
     }
 
-    // Y-Axis Price Scale
     const yAxisX = chartW;
     ctx.fillStyle = '#11151f';
     ctx.fillRect(yAxisX, 0, yAxisW, H);
@@ -2488,9 +2530,6 @@ function drawAll() {
         ctx.fillText(yToP(curY).toFixed(dec), yAxisX + 4, curY);
     }
 
-    // =========================================================================
-    // 8. SCROLLABLE & ADAPTIVE UNIFIED DOM LADDER
-    // =========================================================================
     if (!showDOM || domW <= 0) return;
 
     const domX = chartW + yAxisW;
@@ -2530,7 +2569,6 @@ function drawAll() {
     }
 
     const liveCenterP = Math.floor(lastC.close / domStep + 1e-9) * domStep;
-    // Apply user scroll offset to view higher Asks or lower Bids!
     const centerP = liveCenterP + Math.round(domScrollRows) * domStep;
 
     const bidMap = new Map();
