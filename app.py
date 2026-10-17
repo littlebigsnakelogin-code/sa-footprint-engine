@@ -1747,6 +1747,19 @@ function drawAll() {
         return;
     }
 
+    // Calculate Baseline Average Orderflow Volume & Average Candle Range across recent history
+    let totalHistVol = 0, totalHistRange = 0, histCount = 0;
+    candles.forEach((hc, idx) => {
+        // Exclude the just-started 1-second old candle from dragging down average if other candles exist
+        if (idx < candles.length - 1 || candles.length === 1) {
+            totalHistVol += (hc.volume || 0);
+            totalHistRange += Math.max(hc.high - hc.low, rawStep);
+            histCount++;
+        }
+    });
+    const avgFlowVol = Math.max(totalHistVol / Math.max(1, histCount), 0.001);
+    const avgFlowRange = Math.max(totalHistRange / Math.max(1, histCount), rawStep);
+
     const rightStart = chartW - candleW * 0.62 + panX;
     const vis = [];
     for (let i = candles.length - 1; i >= 0; i--) {
@@ -1764,7 +1777,7 @@ function drawAll() {
             if (c.high > hi) hi = c.high;
         });
         const span = Math.max(hi - lo, rawStep * 10);
-        minP = lo - span * 0.22;
+        minP = lo - span * 0.25;
         maxP = hi + span * 0.14;
     }
 
@@ -2027,8 +2040,69 @@ function drawAll() {
             }
         });
 
+        // =========================================================================
+        // RVOL-FILTERED INSTITUTIONAL ORDERFLOW VERDICT (Market vs Limit Clash)
+        // =========================================================================
+        const cVol = c.volume || 0;
+        const rvol = cVol / avgFlowVol; // Relative Volume vs Current Market Flow
+        const mktBuyPct = cVol > 0 ? Math.round(((c.buy_volume || 0) / cVol) * 100) : 50;
+        const mktSellPct = 100 - mktBuyPct;
+
+        const cRange = Math.max(c.high - c.low, rawStep * 0.5);
+        const bodySize = Math.abs(c.close - c.open);
+        const upperWick = c.high - Math.max(c.open, c.close);
+        const lowerWick = Math.min(c.open, c.close) - c.low;
+
+        let flowVerdict = `MktB:${mktBuyPct}% MktS:${mktSellPct}%`;
+        let verdictCol = '#8b93a7';
+        let isHighConviction = false;
+
+        if (rvol < 0.75) {
+            // Low Volume Filter: Prevent false dump/accum signals on dead candles!
+            flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x) | MktB:${mktBuyPct}%`;
+            verdictCol = '#6c738a';
+        } else if (rvol >= 1.20) {
+            // High Orderflow Volume Spike! Check who won: Market Aggressors or Passive Limit Whales
+            if (mktBuyPct >= 58 && (c.close < c.open || upperWick > bodySize * 0.8 || cRange < avgFlowRange * 0.65)) {
+                // Heavy Market Buying absorbed by Passive Limit Sellers (Institutional Distribution/Dump)
+                flowVerdict = `🐳 LIM-SELL DUMP (${rvol.toFixed(1)}x|MB:${mktBuyPct}%)`;
+                verdictCol = '#ff9100';
+                isHighConviction = true;
+            } else if (mktSellPct >= 58 && (c.close > c.open || lowerWick > bodySize * 0.8 || cRange < avgFlowRange * 0.65)) {
+                // Heavy Market Selling absorbed by Passive Limit Buyers (Institutional Accumulation)
+                flowVerdict = `🐳 LIM-BUY ACCUM (${rvol.toFixed(1)}x|MS:${mktSellPct}%)`;
+                verdictCol = '#00e5ff';
+                isHighConviction = true;
+            } else if (mktSellPct >= 62 && c.close < c.open && bodySize >= cRange * 0.55) {
+                // Heavy Market Sell + Strong Downward Displacement = Aggressive Market Dump
+                flowVerdict = `🔥 MKT DUMP (${rvol.toFixed(1)}x | MS:${mktSellPct}%)`;
+                verdictCol = '#ff1744';
+                isHighConviction = true;
+            } else if (mktBuyPct >= 62 && c.close > c.open && bodySize >= cRange * 0.55) {
+                // Heavy Market Buy + Strong Upward Displacement = Aggressive Market Ignition
+                flowVerdict = `🔥 MKT IGNITION (${rvol.toFixed(1)}x | MB:${mktBuyPct}%)`;
+                verdictCol = '#00e676';
+                isHighConviction = true;
+            } else if (rvol >= 1.5 && bodySize < cRange * 0.35) {
+                // Massive volume churn inside tight body = Institutional Limit Battle
+                flowVerdict = c.close >= (c.high + c.low) * 0.5
+                    ? `🛡️ LIM-BUY HOLD (${rvol.toFixed(1)}x)`
+                    : `🛡️ LIM-SELL CAP (${rvol.toFixed(1)}x)`;
+                verdictCol = '#ffeb3b';
+                isHighConviction = true;
+            } else {
+                flowVerdict = `FLOW:${rvol.toFixed(1)}x | MB:${mktBuyPct}% MS:${mktSellPct}%`;
+                verdictCol = mktBuyPct >= 55 ? '#00e676' : (mktSellPct >= 55 ? '#ff5252' : '#d1d4dc');
+            }
+        } else {
+            // Normal Volume (0.75x to 1.20x)
+            flowVerdict = `RVOL:${rvol.toFixed(1)}x | MB:${mktBuyPct}% MS:${mktSellPct}%`;
+            verdictCol = mktBuyPct >= 60 ? '#69f0ae' : (mktSellPct >= 60 ? '#ff8a80' : '#9ba2b0');
+        }
+
+        // Only show Top/Bottom Absorption Banners if RVOL is at least 0.85x (ignore thin noise candles)
         let botYBanner = yL + 6;
-        if (candleW >= 70) {
+        if (candleW >= 70 && rvol >= 0.85) {
             ctx.font = 'bold 9px monospace';
             ctx.textAlign = 'center';
 
@@ -2049,29 +2123,37 @@ function drawAll() {
             }
         }
 
-        if (candleW >= 55) {
-            const pillW = Math.min(candleW * 0.88, 142);
-            const pillH = 28;
+        // 3-LINE FLOATING TRANSPARENT PILL UNDER CANDLE (Delta/RVOL + CVD + Institutional Verdict)
+        if (candleW >= 60) {
+            const pillW = Math.min(candleW * 0.94, 178);
+            const pillH = 40;
             const pillY = Math.min(botYBanner + 2, chartH - pillH - 4);
             const pillX = cx - pillW * 0.5;
 
-            ctx.fillStyle = 'rgba(14, 18, 28, 0.72)';
+            ctx.fillStyle = isHighConviction ? 'rgba(18, 22, 36, 0.86)' : 'rgba(12, 16, 24, 0.70)';
             ctx.fillRect(pillX, pillY, pillW, pillH);
 
-            ctx.strokeStyle = c.delta >= 0 ? 'rgba(0, 230, 118, 0.5)' : 'rgba(255, 82, 82, 0.5)';
-            ctx.lineWidth = 1;
+            ctx.strokeStyle = isHighConviction ? verdictCol : (c.delta >= 0 ? 'rgba(0, 230, 118, 0.45)' : 'rgba(255, 82, 82, 0.45)');
+            ctx.lineWidth = isHighConviction ? 1.5 : 1;
             ctx.strokeRect(pillX, pillY, pillW, pillH);
 
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
 
+            // Line 1: Delta + Volume + RVOL multiplier
             ctx.font = 'bold 9px monospace';
             ctx.fillStyle = c.delta >= 0 ? '#00e676' : '#ff5252';
-            ctx.fillText(`Δ${c.delta >= 0 ? '+' : ''}${fmt(c.delta)} | V:${fmt(c.volume)}`, cx, pillY + 8);
+            ctx.fillText(`Δ${c.delta >= 0 ? '+' : ''}${fmt(c.delta)} | V:${fmt(c.volume)} (${rvol.toFixed(1)}x)`, cx, pillY + 8);
 
+            // Line 2: CVD + Market Buy (Limit Ask) vs Market Sell (Limit Bid)
             ctx.font = '9px monospace';
             ctx.fillStyle = '#b0b8c8';
-            ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} B:${fmt(c.buy_volume)}`, cx, pillY + 20);
+            ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} | B:${fmt(c.buy_volume)} S:${fmt(c.sell_volume)}`, cx, pillY + 20);
+
+            // Line 3: RVOL-Filtered Institutional Verdict (Market vs Limit Winner)
+            ctx.font = isHighConviction ? 'bold 9px monospace' : '9px monospace';
+            ctx.fillStyle = verdictCol;
+            ctx.fillText(flowVerdict, cx, pillY + 32);
         }
 
         if (candleW >= 55) {
@@ -2085,18 +2167,18 @@ function drawAll() {
 
     // TOP-LEFT X-RAY INSPECTOR HUD
     ctx.fillStyle = 'rgba(17, 21, 31, 0.90)';
-    ctx.fillRect(8, 8, 385, hoveredCellInfo ? 54 : 24);
+    ctx.fillRect(8, 8, 420, hoveredCellInfo ? 54 : 24);
     ctx.strokeStyle = '#2962ff';
-    ctx.strokeRect(8, 8, 385, hoveredCellInfo ? 54 : 24);
+    ctx.strokeRect(8, 8, 420, hoveredCellInfo ? 54 : 24);
     ctx.fillStyle = '#00e5ff';
     ctx.font = 'bold 11px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`Scale Group: ${mult}x (Step: ${effStep.toFixed(dec)}) | Wheel Y-Axis to Scale`, 14, 20);
+    ctx.fillText(`Scale: ${mult}x (Step:${effStep.toFixed(dec)}) | Avg Flow Vol: ${fmt(avgFlowVol)}`, 14, 20);
 
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
         ctx.fillStyle = '#ffeb3b';
-        ctx.fillText(`Price ${h.price.toFixed(dec)} | Sell Exec: ${fmt(h.sellV)} (${h.bAbsPct}%) | Buy Exec: ${fmt(h.buyV)} (${h.aAbsPct}%)`, 14, 36);
+        ctx.fillText(`Px ${h.price.toFixed(dec)} | MktSell(LimBuy):${fmt(h.sellV)}(${h.bAbsPct}%) | MktBuy(LimSell):${fmt(h.buyV)}(${h.aAbsPct}%)`, 14, 36);
         ctx.fillStyle = '#ff80ab';
         ctx.fillText(`Bid Pulled: ${fmt(h.bPull)} (${h.bPullPct}% Spoof) | Ask Pulled: ${fmt(h.aPull)} (${h.aPullPct}% Spoof)`, 14, 52);
     }
@@ -2300,7 +2382,7 @@ requestAnimationFrame(drawLoop);
 </html>"""
 
 
-@app.route("/hello")
+app.route("/hello")
 def hello():
     return "SA Footprint Engine OK"
 
