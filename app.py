@@ -1521,6 +1521,33 @@ def home():
         transition: right 0.15s ease, background 0.15s ease;
     }
     .dom-slide-tab:hover { background: #00b0ff; color: #000; }
+
+    /* BUILT-IN ZERO-LOAD RULEBOOK MODAL */
+    #ruleModal {
+        display: none;
+        position: fixed;
+        inset: 36px 4%;
+        background: rgba(11, 14, 22, 0.98);
+        border: 1px solid #00e5ff;
+        border-radius: 6px;
+        z-index: 999;
+        padding: 14px 18px;
+        overflow-y: auto;
+        color: #d1d4dc;
+        font-size: 12px;
+        line-height: 1.55;
+        box-shadow: 0 12px 40px #000;
+        touch-action: pan-y;
+        -webkit-overflow-scrolling: touch;
+    }
+    .rule-sec {
+        background: #131824;
+        border: 1px solid #232a3d;
+        border-radius: 4px;
+        padding: 10px 12px;
+        margin-bottom: 10px;
+    }
+    .rule-sec h4 { color: #ffeb3b; margin-bottom: 6px; font-size: 13px; border-bottom: 1px solid #232a3d; padding-bottom: 4px; }
 </style>
 </head>
 <body>
@@ -1560,6 +1587,7 @@ def home():
     <button class="btn" onclick="scaleX(0.84)">X-</button>
     <button class="btn" onclick="resetCamera()">Fit</button>
     <button class="btn" id="domToggleBtn" onclick="toggleDOM()">DOM</button>
+    <button class="btn" onclick="toggleRules()" style="border-color:#ffeb3b;color:#ffeb3b;font-weight:bold;">📖 RULES</button>
 
     <div class="legend">
         <span class="lg" style="background:#00e5ff;color:#000;">H-B.ABS</span>
@@ -1574,7 +1602,6 @@ def home():
     </div>
 </div>
 
-<!-- MACRO MARKET ORDERFLOW & STRUCTURE DECISION BAR -->
 <div class="decision-bar">
     <div class="bench-box">
         <span style="color:#8b93a7;">BENCHMARK:</span>
@@ -1597,11 +1624,71 @@ def home():
     <div id="domSlideTab" class="dom-slide-tab" onclick="toggleDOM()" title="Slide Orderbook Open/Close">❮ DOM</div>
 </div>
 
+<!-- BUILT-IN COMPLETE MASTER RULEBOOK POPUP -->
+<div id="ruleModal">
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #00e5ff; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
+        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT — MASTER EXECUTION RULEBOOK</b>
+        <button class="btn" onclick="toggleRules()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
+    </div>
+
+    <div class="rule-sec">
+        <h4>1. TOP MACRO BAR & BENCHMARK (Overall 20-Candle Market Context)</h4>
+        • <b>Avg / HeavyC / HeavyL:</b> <code>Avg</code> pichli 20 candles ka average volume hai. Jab kisi candle ka volume <code>HeavyC (1.35x)</code> se upar ho, tabhi usme asli institutional paisa laga hai. <code>HeavyL</code> batata hai ki ek single price cell mein kitni quantity ko Whale level maana jaye.<br>
+        • <b style="color:#00e676;">🟢 MACRO BULLISH DOMINANCE:</b> Price + POC upar shift ho rahe hain, CVD positive hai aur Bid floors defend ho rahe hain (Look for Longs).<br>
+        • <b style="color:#00e5ff;">🐳 MACRO BULL ACCUMULATION:</b> Pichli 20 candles mein net selling (Negative CVD) aayi hai, par price neeche nahi gir raha! Whales Limit Buy laga kar saara maal bhar rahe hain (Strongest Reversal Long Setup).<br>
+        • <b style="color:#ff5252;">🔴 MACRO BEARISH DOMINANCE:</b> Price + POC neeche shift ho rahe hain aur aggressive selling chal rahi hai (Look for Shorts).<br>
+        • <b style="color:#ff9100;">🐳 MACRO BEAR DISTRIBUTION:</b> Retail lagatar Market Buy maar raha hai (+CVD), par Whales Limit Sell laga kar top par cap kar rahe hain (Reversal Short Setup).<br>
+        • <b style="color:#ffca28;">🟡 MACRO SIDEWAYS ROTATIONAL CHOP:</b> Trend efficiency &lt; 16% hai. Beech mein trade mat le, sirf Range High/Low sweep hone par fade kar.
+    </div>
+
+    <div class="rule-sec">
+        <h4>2. INSIDE CANDLE FOOTPRINT & 8 SIDE-SPECIFIC TAGS (Left = Bid/Sell | Right = Ask/Buy)</h4>
+        • <b>Center Spine Split:</b> Spine ke Left mein <b>Market Sell (hitting Bids)</b> aur Right mein <b>Market Buy (hitting Asks)</b> hota hai.<br>
+        • <b style="color:#ffeb3b;">POC (Yellow Box):</b> Candle ka sabse heavy volume price. Candle POC ke <b>upar</b> band ho = Buyers won; POC ke <b>neeche</b> band ho = Sellers won.<br>
+        • <b style="color:#29b6f6;">VAH & VAL (Blue Lines):</b> Value Area High & Low (70% volume zone).<br>
+        • <b style="color:#00e5ff;">H-B.ABS (xx%) [Bright Cyan - Left]:</b> <b>Heavy Bid Absorption.</b> Aggressive Sellers ne sell mara, par Passive Limit Buyers ne <code>xx%</code> maal absorb kar liya = <b>STRONG INSTITUTIONAL FLOOR (BUY)</b>.<br>
+        • <b style="color:#ff9100;">H-A.ABS (xx%) [Orange/Gold - Right]:</b> <b>Heavy Ask Absorption.</b> Aggressive Buyers ne buy mara, par Passive Limit Sellers ne <code>xx%</code> maal absorb karke rok liya = <b>STRONG INSTITUTIONAL CEILING (SELL)</b>.<br>
+        • <b style="color:#ff4081;">H-BP:qty (xx%) [Neon Pink - Left]:</b> <b>Heavy Bid Pulled (Spoof).</b> Support par rakhe Buy orders price aate hi cancel kar liye gaye = <b>FAKE SUPPORT (Floor khali hai, price neeche tootega!)</b>.<br>
+        • <b style="color:#e040fb;">H-AP:qty (xx%) [Violet - Right]:</b> <b>Heavy Ask Pulled (Spoof).</b> Resistance par rakhe Sell orders cancel kar liye gaye = <b>FAKE RESISTANCE (Rasta saaf hai, price upar phatega!)</b>.<br>
+        • <b>b-abs / a-abs / bp / ap:</b> Normal intensity ke absorption aur pulling markers.
+    </div>
+
+    <div class="rule-sec">
+        <h4>3. THE 4-LINE FLOATING PILL UNDER EVERY CANDLE (Micro Candle Decision)</h4>
+        • <b>Line 1 (Δ | V | RVOL x):</b> Agar RVOL <code>&lt; 0.75x</code> hai toh <code>LOW FLOW</code> aayega—aisi halka volume candle ke signal par kabhi trade mat lena!<br>
+        • <b>Line 2 (CVD | B vs S):</b> Running Cumulative Delta aur us candle ka exact Market Buy (<code>B</code>) vs Market Sell (<code>S</code>) volume.<br>
+        • <b>Line 3 (Market vs Limit Clash Mechanism):</b><br>
+          &nbsp;&nbsp;- <b style="color:#00e5ff;">🐳 LIM-BUY ACCUM:</b> High volume + heavy selling aayi par price nahi gira (Whales ne Limit Buy se absorb kiya).<br>
+          &nbsp;&nbsp;- <b style="color:#ff9100;">🐳 LIM-SELL DUMP:</b> High volume + heavy buying aayi par price upar nahi gaya (Whales ne Limit Sell se dump kiya).<br>
+          &nbsp;&nbsp;- <b style="color:#00e676;">🔥 MKT BUY IGNITION</b> / <b style="color:#ff1744;">🔥 MKT SELL DUMP:</b> Whales ne khud Market order maar kar badi displacement candle banayi.<br>
+        • <b>Line 4 (Final Candle Winner):</b> <b style="color:#00e676;">🟢 BUYERS WIN</b>, <b style="color:#ff5252;">🔴 SELLERS WIN</b>, ya <b style="color:#00e676;">🐳 BULL ABSORB WIN</b> (jab Delta negative ho par candle Green band ho = Sellers trapped!).
+    </div>
+
+    <div class="rule-sec">
+        <h4>4. UNIFIED LIVE DOM LADDER & X-RAY HOVER HUD</h4>
+        • <b>Center Price DOM:</b> Left = Resting Bids, Right = Resting Asks. Bracket mein <code>[qty]</code> us price par abhi execute hua volume hai.<br>
+        • <b style="color:#00e5ff;">★ Cyan</b> / <b style="color:#ffab00;">★ Orange Bars:</b> Poore orderbook ke Top 4 sabse badi Liquidity Walls (Magnet / Target zones).<br>
+        • <b>Top-Left X-Ray Box:</b> Kisi bhi candle cell par cursor/ungli rakhne par us exact price ka Executed Buy/Sell % aur Pulled Spoof % dikhata hai.
+    </div>
+
+    <div class="rule-sec" style="border-color:#00e676;">
+        <h4 style="color:#00e676;">🎯 3-STEP ICT FVG / ORDER BLOCK ENTRY CHECKLIST (SL SAVER FORMULA)</h4>
+        <b>1. FVG Tap Check:</b> Jab price Bullish FVG/OB mein aaye, toh cell mein <b style="color:#00e5ff;">H-B.ABS</b> ya <b style="color:#00e5ff;">▲ BID ABS</b> chhapna chahiye. (Agar wahan <b style="color:#ff4081;">H-BP Bid Pulled</b> dikhe toh entry mat le, FVG fail hone wala hai!).<br>
+        <b>2. Pill Check:</b> Candle ke neeche pill mein <code>RVOL &gt;= 1.1x</code> ho aur Line 4 mein <b style="color:#00e676;">BUYERS WIN</b> ya <b style="color:#00e676;">🐳 BULL ABSORB WIN</b> aaye.<br>
+        <b>3. POC Close Check:</b> Entry candle ka close uske Yellow <b>POC</b> box ke upar (Long ke liye) ya neeche (Short ke liye) hona chahiye.
+    </div>
+</div>
+
 <script>
 const wrap = document.getElementById('wrap');
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d', { alpha: false });
 const slideTab = document.getElementById('domSlideTab');
+const ruleModal = document.getElementById('ruleModal');
+
+function toggleRules() {
+    ruleModal.style.display = (ruleModal.style.display === 'block') ? 'none' : 'block';
+}
 
 const STEP_MAP = { BTCUSDT: 1.0, ETHUSDT: 0.1, SOLUSDT: 0.01, XRPUSDT: 0.0001 };
 
@@ -1627,7 +1714,7 @@ let pinchDist = null;
 let needsRender = true;
 
 const TIME_H = 20;
-const PILL_SAFE_H = 66; // Extra room for 4-line Candle Decision Pill!
+const PILL_SAFE_H = 66;
 
 function updateSlideTabUI() {
     isMobile = cv.width < 768;
@@ -1917,19 +2004,14 @@ function groupFootprint(fpRaw, low, high, effStep, closePx) {
     return Array.from(map.values()).sort((a, b) => a.price - b.price);
 }
 
-// =========================================================================
-// MACRO MARKET STRUCTURE & MULTI-CANDLE ORDERFLOW DECISION ENGINE (TOP BAR)
-// Evaluates last 15-25 candles + POC Migration + CVD Divergence + Traps + DOM
-// =========================================================================
 function updateMacroMarketDecision(avgFlowVol, effStep) {
     if (!candles || candles.length < 3) return;
 
-    const sample = candles.slice(-20); // Last 20 candles macro window
+    const sample = candles.slice(-20);
     const last = sample[sample.length - 1];
     const first = sample[0];
     const curRvol = (last.volume || 0) / avgFlowVol;
 
-    // Benchmark bar update
     const lastFp = groupFootprint(last.footprint, last.low, last.high, effStep, last.close);
     const avgLvlVol = lastFp.length > 0 ? (avgFlowVol / Math.max(6, lastFp.length)) : avgFlowVol * 0.15;
     document.getElementById('bmAvg').innerText = `Avg:${fmt(avgFlowVol)}`;
@@ -1938,7 +2020,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
     document.getElementById('bmCur').innerText = `Cur:${fmt(last.volume)}(${curRvol.toFixed(1)}x)`;
     document.getElementById('bmCur').style.color = curRvol >= 1.3 ? '#00e676' : '#d1d4dc';
 
-    // 1. Macro Price Range, Net Price Change & Overlap/Chop Ratio
     let macroHigh = -Infinity, macroLow = Infinity;
     let sumCandleRanges = 0;
     let totalCvd = 0, totalVol = 0;
@@ -1959,15 +2040,14 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
             else if (c.poc < sample[idx - 1].poc) pocDownSteps++;
         }
 
-        // Check multi-candle institutional absorption & pulls
         const cRvol = (c.volume || 0) / avgFlowVol;
         const closePos = (c.close - c.low) / cr;
         const mbPct = (c.volume > 0) ? ((c.buy_volume || 0) / c.volume) * 100 : 50;
         const msPct = 100 - mbPct;
 
         if (cRvol >= 1.1) {
-            if (msPct >= 56 && closePos >= 0.52) macroBidAbsorbs += cRvol; // Sellers absorbed at lows
-            if (mbPct >= 56 && closePos <= 0.48) macroAskAbsorbs += cRvol; // Buyers absorbed at highs
+            if (msPct >= 56 && closePos >= 0.52) macroBidAbsorbs += cRvol;
+            if (mbPct >= 56 && closePos <= 0.48) macroAskAbsorbs += cRvol;
         }
 
         const fpArr = Array.isArray(c.footprint) ? c.footprint : Object.values(c.footprint || {});
@@ -1979,14 +2059,12 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
 
     const macroSpan = Math.max(macroHigh - macroLow, rawStep);
     const netPriceMove = last.close - first.open;
-    // Efficiency Ratio: Net move vs total path traveled (< 0.18 means heavy sideways overlap/chop)
     const efficiency = Math.abs(netPriceMove) / Math.max(sumCandleRanges, rawStep);
-    const posInMacroRange = (last.close - macroLow) / macroSpan; // 0 = bottom of range, 1 = top
+    const posInMacroRange = (last.close - macroLow) / macroSpan;
 
     let bullPts = 0, bearPts = 0;
     let macroNotes = [];
 
-    // A. Macro Price & POC Value Migration
     if (netPriceMove > macroSpan * 0.25 && pocUpSteps > pocDownSteps + 1) {
         bullPts += 28;
         macroNotes.push(`POC Migration UP (${pocUpSteps}↑/${pocDownSteps}↓)`);
@@ -1995,8 +2073,7 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
         macroNotes.push(`POC Migration DOWN (${pocDownSteps}↓/${pocUpSteps}↑)`);
     }
 
-    // B. Macro CVD vs Price Structure (Trend Confirmation vs Whale Divergence)
-    const cvdRatio = totalVol > 0 ? (totalCvd / totalVol) * 100 : 0; // Net delta % of total volume
+    const cvdRatio = totalVol > 0 ? (totalCvd / totalVol) * 100 : 0;
     if (totalCvd > 0 && netPriceMove > macroSpan * 0.15) {
         bullPts += 24;
         macroNotes.push(`Macro CVD +${fmt(totalCvd)} (+${cvdRatio.toFixed(0)}%)`);
@@ -2004,16 +2081,13 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
         bearPts += 24;
         macroNotes.push(`Macro CVD ${fmt(totalCvd)} (${cvdRatio.toFixed(0)}%)`);
     } else if (totalCvd < -avgFlowVol * 0.8 && netPriceMove >= -macroSpan * 0.10) {
-        // Heavy net selling across 20 candles, yet price refuses to drop = WHALE LIMIT ACCUMULATION!
         bullPts += 34;
         macroNotes.push(`Whale Bid Absorption (CVD ${fmt(totalCvd)} Held)`);
     } else if (totalCvd > avgFlowVol * 0.8 && netPriceMove <= macroSpan * 0.10) {
-        // Heavy net buying across 20 candles, yet price refuses to rise = WHALE LIMIT DISTRIBUTION!
         bearPts += 34;
         macroNotes.push(`Whale Ask Distribution (CVD +${fmt(totalCvd)} Capped)`);
     }
 
-    // C. Multi-Candle Institutional Floor vs Ceiling Defense
     if (macroBidAbsorbs > macroAskAbsorbs + 1.2) {
         bullPts += 22;
         macroNotes.push(`Bid Floors Defended (${macroBidAbsorbs.toFixed(1)}x)`);
@@ -2022,7 +2096,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
         macroNotes.push(`Ask Ceilings Defended (${macroAskAbsorbs.toFixed(1)}x)`);
     }
 
-    // D. Macro Liquidity Pulling / Spoofing Bias
     if (macroAskPulled > macroBidPulled * 1.35 && macroAskPulled > 0) {
         bullPts += 14;
         macroNotes.push(`Asks Pulled (${fmt(macroAskPulled)})`);
@@ -2031,7 +2104,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
         macroNotes.push(`Bids Pulled (${fmt(macroBidPulled)})`);
     }
 
-    // E. Live Orderbook Macro Imbalance
     let bookBids = 0, bookAsks = 0;
     const scanDist = effStep * 25;
     (obData.bids || []).forEach(b => { if (last.close - b.price <= scanDist) bookBids += b.quantity; });
@@ -2049,7 +2121,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
     const vReasons = document.getElementById('masterVerdictReasons');
     const netMacro = bullPts - bearPts;
 
-    // Detect Sideways Rotational Chop vs Clear Directional Bias
     const isChopRange = efficiency < 0.16 && Math.abs(netMacro) < 26;
 
     if (isChopRange) {
@@ -2058,7 +2129,7 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
         vTitle.style.color = '#ffca28';
         const zoneLoc = posInMacroRange > 0.7 ? 'Near Range High' : (posInMacroRange < 0.3 ? 'Near Range Low' : 'Mid-Range');
         vTitle.innerText = `🟡 MACRO: SIDEWAYS ROTATIONAL CHOP (${zoneLoc}) — FADE EXTREMES`;
-        vReasons.innerText = `Low trend efficiency (${(efficiency * 100).toFixed(0)}%) | CVD:${fmt(totalCvd)} | Wait for liquidity sweep`;
+        vReasons.innerText = `Low trend efficiency (${(efficiency * 100).toFixed(0)}%) | CVD:${fmt(totalCvd)} | Wait for sweep`;
     } else if (netMacro >= 18) {
         const conf = Math.min(96, Math.round(52 + (netMacro / 85) * 44));
         const isAccum = totalCvd < 0 && netPriceMove >= -macroSpan * 0.1;
@@ -2084,7 +2155,7 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
         vBox.style.borderColor = '#90a4ae';
         vTitle.style.color = '#eceff1';
         vTitle.innerText = `⚖️ MACRO: BALANCED TWO-WAY AUCTION — WAIT FOR DISPLACEMENT`;
-        vReasons.innerText = macroNotes.slice(0, 3).join(' | ') || `CVD:${fmt(totalCvd)} | Equal buyer/seller control`;
+        vReasons.innerText = macroNotes.slice(0, 3).join(' | ') || `CVD:${fmt(totalCvd)} | Equal control`;
     }
 }
 
@@ -2161,8 +2232,6 @@ function drawAll() {
     }
 
     const effStep = rawStep * mult;
-
-    // Update Top Bar with Overall Market Macro Decision!
     updateMacroMarketDecision(avgFlowVol, effStep);
 
     const pToY = p => chartH - ((p - minP) / pSpan) * chartH;
@@ -2417,9 +2486,6 @@ function drawAll() {
             }
         });
 
-        // =========================================================================
-        // INDIVIDUAL CANDLE-WISE DECISION ENGINE (DISPLAYED INSIDE FLOATING PILL)
-        // =========================================================================
         const cVol = c.volume || 0;
         const rvol = cVol / avgFlowVol;
         const mktBuyPct = cVol > 0 ? Math.round(((c.buy_volume || 0) / cVol) * 100) : 50;
@@ -2443,7 +2509,6 @@ function drawAll() {
             verdictCol = '#6c738a';
             decisionCol = '#78909c';
         } else {
-            // Score this specific candle
             let cBull = 0, cBear = 0;
             if (mktSellPct >= 56 && (c.close >= c.open || lowerWick > bodySize * 0.75)) cBull += 40;
             if (mktBuyPct >= 56 && (c.close <= c.open || upperWick > bodySize * 0.75)) cBear += 40;
@@ -2523,7 +2588,6 @@ function drawAll() {
             }
         }
 
-        // 4-LINE NON-OVERLAPPING FLOATING PILL WITH CANDLE-WISE FINAL DECISION
         if (candleW >= 60) {
             const pillW = Math.min(candleW * 0.95, 178);
             const pillH = 52;
@@ -2548,22 +2612,18 @@ function drawAll() {
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
 
-            // Line 1: Delta + Volume + RVOL
             ctx.font = 'bold 9px monospace';
             ctx.fillStyle = c.delta >= 0 ? '#00e676' : '#ff5252';
             ctx.fillText(`Δ${c.delta >= 0 ? '+' : ''}${fmt(c.delta)} | V:${fmt(c.volume)} (${rvol.toFixed(1)}x)`, cx, pillY + 8);
 
-            // Line 2: CVD + Buy/Sell Volumes
             ctx.font = '9px monospace';
             ctx.fillStyle = '#b0b8c8';
             ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} | B:${fmt(c.buy_volume)} S:${fmt(c.sell_volume)}`, cx, pillY + 19);
 
-            // Line 3: Orderflow Mechanism (Market vs Limit Activity)
             ctx.font = '9px monospace';
             ctx.fillStyle = verdictCol;
             ctx.fillText(flowVerdict, cx, pillY + 31);
 
-            // Line 4: Particular Candle's Final Decision Badge!
             ctx.fillStyle = 'rgba(255,255,255,0.06)';
             ctx.fillRect(pillX + 2, pillY + 38, pillW - 4, 12);
             ctx.font = 'bold 9px monospace';
@@ -2797,7 +2857,7 @@ requestAnimationFrame(drawLoop);
 </html>"""
 
 
-app.route("/hello")
+@app.route("/hello")
 def hello():
     return "SA Footprint Engine OK"
 
