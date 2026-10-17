@@ -1413,29 +1413,73 @@ def home():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>SA Institutional Footprint & Unified DOM</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>SA Institutional Footprint & Decision Engine</title>
 <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
     body {
         background: #090b10;
         color: #d1d4dc;
         font-family: monospace;
         overflow: hidden;
         height: 100vh;
+        width: 100vw;
         display: flex;
         flex-direction: column;
+        touch-action: none;
     }
     .topbar {
-        height: 38px;
+        min-height: 38px;
         background: #11151f;
         border-bottom: 1px solid #232838;
         display: flex;
         align-items: center;
-        padding: 0 8px;
+        padding: 2px 8px;
         gap: 5px;
         font-size: 11px;
+        overflow-x: auto;
+        white-space: nowrap;
+        scrollbar-width: none;
     }
-    .brand { color: #00e5ff; font-weight: bold; margin-right: 4px; font-size: 12px; }
+    .topbar::-webkit-scrollbar, .decision-bar::-webkit-scrollbar { display: none; }
+    .decision-bar {
+        min-height: 34px;
+        background: #0d111a;
+        border-bottom: 1px solid #232838;
+        display: flex;
+        align-items: center;
+        padding: 2px 8px;
+        gap: 8px;
+        font-size: 11px;
+        overflow-x: auto;
+        white-space: nowrap;
+        scrollbar-width: none;
+    }
+    .bench-box {
+        background: #151a28;
+        border: 1px solid #2a324b;
+        padding: 3px 8px;
+        border-radius: 3px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-shrink: 0;
+    }
+    .verdict-box {
+        flex: 1;
+        min-width: 280px;
+        padding: 4px 10px;
+        border-radius: 3px;
+        font-weight: bold;
+        font-size: 11px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        border: 1px solid #2c3347;
+        background: #161b26;
+    }
+    .brand { color: #00e5ff; font-weight: bold; margin-right: 4px; font-size: 12px; flex-shrink: 0; }
     select, .btn {
         background: #1a2030;
         color: #d1d4dc;
@@ -1445,21 +1489,22 @@ def home():
         font-family: monospace;
         font-size: 11px;
         cursor: pointer;
+        flex-shrink: 0;
     }
     .btn.active { background: #2962ff; color: #fff; border-color: #2962ff; font-weight: bold; }
-    .sep { width: 1px; height: 20px; background: #232838; margin: 0 3px; }
-    .legend { display: flex; gap: 5px; font-size: 10px; align-items: center; margin-left: 4px; }
+    .sep { width: 1px; height: 20px; background: #232838; margin: 0 2px; flex-shrink: 0; }
+    .legend { display: flex; gap: 4px; font-size: 10px; align-items: center; margin-left: 2px; flex-shrink: 0; }
     .lg { padding: 1px 4px; border-radius: 2px; font-weight: bold; }
-    .status-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    .status-right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
     .live-px { font-size: 13px; font-weight: bold; padding: 2px 6px; background: #1a2030; border-radius: 3px; }
-    #wrap { flex: 1; position: relative; overflow: hidden; background: #090b10; }
-    canvas { display: block; cursor: crosshair; }
+    #wrap { flex: 1; position: relative; overflow: hidden; background: #090b10; touch-action: none; }
+    canvas { display: block; cursor: crosshair; touch-action: none; }
 </style>
 </head>
 <body>
 
 <div class="topbar">
-    <span class="brand">⚡ SA ORDERFLOW</span>
+    <span class="brand">⚡ SA PRO</span>
     <select id="symSel" onchange="setSym(this.value)">
         <option value="BTCUSDT" selected>BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
@@ -1467,7 +1512,7 @@ def home():
         <option value="XRPUSDT">XRPUSDT</option>
     </select>
     <div class="sep"></div>
-    <div id="tfBtns">
+    <div id="tfBtns" style="display:flex;gap:3px;">
         <button class="btn active" onclick="setTF('1m',this)">1m</button>
         <button class="btn" onclick="setTF('3m',this)">3m</button>
         <button class="btn" onclick="setTF('5m',this)">5m</button>
@@ -1478,9 +1523,8 @@ def home():
         <button class="btn" onclick="setTF('1d',this)">1d</button>
     </div>
     <div class="sep"></div>
-    <span style="color:#8b93a7;">Tick Scale:</span>
     <select id="tickMultSel" onchange="setTickMult(this.value)">
-        <option value="auto" selected>Auto-Fit Digits</option>
+        <option value="auto" selected>Scale: Auto</option>
         <option value="1">1x (Raw)</option>
         <option value="2">2x</option>
         <option value="5">5x</option>
@@ -1488,9 +1532,12 @@ def home():
         <option value="25">25x</option>
         <option value="50">50x</option>
     </select>
-    <button class="btn" onclick="scaleY(0.82)" title="Expand Vertical Price Scale">Y+</button>
-    <button class="btn" onclick="scaleY(1.22)" title="Compress Vertical Price Scale">Y-</button>
-    <button class="btn" onclick="resetCamera()">Reset Fit</button>
+    <button class="btn" onclick="scaleY(0.82)">Y+</button>
+    <button class="btn" onclick="scaleY(1.22)">Y-</button>
+    <button class="btn" onclick="scaleX(1.18)">X+</button>
+    <button class="btn" onclick="scaleX(0.84)">X-</button>
+    <button class="btn" onclick="resetCamera()">Fit</button>
+    <button class="btn active" id="domToggleBtn" onclick="toggleDOM()">DOM: ON</button>
 
     <div class="legend">
         <span class="lg" style="background:#00e5ff;color:#000;">H-B.ABS</span>
@@ -1500,8 +1547,25 @@ def home():
     </div>
 
     <div class="status-right">
-        <span id="connTxt" style="color:#00e676;">● SYNCED</span>
+        <span id="connTxt" style="color:#00e676;">● SYNC</span>
         <span id="pxBox" class="live-px">--</span>
+    </div>
+</div>
+
+<div class="decision-bar">
+    <div class="bench-box">
+        <span style="color:#8b93a7;">FLOW:</span>
+        <span id="bmAvg" style="color:#d1d4dc;">Avg:--</span>
+        <span style="color:#444;">|</span>
+        <span id="bmHeavy" style="color:#ffeb3b;font-weight:bold;">HeavyC:>--</span>
+        <span style="color:#444;">|</span>
+        <span id="bmLvl" style="color:#00e5ff;font-weight:bold;">HeavyL:>--</span>
+        <span style="color:#444;">|</span>
+        <span id="bmCur" style="color:#fff;">Live:--</span>
+    </div>
+    <div class="verdict-box" id="masterVerdictBox">
+        <span id="masterVerdictTitle">ANALYZING ORDERFLOW...</span>
+        <span id="masterVerdictReasons" style="font-size:10px;font-weight:normal;color:#cfd8dc;">Waiting...</span>
     </div>
 </div>
 
@@ -1521,19 +1585,31 @@ let candles = [];
 let obData = { bids: [], asks: [] };
 let rawStep = STEP_MAP[symbol] || 1.0;
 
-let candleW = 240;
+let isMobile = window.innerWidth < 768;
+let showDOM = true;
+let candleW = isMobile ? 155 : 235;
 let panX = 0;
 let minP = null;
 let maxP = null;
+let domScrollRows = 0; // Allows scrolling Orderbook up and down!
 
-let dragMode = null;
+let dragMode = null; // 'chart' | 'yaxis' | 'dom'
 let lastX = 0, lastY = 0;
 let curX = -1, curY = -1;
+let pinchDist = null;
 let needsRender = true;
 
-const DOM_W = 310;
-const YAXIS_W = 74;
 const TIME_H = 20;
+const PILL_SAFE_H = 54;
+
+function getLayout() {
+    isMobile = cv.width < 768;
+    const yAxisW = isMobile ? 58 : 74;
+    const domW = !showDOM ? 0 : (isMobile ? Math.min(185, Math.floor(cv.width * 0.44)) : 300);
+    const chartW = Math.max(100, cv.width - domW - yAxisW);
+    const chartH = cv.height - TIME_H - PILL_SAFE_H;
+    return { yAxisW, domW, chartW, chartH };
+}
 
 function resize() {
     cv.width = wrap.clientWidth;
@@ -1542,6 +1618,14 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
+
+function toggleDOM() {
+    showDOM = !showDOM;
+    const btn = document.getElementById('domToggleBtn');
+    btn.innerText = showDOM ? 'DOM: ON' : 'DOM: OFF';
+    btn.classList.toggle('active', showDOM);
+    needsRender = true;
+}
 
 function setSym(s) {
     symbol = s;
@@ -1569,80 +1653,157 @@ function scaleY(factor) {
         needsRender = true;
     }
 }
+function scaleX(factor) {
+    candleW = Math.max(35, Math.min(480, candleW * factor));
+    needsRender = true;
+}
 function resetCamera() {
     panX = 0;
     minP = null;
     maxP = null;
-    candleW = 240;
+    domScrollRows = 0;
+    candleW = window.innerWidth < 768 ? 155 : 235;
     needsRender = true;
 }
 
+function detectZone(x) {
+    const { chartW, yAxisW } = getLayout();
+    if (x < chartW) return 'chart';
+    if (x <= chartW + yAxisW) return 'yaxis';
+    return 'dom';
+}
+
+function applyDrag(dx, dy) {
+    const { chartH } = getLayout();
+    if (dragMode === 'chart') {
+        panX += dx;
+        if (minP !== null && maxP !== null) {
+            const shift = (dy / chartH) * (maxP - minP);
+            minP += shift;
+            maxP += shift;
+        }
+    } else if (dragMode === 'yaxis') {
+        if (minP !== null && maxP !== null) {
+            const mid = (maxP + minP) * 0.5;
+            let half = (maxP - minP) * 0.5 * (1 + dy * 0.006);
+            if (half >= rawStep * 2) { minP = mid - half; maxP = mid + half; }
+        }
+    } else if (dragMode === 'dom') {
+        // Scroll DOM ladder rows up/down smoothly
+        domScrollRows += (dy / 14);
+    }
+    needsRender = true;
+}
+
+// ---------------- MOUSE CONTROLS ----------------
 cv.addEventListener('mousedown', e => {
     const r = cv.getBoundingClientRect();
     lastX = e.clientX - r.left;
     lastY = e.clientY - r.top;
-    const chartRight = cv.width - DOM_W - YAXIS_W;
-    if (lastX >= chartRight && lastX <= chartRight + YAXIS_W) dragMode = 'yaxis';
-    else if (lastX < chartRight) dragMode = 'chart';
+    dragMode = detectZone(lastX);
 });
 
 window.addEventListener('mousemove', e => {
     const r = cv.getBoundingClientRect();
     curX = e.clientX - r.left;
     curY = e.clientY - r.top;
-
-    if (dragMode === 'chart') {
-        const dx = curX - lastX;
-        const dy = curY - lastY;
-        panX += dx;
-        if (minP !== null && maxP !== null) {
-            const chartH = cv.height - TIME_H;
-            const shift = (dy / chartH) * (maxP - minP);
-            minP += shift;
-            maxP += shift;
-        }
+    if (dragMode) {
+        applyDrag(curX - lastX, curY - lastY);
         lastX = curX;
         lastY = curY;
-    } else if (dragMode === 'yaxis') {
-        const dy = curY - lastY;
-        if (minP !== null && maxP !== null) {
-            const mid = (maxP + minP) * 0.5;
-            let half = (maxP - minP) * 0.5 * (1 + dy * 0.006);
-            if (half >= rawStep * 2) { minP = mid - half; maxP = mid + half; }
-        }
-        lastY = curY;
+    } else {
+        needsRender = true;
     }
-    needsRender = true;
 });
 
 window.addEventListener('mouseup', () => { dragMode = null; });
-cv.addEventListener('dblclick', resetCamera);
+
+cv.addEventListener('dblclick', e => {
+    const r = cv.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    if (detectZone(x) === 'dom') {
+        domScrollRows = 0; // Reset DOM scroll to center live price
+        needsRender = true;
+    } else {
+        resetCamera();
+    }
+});
 
 cv.addEventListener('wheel', e => {
     e.preventDefault();
-    const chartRight = cv.width - DOM_W - YAXIS_W;
-    const chartH = cv.height - TIME_H;
+    const { chartW, yAxisW, chartH } = getLayout();
+    const zone = detectZone(curX);
     const zoomIn = e.deltaY < 0;
 
-    if (curX >= chartRight && curX <= chartRight + YAXIS_W) {
+    if (zone === 'dom') {
+        // Scroll Orderbook Ladder up/down with Mouse Wheel!
+        domScrollRows += (e.deltaY > 0 ? -3 : 3);
+    } else if (zone === 'yaxis') {
         scaleY(zoomIn ? 0.84 : 1.19);
-    } else if (curX < chartRight) {
+    } else {
         const zx = zoomIn ? 1.15 : 0.87;
-        candleW = Math.max(45, Math.min(480, candleW * zx));
-
+        candleW = Math.max(35, Math.min(480, candleW * zx));
         if (!e.shiftKey && minP !== null && maxP !== null) {
             const zy = zoomIn ? 0.85 : 1.18;
             const span = maxP - minP;
             const newSpan = Math.max(rawStep * 6, span * zy);
             const mouseRatio = Math.max(0.1, Math.min(0.9, (chartH - curY) / chartH));
             const mousePrice = minP + span * mouseRatio;
-
             minP = mousePrice - newSpan * mouseRatio;
             maxP = minP + newSpan;
         }
     }
     needsRender = true;
 }, { passive: false });
+
+// ---------------- MOBILE TOUCH & PINCH-ZOOM CONTROLS ----------------
+cv.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    if (e.touches.length === 1) {
+        lastX = e.touches[0].clientX - r.left;
+        lastY = e.touches[0].clientY - r.top;
+        curX = lastX;
+        curY = lastY;
+        dragMode = detectZone(lastX);
+        pinchDist = null;
+    } else if (e.touches.length === 2) {
+        dragMode = null;
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        pinchDist = Math.hypot(dx, dy);
+    }
+}, { passive: false });
+
+cv.addEventListener('touchmove', e => {
+    e.preventDefault();
+    const r = cv.getBoundingClientRect();
+    if (e.touches.length === 1 && dragMode) {
+        const tx = e.touches[0].clientX - r.left;
+        const ty = e.touches[0].clientY - r.top;
+        applyDrag(tx - lastX, ty - lastY);
+        lastX = tx;
+        lastY = ty;
+        curX = tx;
+        curY = ty;
+    } else if (e.touches.length === 2 && pinchDist !== null) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        const newDist = Math.hypot(dx, dy);
+        if (newDist > 10) {
+            const ratio = newDist / pinchDist;
+            candleW = Math.max(35, Math.min(480, candleW * ratio));
+            scaleY(1 / ratio);
+            pinchDist = newDist;
+            needsRender = true;
+        }
+    }
+}, { passive: false });
+
+cv.addEventListener('touchend', () => {
+    dragMode = null;
+    pinchDist = null;
+});
 
 let fetching = false;
 async function fetchData() {
@@ -1668,11 +1829,11 @@ async function fetchData() {
         if (oData.status === 'ok') {
             obData = oData;
         }
-        document.getElementById('connTxt').innerText = '● SYNCED';
+        document.getElementById('connTxt').innerText = '● SYNC';
         document.getElementById('connTxt').style.color = '#00e676';
         needsRender = true;
     } catch (e) {
-        document.getElementById('connTxt').innerText = '● RETRYING';
+        document.getElementById('connTxt').innerText = '● RETRY';
         document.getElementById('connTxt').style.color = '#ff9800';
     } finally {
         fetching = false;
@@ -1717,14 +1878,108 @@ function groupFootprint(fpRaw, low, high, effStep, closePx) {
     return Array.from(map.values()).sort((a, b) => a.price - b.price);
 }
 
+function updateDecisionEngine(avgFlowVol, effStep) {
+    if (!candles || candles.length < 2) return;
+    const last = candles[candles.length - 1];
+    const prev = candles[candles.length - 2];
+
+    const activeC = (last.volume >= avgFlowVol * 0.35) ? last : prev;
+    const curRvol = (last.volume || 0) / avgFlowVol;
+
+    const fp = groupFootprint(activeC.footprint, activeC.low, activeC.high, effStep, activeC.close);
+    const avgLvlVol = fp.length > 0 ? (activeC.volume || 1) / fp.length : 1;
+    const heavyLvlCut = avgLvlVol * 1.85;
+
+    document.getElementById('bmAvg').innerText = `Avg:${fmt(avgFlowVol)}`;
+    document.getElementById('bmHeavy').innerText = `HeavyC:>${fmt(avgFlowVol * 1.35)}`;
+    document.getElementById('bmLvl').innerText = `HeavyL:>${fmt(heavyLvlCut)}`;
+    document.getElementById('bmCur').innerText = `Live:${fmt(last.volume)}(${curRvol.toFixed(1)}x)`;
+    document.getElementById('bmCur').style.color = curRvol >= 1.3 ? '#00e676' : '#d1d4dc';
+
+    let bullScore = 0, bearScore = 0, reasons = [];
+    const cVol = activeC.volume || 1;
+    const rvol = cVol / avgFlowVol;
+    const mktBuyPct = Math.round(((activeC.buy_volume || 0) / cVol) * 100);
+    const mktSellPct = 100 - mktBuyPct;
+    const cRange = Math.max(activeC.high - activeC.low, rawStep);
+    const closePos = (activeC.close - activeC.low) / cRange;
+
+    if (mktSellPct >= 58 && closePos >= 0.55) {
+        bullScore += 35 * Math.min(1.5, rvol);
+        reasons.push(`Bid Absorb (MS:${mktSellPct}% Held)`);
+    } else if (mktBuyPct >= 58 && closePos <= 0.45) {
+        bearScore += 35 * Math.min(1.5, rvol);
+        reasons.push(`Ask Cap/Dump (MB:${mktBuyPct}% Rej)`);
+    } else if (mktBuyPct >= 60 && closePos > 0.65) {
+        bullScore += 30 * Math.min(1.5, rvol);
+        reasons.push(`Mkt Buy Ignition (${mktBuyPct}%)`);
+    } else if (mktSellPct >= 60 && closePos < 0.35) {
+        bearScore += 30 * Math.min(1.5, rvol);
+        reasons.push(`Mkt Sell Dump (${mktSellPct}%)`);
+    }
+
+    if (last.poc && prev.poc) {
+        if (last.poc > prev.poc) { bullScore += 18; reasons.push(`POC Up`); }
+        else if (last.poc < prev.poc) { bearScore += 18; reasons.push(`POC Down`); }
+    }
+
+    const recent3Delta = candles.slice(-3).reduce((acc, x) => acc + (x.delta || 0), 0);
+    if (recent3Delta > avgFlowVol * 0.25) { bullScore += 15; reasons.push(`3C-CVD +${fmt(recent3Delta)}`); }
+    else if (recent3Delta < -avgFlowVol * 0.25) { bearScore += 15; reasons.push(`3C-CVD ${fmt(recent3Delta)}`); }
+
+    let bidPulledSum = 0, askPulledSum = 0;
+    fp.forEach(l => { bidPulledSum += (l.bid_pulled || 0); askPulledSum += (l.ask_pulled || 0); });
+    if (askPulledSum > bidPulledSum * 1.5 && askPulledSum > 0) {
+        bullScore += 15; reasons.push(`Ask Pulled (${fmt(askPulledSum)})`);
+    } else if (bidPulledSum > askPulledSum * 1.5 && bidPulledSum > 0) {
+        bearScore += 15; reasons.push(`Bid Pulled (${fmt(bidPulledSum)})`);
+    }
+
+    let nearBid = 0, nearAsk = 0;
+    const nearDist = effStep * 15;
+    (obData.bids || []).forEach(b => { if (last.close - b.price <= nearDist) nearBid += b.quantity; });
+    (obData.asks || []).forEach(a => { if (a.price - last.close <= nearDist) nearAsk += a.quantity; });
+    if (nearBid > nearAsk * 1.35) { bullScore += 12; reasons.push(`DOM Bid Wall`); }
+    else if (nearAsk > nearBid * 1.35) { bearScore += 12; reasons.push(`DOM Ask Wall`); }
+
+    const vBox = document.getElementById('masterVerdictBox');
+    const vTitle = document.getElementById('masterVerdictTitle');
+    const vReasons = document.getElementById('masterVerdictReasons');
+    const netScore = bullScore - bearScore;
+
+    if (rvol < 0.60 && curRvol < 0.60) {
+        vBox.style.background = 'rgba(30, 36, 50, 0.85)';
+        vBox.style.borderColor = '#455a64';
+        vTitle.style.color = '#b0bec5';
+        vTitle.innerText = `⚪ LOW-FLOW CHOP (${rvol.toFixed(1)}x) — WAIT`;
+        vReasons.innerText = `Low volume noise`;
+    } else if (netScore >= 18) {
+        const conf = Math.min(96, Math.round(50 + (netScore / 90) * 48));
+        vBox.style.background = 'rgba(0, 200, 83, 0.18)';
+        vBox.style.borderColor = '#00e676';
+        vTitle.style.color = '#00e676';
+        vTitle.innerText = `🟢 BUY DOMINANCE (${conf}%) — LONG BIAS`;
+        vReasons.innerText = reasons.slice(0, 3).join(' | ');
+    } else if (netScore <= -18) {
+        const conf = Math.min(96, Math.round(50 + (Math.abs(netScore) / 90) * 48));
+        vBox.style.background = 'rgba(255, 23, 68, 0.18)';
+        vBox.style.borderColor = '#ff5252';
+        vTitle.style.color = '#ff5252';
+        vTitle.innerText = `🔴 SELL DOMINANCE (${conf}%) — SHORT BIAS`;
+        vReasons.innerText = reasons.slice(0, 3).join(' | ');
+    } else {
+        vBox.style.background = 'rgba(255, 193, 7, 0.14)';
+        vBox.style.borderColor = '#ffca28';
+        vTitle.style.color = '#ffca28';
+        vTitle.innerText = `⚖️ BALANCED FIGHT — WAIT BREAK`;
+        vReasons.innerText = reasons.slice(0, 3).join(' | ') || 'Equal flow';
+    }
+}
+
 function drawLoop() {
     if (needsRender) {
         needsRender = false;
-        try {
-            drawAll();
-        } catch (err) {
-            console.error("Render error:", err);
-        }
+        try { drawAll(); } catch (err) { console.error("Render error:", err); }
     }
     requestAnimationFrame(drawLoop);
 }
@@ -1732,8 +1987,7 @@ function drawLoop() {
 function drawAll() {
     const W = cv.width;
     const H = cv.height;
-    const chartW = W - DOM_W - YAXIS_W;
-    const chartH = H - TIME_H;
+    const { yAxisW, domW, chartW, chartH } = getLayout();
     rawStep = STEP_MAP[symbol] || 1.0;
     const dec = rawStep < 0.01 ? 4 : (rawStep < 1 ? 2 : 1);
 
@@ -1742,15 +1996,13 @@ function drawAll() {
 
     if (!candles || candles.length === 0) {
         ctx.fillStyle = '#6c738a';
-        ctx.font = '13px monospace';
-        ctx.fillText('Loading Institutional Footprint...', chartW / 2 - 100, chartH / 2);
+        ctx.font = '12px monospace';
+        ctx.fillText('Loading Orderflow...', Math.max(10, chartW / 2 - 70), chartH / 2);
         return;
     }
 
-    // Calculate Baseline Average Orderflow Volume & Average Candle Range across recent history
     let totalHistVol = 0, totalHistRange = 0, histCount = 0;
     candles.forEach((hc, idx) => {
-        // Exclude the just-started 1-second old candle from dragging down average if other candles exist
         if (idx < candles.length - 1 || candles.length === 1) {
             totalHistVol += (hc.volume || 0);
             totalHistRange += Math.max(hc.high - hc.low, rawStep);
@@ -1771,13 +2023,13 @@ function drawAll() {
 
     if (minP === null || maxP === null) {
         let lo = Infinity, hi = -Infinity;
-        const focusSet = vis.slice(0, Math.min(vis.length, 4));
+        const focusSet = vis.slice(0, Math.min(vis.length, isMobile ? 2 : 4));
         focusSet.forEach(({ c }) => {
             if (c.low < lo) lo = c.low;
             if (c.high > hi) hi = c.high;
         });
         const span = Math.max(hi - lo, rawStep * 10);
-        minP = lo - span * 0.25;
+        minP = lo - span * 0.12;
         maxP = hi + span * 0.14;
     }
 
@@ -1785,7 +2037,7 @@ function drawAll() {
 
     let mult = 1;
     if (tickMultMode === 'auto') {
-        const maxRowsOnScreen = Math.max(12, Math.floor(chartH / 15));
+        const maxRowsOnScreen = Math.max(10, Math.floor(chartH / 15));
         const rawRows = pSpan / rawStep;
         if (rawRows > maxRowsOnScreen) {
             const needed = rawRows / maxRowsOnScreen;
@@ -1797,19 +2049,26 @@ function drawAll() {
     }
 
     const effStep = rawStep * mult;
+    updateDecisionEngine(avgFlowVol, effStep);
+
     const pToY = p => chartH - ((p - minP) / pSpan) * chartH;
     const yToP = y => minP + ((chartH - y) / chartH) * pSpan;
     const rowH = Math.max(3, Math.abs(pToY(minP + effStep) - pToY(minP)));
 
     ctx.strokeStyle = '#131722';
     ctx.lineWidth = 1;
-    const gCount = 10;
+    const gCount = isMobile ? 7 : 10;
     for (let i = 0; i <= gCount; i++) {
         const gy = (chartH / gCount) * i;
         ctx.beginPath();
         ctx.moveTo(0, gy); ctx.lineTo(chartW, gy);
         ctx.stroke();
     }
+
+    ctx.strokeStyle = '#192030';
+    ctx.beginPath();
+    ctx.moveTo(0, chartH); ctx.lineTo(chartW, chartH);
+    ctx.stroke();
 
     let cvd = 0;
     let hoveredCellInfo = null;
@@ -1868,12 +2127,12 @@ function drawAll() {
             ctx.moveTo(boxL, yVal); ctx.lineTo(boxR, yVal);
             ctx.stroke();
 
-            if (candleW >= 70) {
+            if (candleW >= 65) {
                 ctx.fillStyle = '#29b6f6';
                 ctx.font = 'bold 9px monospace';
                 ctx.textAlign = 'left';
-                ctx.fillText(`VAH`, boxL + 6, yVah - 3);
-                ctx.fillText(`VAL`, boxL + 6, yVal + 9);
+                ctx.fillText(`VAH`, boxL + 5, yVah - 3);
+                ctx.fillText(`VAL`, boxL + 5, yVal + 9);
             }
         }
 
@@ -1893,14 +2152,14 @@ function drawAll() {
         ctx.stroke();
 
         const halfW = (boxW - 10) * 0.5;
-        const canPrint = candleW >= 70 && rowH >= 10;
+        const canPrint = candleW >= 65 && rowH >= 10;
 
         let topSummary = null;
         let botSummary = null;
 
         fp.forEach(l => {
             const py = pToY(l.price + effStep * 0.5);
-            if (py < -20 || py > chartH + 20) return;
+            if (py < -20 || py > chartH + 10) return;
 
             const cellH = Math.max(rowH - 1, 2);
             const topY = py - cellH * 0.5;
@@ -1993,58 +2252,57 @@ function drawAll() {
                 ctx.textAlign = 'left';
                 ctx.fillText(fmt(buyV), spineX + 3, py);
 
-                let leftTag = '';
-                let leftCol = '#fff';
-                if (bidAbsType === 'heavy') { leftTag = `H-B.ABS(${bAbsPct}%)`; leftCol = '#00e5ff'; }
-                else if (bidAbsType === 'norm') { leftTag = `b-abs(${bAbsPct}%)`; leftCol = '#84ffff'; }
+                if (candleW >= 115) {
+                    let leftTag = '';
+                    let leftCol = '#fff';
+                    if (bidAbsType === 'heavy') { leftTag = `H-B.ABS(${bAbsPct}%)`; leftCol = '#00e5ff'; }
+                    else if (bidAbsType === 'norm') { leftTag = `b-abs(${bAbsPct}%)`; leftCol = '#84ffff'; }
 
-                if (bidPullType === 'heavy') {
-                    leftTag = `H-BP:${fmt(bPull)}(${bPullPct}%)`;
-                    leftCol = '#ff4081';
-                } else if (bidPullType === 'norm' && !leftTag) {
-                    leftTag = `bp:${fmt(bPull)}(${bPullPct}%)`;
-                    leftCol = '#ff80ab';
-                }
+                    if (bidPullType === 'heavy') {
+                        leftTag = `H-BP:${fmt(bPull)}(${bPullPct}%)`;
+                        leftCol = '#ff4081';
+                    } else if (bidPullType === 'norm' && !leftTag) {
+                        leftTag = `bp:${fmt(bPull)}(${bPullPct}%)`;
+                        leftCol = '#ff80ab';
+                    }
 
-                if (leftTag) {
-                    ctx.font = (bidAbsType === 'heavy' || bidPullType === 'heavy') ? 'bold 9px monospace' : '9px monospace';
-                    ctx.fillStyle = leftCol;
-                    ctx.textAlign = 'left';
-                    ctx.fillText(leftTag, spineX - halfW + 2, py);
-                }
+                    if (leftTag) {
+                        ctx.font = (bidAbsType === 'heavy' || bidPullType === 'heavy') ? 'bold 9px monospace' : '9px monospace';
+                        ctx.fillStyle = leftCol;
+                        ctx.textAlign = 'left';
+                        ctx.fillText(leftTag, spineX - halfW + 2, py);
+                    }
 
-                let rightTag = '';
-                let rightCol = '#fff';
-                if (askAbsType === 'heavy') { rightTag = `H-A.ABS(${aAbsPct}%)`; rightCol = '#ff9100'; }
-                else if (askAbsType === 'norm') { rightTag = `a-abs(${aAbsPct}%)`; rightCol = '#ffd180'; }
+                    let rightTag = '';
+                    let rightCol = '#fff';
+                    if (askAbsType === 'heavy') { rightTag = `H-A.ABS(${aAbsPct}%)`; rightCol = '#ff9100'; }
+                    else if (askAbsType === 'norm') { rightTag = `a-abs(${aAbsPct}%)`; rightCol = '#ffd180'; }
 
-                if (askPullType === 'heavy') {
-                    rightTag = `H-AP:${fmt(aPull)}(${aPullPct}%)`;
-                    rightCol = '#e040fb';
-                } else if (askPullType === 'norm' && !rightTag) {
-                    rightTag = `ap:${fmt(aPull)}(${aPullPct}%)`;
-                    rightCol = '#ea80fc';
-                }
+                    if (askPullType === 'heavy') {
+                        rightTag = `H-AP:${fmt(aPull)}(${aPullPct}%)`;
+                        rightCol = '#e040fb';
+                    } else if (askPullType === 'norm' && !rightTag) {
+                        rightTag = `ap:${fmt(aPull)}(${aPullPct}%)`;
+                        rightCol = '#ea80fc';
+                    }
 
-                if (!rightTag && isPoc) {
-                    rightTag = 'POC';
-                    rightCol = '#ffeb3b';
-                }
+                    if (!rightTag && isPoc) {
+                        rightTag = 'POC';
+                        rightCol = '#ffeb3b';
+                    }
 
-                if (rightTag) {
-                    ctx.font = (askAbsType === 'heavy' || askPullType === 'heavy' || isPoc) ? 'bold 9px monospace' : '9px monospace';
-                    ctx.fillStyle = rightCol;
-                    ctx.textAlign = 'right';
-                    ctx.fillText(rightTag, boxR - 2, py);
+                    if (rightTag) {
+                        ctx.font = (askAbsType === 'heavy' || askPullType === 'heavy' || isPoc) ? 'bold 9px monospace' : '9px monospace';
+                        ctx.fillStyle = rightCol;
+                        ctx.textAlign = 'right';
+                        ctx.fillText(rightTag, boxR - 2, py);
+                    }
                 }
             }
         });
 
-        // =========================================================================
-        // RVOL-FILTERED INSTITUTIONAL ORDERFLOW VERDICT (Market vs Limit Clash)
-        // =========================================================================
         const cVol = c.volume || 0;
-        const rvol = cVol / avgFlowVol; // Relative Volume vs Current Market Flow
+        const rvol = cVol / avgFlowVol;
         const mktBuyPct = cVol > 0 ? Math.round(((c.buy_volume || 0) / cVol) * 100) : 50;
         const mktSellPct = 100 - mktBuyPct;
 
@@ -2053,84 +2311,82 @@ function drawAll() {
         const upperWick = c.high - Math.max(c.open, c.close);
         const lowerWick = Math.min(c.open, c.close) - c.low;
 
-        let flowVerdict = `MktB:${mktBuyPct}% MktS:${mktSellPct}%`;
+        let flowVerdict = `MB:${mktBuyPct}% MS:${mktSellPct}%`;
         let verdictCol = '#8b93a7';
         let isHighConviction = false;
 
         if (rvol < 0.75) {
-            // Low Volume Filter: Prevent false dump/accum signals on dead candles!
-            flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x) | MktB:${mktBuyPct}%`;
+            flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x)`;
             verdictCol = '#6c738a';
         } else if (rvol >= 1.20) {
-            // High Orderflow Volume Spike! Check who won: Market Aggressors or Passive Limit Whales
             if (mktBuyPct >= 58 && (c.close < c.open || upperWick > bodySize * 0.8 || cRange < avgFlowRange * 0.65)) {
-                // Heavy Market Buying absorbed by Passive Limit Sellers (Institutional Distribution/Dump)
                 flowVerdict = `🐳 LIM-SELL DUMP (${rvol.toFixed(1)}x|MB:${mktBuyPct}%)`;
                 verdictCol = '#ff9100';
                 isHighConviction = true;
             } else if (mktSellPct >= 58 && (c.close > c.open || lowerWick > bodySize * 0.8 || cRange < avgFlowRange * 0.65)) {
-                // Heavy Market Selling absorbed by Passive Limit Buyers (Institutional Accumulation)
                 flowVerdict = `🐳 LIM-BUY ACCUM (${rvol.toFixed(1)}x|MS:${mktSellPct}%)`;
                 verdictCol = '#00e5ff';
                 isHighConviction = true;
             } else if (mktSellPct >= 62 && c.close < c.open && bodySize >= cRange * 0.55) {
-                // Heavy Market Sell + Strong Downward Displacement = Aggressive Market Dump
-                flowVerdict = `🔥 MKT DUMP (${rvol.toFixed(1)}x | MS:${mktSellPct}%)`;
+                flowVerdict = `🔥 MKT DUMP (${rvol.toFixed(1)}x|MS:${mktSellPct}%)`;
                 verdictCol = '#ff1744';
                 isHighConviction = true;
             } else if (mktBuyPct >= 62 && c.close > c.open && bodySize >= cRange * 0.55) {
-                // Heavy Market Buy + Strong Upward Displacement = Aggressive Market Ignition
-                flowVerdict = `🔥 MKT IGNITION (${rvol.toFixed(1)}x | MB:${mktBuyPct}%)`;
+                flowVerdict = `🔥 MKT IGNITION (${rvol.toFixed(1)}x|MB:${mktBuyPct}%)`;
                 verdictCol = '#00e676';
                 isHighConviction = true;
             } else if (rvol >= 1.5 && bodySize < cRange * 0.35) {
-                // Massive volume churn inside tight body = Institutional Limit Battle
                 flowVerdict = c.close >= (c.high + c.low) * 0.5
                     ? `🛡️ LIM-BUY HOLD (${rvol.toFixed(1)}x)`
                     : `🛡️ LIM-SELL CAP (${rvol.toFixed(1)}x)`;
                 verdictCol = '#ffeb3b';
                 isHighConviction = true;
             } else {
-                flowVerdict = `FLOW:${rvol.toFixed(1)}x | MB:${mktBuyPct}% MS:${mktSellPct}%`;
+                flowVerdict = `FLOW:${rvol.toFixed(1)}x|MB:${mktBuyPct}% MS:${mktSellPct}%`;
                 verdictCol = mktBuyPct >= 55 ? '#00e676' : (mktSellPct >= 55 ? '#ff5252' : '#d1d4dc');
             }
         } else {
-            // Normal Volume (0.75x to 1.20x)
-            flowVerdict = `RVOL:${rvol.toFixed(1)}x | MB:${mktBuyPct}% MS:${mktSellPct}%`;
+            flowVerdict = `RVOL:${rvol.toFixed(1)}x|MB:${mktBuyPct}% MS:${mktSellPct}%`;
             verdictCol = mktBuyPct >= 60 ? '#69f0ae' : (mktSellPct >= 60 ? '#ff8a80' : '#9ba2b0');
         }
 
-        // Only show Top/Bottom Absorption Banners if RVOL is at least 0.85x (ignore thin noise candles)
-        let botYBanner = yL + 6;
+        let botYBanner = yL + 16;
         if (candleW >= 70 && rvol >= 0.85) {
             ctx.font = 'bold 9px monospace';
             ctx.textAlign = 'center';
 
-            let topYBanner = Math.max(16, yH - 14);
+            let topYBanner = Math.max(16, yH - 18);
             if (topSummary && c.close < c.high - rawStep) {
                 ctx.fillStyle = 'rgba(255, 145, 0, 0.90)';
-                ctx.fillRect(cx - 68, topYBanner, 136, 13);
+                ctx.fillRect(cx - 64, topYBanner, 128, 13);
                 ctx.fillStyle = '#000';
-                ctx.fillText(`▼ ASK ABS:${fmt(topSummary.val)} (${topSummary.pct}%)`, cx, topYBanner + 7);
+                ctx.fillText(`▼ ASK ABS:${fmt(topSummary.val)}(${topSummary.pct}%)`, cx, topYBanner + 7);
             }
 
             if (botSummary && c.close > c.low + rawStep) {
                 ctx.fillStyle = 'rgba(0, 229, 255, 0.90)';
-                ctx.fillRect(cx - 68, botYBanner, 136, 13);
+                ctx.fillRect(cx - 64, botYBanner, 128, 13);
                 ctx.fillStyle = '#000';
-                ctx.fillText(`▲ BID ABS:${fmt(botSummary.val)} (${botSummary.pct}%)`, cx, botYBanner + 7);
-                botYBanner += 15;
+                ctx.fillText(`▲ BID ABS:${fmt(botSummary.val)}(${botSummary.pct}%)`, cx, botYBanner + 7);
+                botYBanner += 18;
             }
         }
 
-        // 3-LINE FLOATING TRANSPARENT PILL UNDER CANDLE (Delta/RVOL + CVD + Institutional Verdict)
         if (candleW >= 60) {
-            const pillW = Math.min(candleW * 0.94, 178);
+            const pillW = Math.min(candleW * 0.94, 174);
             const pillH = 40;
-            const pillY = Math.min(botYBanner + 2, chartH - pillH - 4);
+            const maxAllowedY = H - TIME_H - pillH - 4;
+            const pillY = Math.min(Math.max(botYBanner + 6, yL + 20), maxAllowedY);
             const pillX = cx - pillW * 0.5;
 
-            ctx.fillStyle = isHighConviction ? 'rgba(18, 22, 36, 0.86)' : 'rgba(12, 16, 24, 0.70)';
+            ctx.strokeStyle = 'rgba(108, 115, 138, 0.35)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(cx, yL + 2);
+            ctx.lineTo(cx, pillY);
+            ctx.stroke();
+
+            ctx.fillStyle = isHighConviction ? 'rgba(18, 22, 36, 0.90)' : 'rgba(12, 16, 24, 0.82)';
             ctx.fillRect(pillX, pillY, pillW, pillH);
 
             ctx.strokeStyle = isHighConviction ? verdictCol : (c.delta >= 0 ? 'rgba(0, 230, 118, 0.45)' : 'rgba(255, 82, 82, 0.45)');
@@ -2140,23 +2396,20 @@ function drawAll() {
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
 
-            // Line 1: Delta + Volume + RVOL multiplier
             ctx.font = 'bold 9px monospace';
             ctx.fillStyle = c.delta >= 0 ? '#00e676' : '#ff5252';
             ctx.fillText(`Δ${c.delta >= 0 ? '+' : ''}${fmt(c.delta)} | V:${fmt(c.volume)} (${rvol.toFixed(1)}x)`, cx, pillY + 8);
 
-            // Line 2: CVD + Market Buy (Limit Ask) vs Market Sell (Limit Bid)
             ctx.font = '9px monospace';
             ctx.fillStyle = '#b0b8c8';
             ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} | B:${fmt(c.buy_volume)} S:${fmt(c.sell_volume)}`, cx, pillY + 20);
 
-            // Line 3: RVOL-Filtered Institutional Verdict (Market vs Limit Winner)
             ctx.font = isHighConviction ? 'bold 9px monospace' : '9px monospace';
             ctx.fillStyle = verdictCol;
             ctx.fillText(flowVerdict, cx, pillY + 32);
         }
 
-        if (candleW >= 55) {
+        if (candleW >= 50) {
             const tStr = new Date(c.start).toTimeString().slice(0, 5);
             ctx.fillStyle = '#6c738a';
             ctx.font = '10px monospace';
@@ -2165,40 +2418,41 @@ function drawAll() {
         }
     });
 
-    // TOP-LEFT X-RAY INSPECTOR HUD
-    ctx.fillStyle = 'rgba(17, 21, 31, 0.90)';
-    ctx.fillRect(8, 8, 420, hoveredCellInfo ? 54 : 24);
+    // TOP-LEFT X-RAY INSPECTOR HUD (Adaptive width for Mobile)
+    const hudW = Math.min(chartW - 12, 410);
+    ctx.fillStyle = 'rgba(17, 21, 31, 0.88)';
+    ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 52 : 22);
     ctx.strokeStyle = '#2962ff';
-    ctx.strokeRect(8, 8, 420, hoveredCellInfo ? 54 : 24);
+    ctx.strokeRect(6, 6, hudW, hoveredCellInfo ? 52 : 22);
     ctx.fillStyle = '#00e5ff';
-    ctx.font = 'bold 11px monospace';
+    ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`Scale: ${mult}x (Step:${effStep.toFixed(dec)}) | Avg Flow Vol: ${fmt(avgFlowVol)}`, 14, 20);
+    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | AvgVol:${fmt(avgFlowVol)}`, 12, 17);
 
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
         ctx.fillStyle = '#ffeb3b';
-        ctx.fillText(`Px ${h.price.toFixed(dec)} | MktSell(LimBuy):${fmt(h.sellV)}(${h.bAbsPct}%) | MktBuy(LimSell):${fmt(h.buyV)}(${h.aAbsPct}%)`, 14, 36);
+        ctx.fillText(`Px:${h.price.toFixed(dec)} | MS:${fmt(h.sellV)}(${h.bAbsPct}%) MB:${fmt(h.buyV)}(${h.aAbsPct}%)`, 12, 33);
         ctx.fillStyle = '#ff80ab';
-        ctx.fillText(`Bid Pulled: ${fmt(h.bPull)} (${h.bPullPct}% Spoof) | Ask Pulled: ${fmt(h.aPull)} (${h.aPullPct}% Spoof)`, 14, 52);
+        ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%)`, 12, 48);
     }
 
     // Y-Axis Price Scale
     const yAxisX = chartW;
     ctx.fillStyle = '#11151f';
-    ctx.fillRect(yAxisX, 0, YAXIS_W, H);
+    ctx.fillRect(yAxisX, 0, yAxisW, H);
     ctx.strokeStyle = '#232838';
     ctx.beginPath();
     ctx.moveTo(yAxisX, 0); ctx.lineTo(yAxisX, H);
     ctx.stroke();
 
     ctx.fillStyle = '#8b93a7';
-    ctx.font = '11px monospace';
+    ctx.font = isMobile ? '10px monospace' : '11px monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     for (let i = 0; i <= gCount; i++) {
         const gy = (chartH / gCount) * i;
-        ctx.fillText(yToP(gy).toFixed(dec), yAxisX + 5, gy);
+        ctx.fillText(yToP(gy).toFixed(dec), yAxisX + 4, gy);
     }
 
     const lastC = candles[candles.length - 1];
@@ -2213,10 +2467,10 @@ function drawAll() {
         ctx.setLineDash([]);
 
         ctx.fillStyle = pCol;
-        ctx.fillRect(yAxisX, curPy - 10, YAXIS_W, 20);
+        ctx.fillRect(yAxisX, curPy - 10, yAxisW, 20);
         ctx.fillStyle = '#fff';
-        ctx.font = 'bold 11px monospace';
-        ctx.fillText(lastC.close.toFixed(dec), yAxisX + 5, curPy);
+        ctx.font = 'bold 10px monospace';
+        ctx.fillText(lastC.close.toFixed(dec), yAxisX + 4, curPy);
     }
 
     if (curX > 0 && curX < chartW && curY > 0 && curY < chartH) {
@@ -2229,34 +2483,36 @@ function drawAll() {
         ctx.setLineDash([]);
 
         ctx.fillStyle = '#2962ff';
-        ctx.fillRect(yAxisX, curY - 10, YAXIS_W, 20);
+        ctx.fillRect(yAxisX, curY - 10, yAxisW, 20);
         ctx.fillStyle = '#fff';
-        ctx.fillText(yToP(curY).toFixed(dec), yAxisX + 5, curY);
+        ctx.fillText(yToP(curY).toFixed(dec), yAxisX + 4, curY);
     }
 
     // =========================================================================
-    // 8. FULL-DEPTH UNIFIED DOM LADDER (FILLED TOP-TO-BOTTOM WITH HEATMAP BARS)
+    // 8. SCROLLABLE & ADAPTIVE UNIFIED DOM LADDER
     // =========================================================================
-    const domX = chartW + YAXIS_W;
+    if (!showDOM || domW <= 0) return;
+
+    const domX = chartW + yAxisW;
     ctx.fillStyle = '#0d1017';
-    ctx.fillRect(domX, 0, DOM_W, H);
+    ctx.fillRect(domX, 0, domW, H);
     ctx.strokeStyle = '#232838';
     ctx.beginPath();
     ctx.moveTo(domX, 0); ctx.lineTo(domX, H);
     ctx.stroke();
 
     ctx.fillStyle = '#161b26';
-    ctx.fillRect(domX, 0, DOM_W, 26);
-    ctx.font = 'bold 10px monospace';
+    ctx.fillRect(domX, 0, domW, 26);
+    ctx.font = 'bold 9px monospace';
     ctx.fillStyle = '#00e676';
     ctx.textAlign = 'left';
-    ctx.fillText('RESTING BID [E]', domX + 6, 14);
+    ctx.fillText(isMobile ? 'BID' : 'BID [EXEC]', domX + 4, 14);
     ctx.fillStyle = '#ffeb3b';
     ctx.textAlign = 'center';
-    ctx.fillText('PRICE', domX + DOM_W * 0.5, 14);
+    ctx.fillText(domScrollRows !== 0 ? 'PRICE(SCR)' : 'PRICE', domX + domW * 0.5, 14);
     ctx.fillStyle = '#ff5252';
     ctx.textAlign = 'right';
-    ctx.fillText('RESTING ASK [E]', domX + DOM_W - 6, 14);
+    ctx.fillText(isMobile ? 'ASK' : 'ASK [EXEC]', domX + domW - 4, 14);
 
     const ladderRows = Math.floor((H - 32) / 18);
     const halfRows = Math.floor(ladderRows / 2);
@@ -2273,7 +2529,9 @@ function drawAll() {
         }
     }
 
-    const centerP = Math.floor(lastC.close / domStep + 1e-9) * domStep;
+    const liveCenterP = Math.floor(lastC.close / domStep + 1e-9) * domStep;
+    // Apply user scroll offset to view higher Asks or lower Bids!
+    const centerP = liveCenterP + Math.round(domScrollRows) * domStep;
 
     const bidMap = new Map();
     const askMap = new Map();
@@ -2307,9 +2565,10 @@ function drawAll() {
     allBookVals.sort((a, b) => b - a);
     const heavyWallCut = allBookVals[Math.min(3, Math.max(0, allBookVals.length - 1))] || maxDomRest * 0.7;
 
-    const colW = (DOM_W - 72) * 0.5;
+    const pxColW = isMobile ? 54 : 70;
+    const colW = (domW - pxColW) * 0.5;
     const pxColLeft = domX + colW;
-    const pxColRight = pxColLeft + 72;
+    const pxColRight = pxColLeft + pxColW;
 
     let ry = 28;
     const rH = 18;
@@ -2321,47 +2580,47 @@ function drawAll() {
         const aRest = askMap.get(k) || 0;
         const fpLvl = fpMap.get(k) || { buy: 0, sell: 0, bid_pulled: 0, ask_pulled: 0 };
 
-        const isCurrentRow = Math.abs(p - centerP) < domStep * 0.4;
+        const isCurrentRow = Math.abs(p - liveCenterP) < domStep * 0.4;
 
         if (isCurrentRow) {
-            ctx.fillStyle = 'rgba(255, 235, 59, 0.18)';
-            ctx.fillRect(domX, ry, DOM_W, rH);
+            ctx.fillStyle = 'rgba(255, 235, 59, 0.20)';
+            ctx.fillRect(domX, ry, domW, rH);
         } else {
             ctx.fillStyle = idx % 2 === 0 ? '#0d1017' : '#10141d';
-            ctx.fillRect(domX, ry, DOM_W, rH);
+            ctx.fillRect(domX, ry, domW, rH);
         }
 
         ctx.fillStyle = isCurrentRow ? '#ffeb3b' : (p > lastC.close ? '#ff8a80' : '#69f0ae');
-        ctx.font = isCurrentRow ? 'bold 10px monospace' : '10px monospace';
+        ctx.font = isCurrentRow ? 'bold 9px monospace' : '9px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(p.toFixed(dec), domX + DOM_W * 0.5, ry + 9);
+        ctx.fillText(p.toFixed(dec), domX + domW * 0.5, ry + 9);
 
-        if (bRest > 0 || fpLvl.sell > 0 || fpLvl.bid_pulled > 0) {
+        if (bRest > 0 || fpLvl.sell > 0) {
             const bPct = Math.min(1, bRest / maxDomRest);
             const isWall = bRest >= heavyWallCut && bRest > 0;
             ctx.fillStyle = isWall ? 'rgba(0, 229, 255, 0.45)' : 'rgba(0, 230, 118, 0.22)';
             ctx.fillRect(pxColLeft - colW * bPct, ry + 1, colW * bPct, rH - 2);
 
-            ctx.font = isWall ? 'bold 10px monospace' : '10px monospace';
+            ctx.font = isWall ? 'bold 9px monospace' : '9px monospace';
             ctx.fillStyle = isWall ? '#00e5ff' : '#00e676';
             ctx.textAlign = 'right';
-            const execTxt = fpLvl.sell > 0 ? ` [E:${fmt(fpLvl.sell)}]` : '';
+            const execTxt = (!isMobile && fpLvl.sell > 0) ? `[${fmt(fpLvl.sell)}]` : '';
             const wallTxt = isWall ? '★' : '';
-            ctx.fillText(`${wallTxt}${fmt(bRest)}${execTxt}`, pxColLeft - 4, ry + 9);
+            ctx.fillText(`${wallTxt}${fmt(bRest)}${execTxt}`, pxColLeft - 3, ry + 9);
         }
 
-        if (aRest > 0 || fpLvl.buy > 0 || fpLvl.ask_pulled > 0) {
+        if (aRest > 0 || fpLvl.buy > 0) {
             const aPct = Math.min(1, aRest / maxDomRest);
             const isWall = aRest >= heavyWallCut && aRest > 0;
             ctx.fillStyle = isWall ? 'rgba(255, 145, 0, 0.48)' : 'rgba(255, 23, 68, 0.22)';
             ctx.fillRect(pxColRight, ry + 1, colW * aPct, rH - 2);
 
-            ctx.font = isWall ? 'bold 10px monospace' : '10px monospace';
+            ctx.font = isWall ? 'bold 9px monospace' : '9px monospace';
             ctx.fillStyle = isWall ? '#ffab00' : '#ff5252';
             ctx.textAlign = 'left';
-            const execTxt = fpLvl.buy > 0 ? ` [E:${fmt(fpLvl.buy)}]` : '';
+            const execTxt = (!isMobile && fpLvl.buy > 0) ? `[${fmt(fpLvl.buy)}]` : '';
             const wallTxt = isWall ? '★' : '';
-            ctx.fillText(`${wallTxt}${fmt(aRest)}${execTxt}`, pxColRight + 4, ry + 9);
+            ctx.fillText(`${wallTxt}${fmt(aRest)}${execTxt}`, pxColRight + 3, ry + 9);
         }
 
         ry += rH;
