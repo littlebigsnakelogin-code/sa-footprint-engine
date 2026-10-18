@@ -311,9 +311,8 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
     level["trades"] += 1
     level["delta"] = level["buy"] - level["sell"]
 
-
 def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty, status_str):
-    """Stamps Bid-Pull and Ask-Pull separately near active candle price range."""
+    """Stamps Bid-Pull and Ask-Pull consistently across all timeframes within 30 steps of live price."""
     step = PRICE_STEP.get(symbol, 1.0)
     try:
         p_float = float(price_str)
@@ -321,15 +320,17 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
         return
     bucket_price = round_price_to_step(p_float, step)
     key = str(bucket_price)
-    max_distance = step * 25
+    max_distance = step * 30
 
     with lock:
+        live_px = last_trade.get(symbol, {}).get("price") or bucket_price
+        # Filter relative to live price so 1m, 5m, 15m, 1h all record the exact same active zone!
+        if abs(bucket_price - float(live_px)) > max_distance:
+            return
+
         for tf in TIMEFRAMES.keys():
             curr = current_candles[symbol][tf]
             if curr is not None and "footprint" in curr:
-                if bucket_price < (curr["low"] - max_distance) or bucket_price > (curr["high"] + max_distance):
-                    continue
-
                 level = curr["footprint"].get(key)
                 if level is None:
                     level = {
@@ -356,6 +357,7 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
 
                 if status_str in ("LIQUIDITY_PULLED", "HEAVY ABSORPTION", "PARTIAL_EXECUTION_PULL"):
                     level["status"] = status_str
+
 
 # ============================================================
 # BINANCE FUTURES SNAPSHOT (WS API)
@@ -1414,7 +1416,7 @@ def home():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SA Institutional Footprint & Macro Decision Engine V4.1</title>
+<title>SA Institutional Footprint & Macro Decision Engine V4.2</title>
 <style>
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
     html, body {
@@ -1565,7 +1567,7 @@ def home():
 <body>
 
 <div class="topbar">
-    <span class="brand">⚡ SA V4.1</span>
+    <span class="brand">⚡ SA V4.2</span>
     <select id="symSel" onchange="setSym(this.value)">
         <option value="BTCUSDT" selected>BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
@@ -1603,10 +1605,10 @@ def home():
     <button class="btn" onclick="toggleRules()" style="border-color:#ffeb3b;color:#ffeb3b;font-weight:bold;">📖 RULES</button>
 
     <div class="legend">
-        <span class="lg" style="background:#00e5ff;color:#000;">H-B.ABS</span>
-        <span class="lg" style="background:#ff9100;color:#000;">H-A.ABS</span>
-        <span class="lg" style="background:#d500f9;color:#fff;">H-BP</span>
-        <span class="lg" style="background:#aa00ff;color:#fff;">H-AP</span>
+        <span class="lg" style="background:#00e5ff;color:#000;">H-B.ABS(&ge;65%)</span>
+        <span class="lg" style="background:#ff9100;color:#000;">H-A.ABS(&ge;65%)</span>
+        <span class="lg" style="background:#d500f9;color:#fff;">H-BP(&ge;65%)</span>
+        <span class="lg" style="background:#aa00ff;color:#fff;">H-AP(&ge;65%)</span>
         <span class="lg" style="background:#ffd700;color:#000;">◆ WHALE</span>
     </div>
 
@@ -1641,61 +1643,37 @@ def home():
     <div id="domSlideTab" class="dom-slide-tab" onclick="toggleDOM()" title="Slide Orderbook Open/Close">❮ DOM</div>
 </div>
 
-<!-- BUILT-IN COMPLETE MASTER RULEBOOK POPUP (UPDATED WITH V4.1 DECISION MATRIX) -->
+<!-- BUILT-IN COMPLETE MASTER RULEBOOK POPUP -->
 <div id="ruleModal">
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #00e5ff; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
-        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT V4.1 — MASTER EXECUTION RULEBOOK</b>
+        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT V4.2 — MASTER EXECUTION RULEBOOK</b>
         <button class="btn" onclick="toggleRules()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
     </div>
 
     <div class="rule-sec">
-        <h4>1. TOP MACRO DECISION ENGINE (9-Factor Multi-Candle Institutional Matrix)</h4>
-        Top Macro Bar pichli 20 candles ke <b>9 Institutional Parameters</b> ko jod kar final market bias deta hai:<br>
-        1) <b>POC Migration</b> &nbsp;2) <b>Macro CVD vs Price Divergence</b> &nbsp;3) <b>Bid/Ask Absorption Floors & Ceilings</b> &nbsp;4) <b>Net Liquidity Pulled (Spoofs)</b> &nbsp;5) <b>Live DOM Depth</b> &nbsp;6) <b style="color:#ffd700;">◆ Whale Lot Buy vs Sell Dominance</b> &nbsp;7) <b style="color:#00e5ff;">⚡ BAAP-FVG & Stacked Imbalance Count</b> &nbsp;8) <b style="color:#00e5ff;">🔗 BTC/ETH SMT Divergence</b> &nbsp;9) <b style="color:#ffeb3b;">◀ nPOC / UNF Magnet Gravity</b>.<br><br>
-        • <b style="color:#00e676;">🟢 MACRO BULLISH DOMINANCE:</b> Price + POC + Whale Lots + Stacked Imbalances sab upar ki taraf aligned hain (Look for Longs).<br>
-        • <b style="color:#00e5ff;">🐳 MACRO BULL ACCUMULATION:</b> Pichli 20 candles mein net selling (-CVD) aayi hai, par Whales ne Limit Buy + ◆ Whale Lots se saara maal absorb kar liya aur price girne nahi diya (Strongest Reversal Long Setup).<br>
-        • <b style="color:#ff5252;">🔴 MACRO BEARISH DOMINANCE:</b> Price + POC + Whale Lots + Stacked Sell Imbalances neeche ki taraf hain (Look for Shorts).<br>
-        • <b style="color:#ff9100;">🐳 MACRO BEAR DISTRIBUTION:</b> Retail lagatar Market Buy (+CVD) maar raha hai, par Whales Limit Sell se top par maal chipka rahe hain (Reversal Short Setup).<br>
-        • <b style="color:#ffca28;">🟡 MACRO SIDEWAYS ROTATIONAL CHOP:</b> Trend efficiency &lt; 16% hai. Mid-range mein trade mat le, sirf Range High/Low sweep hone par fade kar.
+        <h4>1. 65%+ HEAVY & 35%+ NORMAL CLUSTER ORDERFLOW CRITERIA</h4>
+        • <b>Dynamic Timeframe Scaling:</b> Jab tu <code>1m</code> se <code>15m</code> ya <code>1h</code> par shift karta hai, toh <code>HeavyL</code> us timeframe ke average orderflow ke hisab se automatic adjust hota hai[cite: 6].<br>
+        • <b style="color:#00e5ff;">H-B.ABS (&ge;65%) [Heavy Bid Absorption]:</b> Sirf tab chhapega jab: (1) Sell Volume <code>&ge; HeavyL * 0.60</code> ho, (2) Sell dominance us level par <b>&ge; 65%</b> ho, AUR (3) <b>Candle us level ke UPAR hold/close kare</b>.<br>
+        • <b style="color:#ff9100;">H-A.ABS (&ge;65%) [Heavy Ask Absorption]:</b> Sirf tab chhapega jab: (1) Buy Volume <code>&ge; HeavyL * 0.60</code> ho, (2) Buy dominance us level par <b>&ge; 65%</b> ho, AUR (3) <b>Candle us level ke NEECHE hold/close kare</b>.<br>
+        • <b style="color:#ff4081;">H-BP (&ge;65%)</b> & <b style="color:#e040fb;">H-AP (&ge;65%) [Heavy Bid/Ask Pulled]:</b> Sirf tab chhapega jab pulled ratio <b>&ge; 65%</b> ho. 35% se 64% wale pulls <code>bp/ap</code> (Cluster Normal) ke roop mein dikhenge, aur 35% se neeche ka kachra filter out ho jata hai.<br>
+        • <b>Cluster Liquidity:</b> Orders multiple levels par spread hote hain (jaise 80000, 80050, 80100), isliye normal aur heavy dono levels milkar candle pill mein cumulative calculation dete hain.
     </div>
 
     <div class="rule-sec">
-        <h4>2. INSIDE CANDLE FOOTPRINT & 8 SIDE-SPECIFIC TAGS (Left = Bid/Sell | Right = Ask/Buy)</h4>
-        • <b>Center Spine Split:</b> Spine ke Left mein <b>Market Sell (hitting Bids)</b> aur Right mein <b>Market Buy (hitting Asks)</b> hota hai.<br>
-        • <b style="color:#ffeb3b;">POC (Yellow Box):</b> Candle ka sabse heavy volume price. Candle POC ke <b>upar</b> band ho = Buyers won; POC ke <b>neeche</b> band ho = Sellers won.<br>
-        • <b style="color:#29b6f6;">VAH & VAL (Blue Lines):</b> Value Area High & Low (70% volume zone).<br>
-        • <b style="color:#00e5ff;">H-B.ABS (xx%) [Bright Cyan - Left]:</b> <b>Heavy Bid Absorption.</b> Aggressive Sellers ne sell mara, par Passive Limit Buyers ne <code>xx%</code> maal absorb kar liya = <b>STRONG INSTITUTIONAL FLOOR (BUY)</b>.<br>
-        • <b style="color:#ff9100;">H-A.ABS (xx%) [Orange/Gold - Right]:</b> <b>Heavy Ask Absorption.</b> Aggressive Buyers ne buy mara, par Passive Limit Sellers ne <code>xx%</code> maal absorb karke rok liya = <b>STRONG INSTITUTIONAL CEILING (SELL)</b>.<br>
-        • <b style="color:#ff4081;">H-BP:qty (xx%) [Neon Pink - Left]:</b> <b>Heavy Bid Pulled (Spoof).</b> Support par rakhe Buy orders price aate hi cancel kar liye gaye = <b>FAKE SUPPORT (Floor khali hai, price neeche tootega!)</b>.<br>
-        • <b style="color:#e040fb;">H-AP:qty (xx%) [Violet - Right]:</b> <b>Heavy Ask Pulled (Spoof).</b> Resistance par rakhe Sell orders cancel kar liye gaye = <b>FAKE RESISTANCE (Rasta saaf hai, price upar phatega!)</b>.
+        <h4>2. TOP MACRO DECISION ENGINE (9-Factor Multi-Candle Institutional Matrix)</h4>
+        Top Macro Bar pichli 20 candles ke <b>9 Institutional Parameters</b> ko jod kar final market bias deta hai: POC Migration, CVD Divergence, True 65%+ Absorption, 65%+ Net Pulled Spoofs, DOM Depth, Whale Lots, Baap-FVG Count, SMT Divergence, aur nPOC/UNF Magnet Gravity.
     </div>
 
     <div class="rule-sec" style="border-color:#ffd700;">
         <h4 style="color:#ffd700;">3. V4 STEALTH WEAPONS (Whale Lots, Stacked Imb Bracket, nPOC/UNF Magnets & SMT)</h4>
-        • <b style="color:#ffd700;">◆ Gold Diamond (Whale Lot Size Detector):</b> Jab kisi price cell mein bada volume <b>bahut kam trades (Big Average Trade Size &gt;= 2.0x BaseLot)</b> mein execute hota hai, toh number ke paas <b style="color:#ffd700;">◆</b> chhapta hai. Yeh prove karta hai ki wahan Retail bheed nahi, balki <b>Institutional Whale / Liquidation Engine</b> ne order mara hai!<br>
-        • <b style="color:#00e5ff;">Stacked Imbalance Neon Bracket (Left Outer Edge):</b> Jab किसी candle mein lagatar <b>2 ya 3+ price levels par ek-tarfa 240% Imbalance</b> aata hai, toh candle ke left kinare ke bahar ek patli <b>Cyan (Buy Stack)</b> ya <b>Pink (Sell Stack)</b> bracket line banti hai (bina candle ko chhupaye!). Aur agar wahan FVG hai, toh Floating Pill mein <b style="color:#00e676;">⚡ BAAP-FVG</b> ya <b style="color:#ff9100;">⚠️ BETA-FVG</b> print hota hai!<br>
-        • <b style="color:#ffeb3b;">◀ nPOC</b> & <b style="color:#e040fb;">◀ UNF (Y-Axis Price Scale Laser Magnets):</b><br>
-          &nbsp;&nbsp;- <b style="color:#ffeb3b;">◀ nPOC (Naked POC):</b> Pichli candles ka untouched POC. Jaise hi future mein price isko touch karega, yeh pin automatic hat jayega. Jab tak yeh dikh raha hai, yeh <b>Pending Price Magnet</b> hai!<br>
-          &nbsp;&nbsp;- <b style="color:#e040fb;">◀ UNF (Unfinished Auction):</b> Pichli candle ka High/Low jahan Buy aur Sell dono <code>&gt; 0</code> chhoot gaye. Market 85% cases mein aisi Unfinished High/Low ko sweep karne wapas aata hai, aur sweep hote hi yeh pin hat jata hai!<br>
-        • <b>Interactive Scales:</b> <b>Right Price Scale</b> ko upar-neeche drag karne se Y-axis zoom hota hai, aur <b>Bottom Time Scale</b> ko left-right drag karne se X-axis (Candle Width) phailta aur sikudta hai!
+        • <b style="color:#ffd700;">◆ Gold Diamond (Whale Lot Size Detector):</b> Bade volume ke sath kam trades (Big Average Trade Size &gt;= 2.0x BaseLot) hone par <code>◆</code> chhapta hai.<br>
+        • <b style="color:#00e5ff;">Stacked Imbalance Neon Bracket:</b> Lagatar 2-3+ levels par 240%+ Imbalance aane par candle ke left kinare par bracket banta hai, aur FVG hone par Pill mein ⚡BAAP-FVG chhapta hai.<br>
+        • <b style="color:#ffeb3b;">◀ nPOC</b> & <b style="color:#e040fb;">◀ UNF (Y-Axis Price Scale Laser Magnets):</b> Untouched POC aur Unfinished High/Low magnets jo touch hote hi automatic mit-jate hain.
     </div>
 
     <div class="rule-sec">
-        <h4>4. THE 4-LINE FLOATING PILL (V4.1 Upgraded Candle Decision Matrix)</h4>
-        • <b>Line 1 (Δ | V | RVOL x):</b> Agar RVOL <code>&lt; 0.70x</code> hai toh <code>LOW FLOW</code> aayega—aisi halka volume candle ke signal par kabhi trade mat lena!<br>
-        • <b>Line 2 (CVD | B vs S):</b> Running Cumulative Delta aur us candle ka exact Market Buy (<code>B</code>) vs Market Sell (<code>S</code>) volume.<br>
-        • <b>Line 3 (Mechanism + FVG + Magnet Sweep):</b> <code>🐳LIM-BUY ACCUM</code>, <code>🔥MKT IGNITION</code>, <code>⚡BAAP-FVG</code>, ya <code>🎯MAG-SWEPT</code> (jab candle ne purana nPOC/UNF sweep kiya ho)!<br>
-        • <b>Line 4 (V4.1 Final Candle Verdict):</b><br>
-          &nbsp;&nbsp;- <b style="color:#ffd700;">◆🐳 WHALE BULL ABSORB (xx%):</b> Whale lot + Passive Bid Absorption + Green Close (Sellers 100% Trapped = Best Long Trigger!).<br>
-          &nbsp;&nbsp;- <b style="color:#00e676;">◆🟢 WHALE BUY WIN (xx%):</b> Whale lots + Stacked Buy Imbalance + Close above POC.<br>
-          &nbsp;&nbsp;- <b style="color:#ff9100;">🐑 RETAIL FOMO TRAP:</b> Volume aaya par saare chote-chote retail trades the (AvgLot &lt; 0.75x) aur price reject ho gaya = Fakeout!
-    </div>
-
-    <div class="rule-sec" style="border-color:#00e676;">
-        <h4 style="color:#00e676;">🎯 MASTER SNIPER CHECKLIST (FVG / OB / SWEEP ENTRY)</h4>
-        <b>1. Macro & Location Check:</b> Top Bar mein Macro Bias tere trade ki direction mein ho (ya <code>🐳 ACCUM/DIST</code> reversal de raha ho) aur FVG ke paas <b style="color:#ffeb3b;">◀ nPOC</b> / <b style="color:#e040fb;">◀ UNF</b> ya <b style="color:#00e676;">⚡ BAAP-FVG</b> ho.<br>
-        <b>2. Reaction Check:</b> Jab price FVG mein tap kare, toh wahan <b style="color:#00e5ff;">H-B.ABS</b> (Long) ya <b style="color:#ff9100;">H-A.ABS</b> (Short) + <b style="color:#ffd700;">◆ Whale Lot</b> dikhna chahiye.<br>
-        <b>3. Trigger Check:</b> Candle pill ki Line 4 mein <b style="color:#00e676;">◆🐳 WHALE BULL ABSORB / BUYERS WIN</b> (Long) ya <b style="color:#ff5252;">◆🐳 WHALE BEAR ABSORB / SELLERS WIN</b> (Short) chhapna chahiye!
+        <h4>4. THE 4-LINE FLOATING PILL (V4.2 Upgraded Candle Decision Matrix)</h4>
+        • <b>Line 1 (Δ | V | RVOL x)</b> | <b>Line 2 (CVD | B vs S)</b> | <b>Line 3 (Mechanism + FVG + RVOL)</b> | <b>Line 4 (V4.2 Final Candle Verdict):</b> <b style="color:#00e676;">◆🐳 WHALE BULL ABS</b>, <b style="color:#ff5252;">◆🐳 WHALE BEAR ABS</b>, ya <b style="color:#ffab00;">🐑 RETAIL FOMO TRAP</b>.
     </div>
 </div>
 
@@ -1718,7 +1696,7 @@ let tickMultMode = document.getElementById('tickMultSel').value || 'auto';
 let proViewMode = true;
 let candles = [];
 let peerCandles = [];
-let smtState = { bias: 0, text: 'SYNCED' }; // +1 = Bullish SMT, -1 = Bearish SMT, 0 = Synced
+let smtState = { bias: 0, text: 'SYNCED' };
 let obData = { bids: [], asks: [] };
 let rawStep = STEP_MAP[symbol] || 1.0;
 
@@ -1849,7 +1827,7 @@ function applyDrag(dx, dy) {
             maxP += shift;
         }
     } else if (dragMode === 'xaxis') {
-        candleW = Math.max(35, Math.min(480, candleW * (1 + dx * 0.006)));
+        candleW = Math.max(35, Math.min(480, candleW * (1 - dx * 0.006)));
     } else if (dragMode === 'yaxis') {
         if (minP !== null && maxP !== null) {
             const mid = (maxP + minP) * 0.5;
@@ -2117,11 +2095,7 @@ function groupFootprint(fpRaw, low, high, effStep, closePx) {
     return Array.from(map.values()).sort((a, b) => a.price - b.price);
 }
 
-// =========================================================================
-// V4.1 UPGRADED 9-FACTOR MACRO INSTITUTIONAL DECISION ENGINE (TOP BAR)
-// Integrates POC + CVD + Absorptions + Pulls + DOM + Whale Lots + Baap FVGs + SMT + nPOC/UNF Magnets!
-// =========================================================================
-function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls) {
+function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls, heavyLvlBenchmark) {
     if (!candles || candles.length < 3) return;
 
     const sample = candles.slice(-20);
@@ -2129,11 +2103,9 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
     const first = sample[0];
     const curRvol = (last.volume || 0) / avgFlowVol;
 
-    const lastFp = groupFootprint(last.footprint, last.low, last.high, effStep, last.close);
-    const avgLvlVol = lastFp.length > 0 ? (avgFlowVol / Math.max(6, lastFp.length)) : avgFlowVol * 0.15;
     document.getElementById('bmAvg').innerText = `Avg:${fmt(avgFlowVol)}`;
     document.getElementById('bmHeavy').innerText = `HeavyC:>${fmt(avgFlowVol * 1.35)}`;
-    document.getElementById('bmLvl').innerText = `HeavyL:>${fmt(avgLvlVol * 1.85)}`;
+    document.getElementById('bmLvl').innerText = `HeavyL:>${fmt(heavyLvlBenchmark)}`;
     document.getElementById('bmCur').innerText = `Cur:${fmt(last.volume)}(${curRvol.toFixed(1)}x)`;
     document.getElementById('bmCur').style.color = curRvol >= 1.3 ? '#00e676' : '#d1d4dc';
 
@@ -2160,44 +2132,39 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         }
 
         const cRvol = (c.volume || 0) / avgFlowVol;
-        const closePos = (c.close - c.low) / cr;
-        const mbPct = (c.volume > 0) ? ((c.buy_volume || 0) / c.volume) * 100 : 50;
-        const msPct = 100 - mbPct;
-
-        if (cRvol >= 1.1) {
-            if (msPct >= 56 && closePos >= 0.52) macroBidAbsorbs += cRvol;
-            if (mbPct >= 56 && closePos <= 0.48) macroAskAbsorbs += cRvol;
-        }
-
-        // Scan V4 Whale Lots & Stacked Imbalances across the 20-candle macro window
-        const fpArr = Array.isArray(c.footprint) ? c.footprint : Object.values(c.footprint || {});
-        const cAvgCellV = fpArr.length > 0 ? (c.volume || 1) / fpArr.length : 1;
+        const fpGrouped = groupFootprint(c.footprint, c.low, c.high, effStep, c.close);
         let bStack = 0, sStack = 0, maxBS = 0, maxSS = 0, cWhales = 0;
 
-        fpArr.forEach(l => {
-            macroBidPulled += (l.bid_pulled || 0);
-            macroAskPulled += (l.ask_pulled || 0);
+        fpGrouped.forEach(l => {
+            const sv = l.sell || 0, bv = l.buy || 0, tv = l.volume || 0;
+            const bp = l.bid_pulled || 0, ap = l.ask_pulled || 0;
+            const bPullPct = bp > 0 ? (bp / (bp + sv)) * 100 : 0;
+            const aPullPct = ap > 0 ? (ap / (ap + bv)) * 100 : 0;
+            const bAbsPct = tv > 0 ? (sv / tv) * 100 : 0;
+            const aAbsPct = tv > 0 ? (bv / tv) * 100 : 0;
 
-            const lv = l.volume || 0;
+            if (bp >= heavyLvlBenchmark * 0.60 && bPullPct >= 65) macroBidPulled += bp;
+            if (ap >= heavyLvlBenchmark * 0.60 && aPullPct >= 65) macroAskPulled += ap;
+            if (sv >= heavyLvlBenchmark * 0.60 && bAbsPct >= 65 && c.close >= l.price) macroBidAbsorbs++;
+            if (bv >= heavyLvlBenchmark * 0.60 && aAbsPct >= 65 && c.close <= l.price) macroAskAbsorbs++;
+
             const lt = Math.max(l.trades || 1, 1);
-            if (lv >= cAvgCellV * 0.85 && (lv / lt) >= baselineLotSize * 2.0) {
+            if (tv >= heavyLvlBenchmark * 0.55 && (tv / lt) >= baselineLotSize * 2.0) {
                 cWhales++;
-                if ((l.buy || 0) > (l.sell || 0)) whaleBuyLots++;
-                else if ((l.sell || 0) > (l.buy || 0)) {
-                    // If heavy whale sell lot happened in lower half of a green/defended candle, it's Passive Whale Bid Absorption!
+                if (bv > sv) whaleBuyLots++;
+                else if (sv > bv) {
                     if (c.close >= c.open && l.price <= (c.high + c.low) * 0.5) whaleBuyLots++;
                     else whaleSellLots++;
                 }
             }
 
-            if ((l.buy || 0) > (l.sell || 0) * 2.4 && (l.buy || 0) >= cAvgCellV * 0.45) {
+            if (bv > sv * 2.4 && bv >= heavyLvlBenchmark * 0.30) {
                 bStack++; sStack = 0; if (bStack > maxBS) maxBS = bStack;
-            } else if ((l.sell || 0) > (l.buy || 0) * 2.4 && (l.sell || 0) >= cAvgCellV * 0.45) {
+            } else if (sv > bv * 2.4 && sv >= heavyLvlBenchmark * 0.30) {
                 sStack++; bStack = 0; if (sStack > maxSS) maxSS = sStack;
             } else { bStack = 0; sStack = 0; }
         });
 
-        // Count Institutional BAAP FVGs in macro window
         if (idx >= 1 && idx < sample.length - 1) {
             const pC = sample[idx - 1], nC = sample[idx + 1];
             if (nC.low > pC.high && (maxBS >= 2 || cWhales >= 1) && cRvol >= 1.05) bullBaapFvgs++;
@@ -2213,7 +2180,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
     let bullPts = 0, bearPts = 0;
     let macroNotes = [];
 
-    // 1. POC Migration
     if (netPriceMove > macroSpan * 0.22 && pocUpSteps > pocDownSteps + 1) {
         bullPts += 24;
         macroNotes.push(`POC Up(${pocUpSteps}↑)`);
@@ -2222,7 +2188,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         macroNotes.push(`POC Down(${pocDownSteps}↓)`);
     }
 
-    // 2. Macro CVD vs Price Structure
     const cvdRatio = totalVol > 0 ? (totalCvd / totalVol) * 100 : 0;
     if (totalCvd > 0 && netPriceMove > macroSpan * 0.15) {
         bullPts += 20;
@@ -2238,7 +2203,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         macroNotes.push(`Whale Ask Cap(CVD +${fmt(totalCvd)} Stalled)`);
     }
 
-    // 3. V4 Whale Lot Dominance (◆)
     if (whaleBuyLots > whaleSellLots + 2) {
         bullPts += 20;
         macroNotes.push(`◆Whale Lots(${whaleBuyLots}B/${whaleSellLots}S)`);
@@ -2247,7 +2211,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         macroNotes.push(`◆Whale Lots(${whaleSellLots}S/${whaleBuyLots}B)`);
     }
 
-    // 4. V4 Institutional BAAP-FVG Dominance (⚡)
     if (bullBaapFvgs > bearBaapFvgs) {
         bullPts += 16;
         macroNotes.push(`⚡${bullBaapFvgs} Bull Baap-FVG`);
@@ -2256,7 +2219,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         macroNotes.push(`⚡${bearBaapFvgs} Bear Baap-FVG`);
     }
 
-    // 5. V4 Cross-Market SMT Divergence Boost (🚨)
     if (smtState.bias >= 1) {
         bullPts += 18;
         macroNotes.push(`🚨${smtState.text}`);
@@ -2265,36 +2227,21 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         macroNotes.push(`🚨${smtState.text}`);
     }
 
-    // 6. Multi-Candle Floor vs Ceiling Defense & Spoofs
-    if (macroBidAbsorbs > macroAskAbsorbs + 1.2) {
+    if (macroBidAbsorbs > macroAskAbsorbs) {
         bullPts += 16;
-        macroNotes.push(`Bid Floors Held`);
-    } else if (macroAskAbsorbs > macroBidAbsorbs + 1.2) {
+        macroNotes.push(`65%+ Bid Floors(${macroBidAbsorbs})`);
+    } else if (macroAskAbsorbs > macroBidAbsorbs) {
         bearPts += 16;
-        macroNotes.push(`Ask Ceilings Held`);
+        macroNotes.push(`65%+ Ask Caps(${macroAskAbsorbs})`);
     }
-    if (macroAskPulled > macroBidPulled * 1.35 && macroAskPulled > 0) {
-        bullPts += 10;
-        macroNotes.push(`Asks Pulled`);
-    } else if (macroBidPulled > macroAskPulled * 1.35 && macroBidPulled > 0) {
-        bearPts += 10;
-        macroNotes.push(`Bids Pulled`);
-    }
-
-    // 7. Live DOM Imbalance
-    let bookBids = 0, bookAsks = 0;
-    const scanDist = effStep * 25;
-    (obData.bids || []).forEach(b => { if (last.close - b.price <= scanDist) bookBids += b.quantity; });
-    (obData.asks || []).forEach(a => { if (a.price - last.close <= scanDist) bookAsks += a.quantity; });
-    if (bookBids > bookAsks * 1.30) {
-        bullPts += 10;
-        macroNotes.push(`DOM Bid Wall`);
-    } else if (bookAsks > bookBids * 1.30) {
-        bearPts += 10;
-        macroNotes.push(`DOM Ask Wall`);
+    if (macroAskPulled > macroBidPulled * 1.3 && macroAskPulled > 0) {
+        bullPts += 12;
+        macroNotes.push(`65%+ Asks Pulled(${fmt(macroAskPulled)})`);
+    } else if (macroBidPulled > macroAskPulled * 1.3 && macroBidPulled > 0) {
+        bearPts += 12;
+        macroNotes.push(`65%+ Bids Pulled(${fmt(macroBidPulled)})`);
     }
 
-    // 8. Pending Magnet Gravity (◀ nPOC & ◀ UNF Pull Direction)
     const magnetsAbove = nakedPocs.filter(p => p > last.close).length + unfinishedLvls.filter(u => u.price > last.close).length;
     const magnetsBelow = nakedPocs.filter(p => p < last.close).length + unfinishedLvls.filter(u => u.price < last.close).length;
     if (magnetsAbove > magnetsBelow + 1) macroNotes.push(`🎯MagPull:UP(${magnetsAbove})`);
@@ -2452,8 +2399,16 @@ function drawAll() {
 
     const effStep = rawStep * mult;
 
-    // Run V4.1 9-Factor Macro Decision Engine!
-    updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls);
+    let totalVisBuckets = 0, totalVisVol = 0;
+    vis.forEach(({ c }) => {
+        const gFp = groupFootprint(c.footprint, c.low, c.high, effStep, c.close);
+        totalVisBuckets += Math.max(gFp.length, 1);
+        totalVisVol += (c.volume || 0);
+    });
+    const tfAvgCellVol = Math.max(totalVisVol / Math.max(totalVisBuckets, 1), 0.001);
+    const heavyLvlBenchmark = tfAvgCellVol * 1.80;
+
+    updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls, heavyLvlBenchmark);
 
     const pToY = p => chartH - ((p - minP) / pSpan) * chartH;
     const yToP = y => minP + ((chartH - y) / chartH) * pSpan;
@@ -2503,7 +2458,6 @@ function drawAll() {
         const fp = groupFootprint(c.footprint, c.low, c.high, effStep, c.close);
 
         let maxV = 1, sumV = 0;
-        let maxPull = 0.001, sumPull = 0, pullCnt = 0;
         let pocBucketPrice = c.poc;
         let maxBucketV = -1;
 
@@ -2511,20 +2465,11 @@ function drawAll() {
             if (l.volume > maxV) maxV = l.volume;
             if (l.volume > maxBucketV) { maxBucketV = l.volume; pocBucketPrice = l.price; }
             sumV += l.volume;
-            if (l.pulled_qty > 0) {
-                if (l.pulled_qty > maxPull) maxPull = l.pulled_qty;
-                sumPull += l.pulled_qty;
-                pullCnt++;
-            }
         });
 
         const avgV = fp.length > 0 ? sumV / fp.length : 1;
-        const avgPull = pullCnt > 0 ? sumPull / pullCnt : 0.1;
-
-        const normAbsCut = Math.max(avgV * 1.15, maxV * 0.30);
-        const heavyAbsCut = Math.max(avgV * 1.85, maxV * 0.55);
-        const normPullCut = Math.max(avgPull * 0.45, 0.001);
-        const heavyPullCut = Math.max(avgPull * 1.5, maxPull * 0.50);
+        const effectiveHeavyCut = Math.max(heavyLvlBenchmark * 0.60, avgV * 1.45);
+        const effectiveNormCut = Math.max(heavyLvlBenchmark * 0.25, avgV * 0.65);
 
         if (c.vah != null && c.val != null) {
             const yVah = pToY(c.vah + effStep * 0.5);
@@ -2604,7 +2549,7 @@ function drawAll() {
             if (isWhaleLot) {
                 if (buyV > sellV) whaleBuyCount++;
                 else if (sellV > buyV) {
-                    if (c.close >= c.open && l.price <= (c.high + c.low) * 0.5) whaleBuyCount++; // Passive Whale Bid Absorption
+                    if (c.close >= c.open && l.price <= (c.high + c.low) * 0.5) whaleBuyCount++;
                     else whaleSellCount++;
                 }
             }
@@ -2619,29 +2564,45 @@ function drawAll() {
             const bAbsPct = totV > 0 ? Math.round((sellV / totV) * 100) : 0;
             const aAbsPct = totV > 0 ? Math.round((buyV / totV) * 100) : 0;
 
+            // =========================================================================
+            // STRICT V4.2 CLUSTER & HEAVY THRESHOLDS (65%+ HEAVY, 35%+ NORMAL CLUSTER)
+            // =========================================================================
             let bidAbsType = null;
-            if (sellV >= heavyAbsCut && (sellV >= buyV * 1.15 || l.price <= c.close)) {
+            if (sellV >= effectiveHeavyCut && bAbsPct >= 65 && c.close >= l.price) {
                 bidAbsType = 'heavy';
                 if (!botSummary || sellV > botSummary.val) botSummary = { type: 'ABS', val: sellV, pct: bAbsPct };
-            } else if (sellV >= normAbsCut && sellV >= buyV * 1.1) {
+            } else if (sellV >= effectiveNormCut && bAbsPct >= 45 && c.close >= l.price) {
                 bidAbsType = 'norm';
+                if (!botSummary && sellV >= effectiveHeavyCut * 0.6) botSummary = { type: 'ABS', val: sellV, pct: bAbsPct };
             }
 
             let askAbsType = null;
-            if (buyV >= heavyAbsCut && (buyV >= sellV * 1.15 || l.price >= c.close)) {
+            if (buyV >= effectiveHeavyCut && aAbsPct >= 65 && c.close <= l.price) {
                 askAbsType = 'heavy';
                 if (!topSummary || buyV > topSummary.val) topSummary = { type: 'ABS', val: buyV, pct: aAbsPct };
-            } else if (buyV >= normAbsCut && buyV >= sellV * 1.1) {
+            } else if (buyV >= effectiveNormCut && aAbsPct >= 45 && c.close <= l.price) {
                 askAbsType = 'norm';
+                if (!topSummary && buyV >= effectiveHeavyCut * 0.6) topSummary = { type: 'ABS', val: buyV, pct: aAbsPct };
+            }
+
+            let bidPullType = null;
+            if (bPull >= effectiveHeavyCut * 0.55 && bPullPct >= 65) {
+                bidPullType = 'heavy';
+            } else if (bPull >= effectiveNormCut * 0.35 && bPullPct >= 35) {
+                bidPullType = 'norm';
+            }
+
+            let askPullType = null;
+            if (aPull >= effectiveHeavyCut * 0.55 && aPullPct >= 65) {
+                askPullType = 'heavy';
+            } else if (aPull >= effectiveNormCut * 0.35 && aPullPct >= 35) {
+                askPullType = 'norm';
             }
 
             if (py < -20 || py > chartH + 10) return;
 
             const cellH = Math.max(rowH - 1, 2);
             const topY = py - cellH * 0.5;
-
-            let bidPullType = bPull >= heavyPullCut ? 'heavy' : (bPull >= normPullCut ? 'norm' : null);
-            let askPullType = aPull >= heavyPullCut ? 'heavy' : (aPull >= normPullCut ? 'norm' : null);
 
             if (proViewMode) {
                 if (bidAbsType === 'heavy') {
@@ -2757,7 +2718,6 @@ function drawAll() {
 
         const totalWhalesInCandle = whaleBuyCount + whaleSellCount;
 
-        // Check if this candle created an ICT FVG (BAAP vs BETA)
         let fvgBadge = '';
         let fvgScoreBoost = 0;
         if (idx >= 1 && idx < candles.length - 1) {
@@ -2776,7 +2736,6 @@ function drawAll() {
             }
         }
 
-        // Check if this candle swept & mitigated a prior candle's POC (Magnet Sweep!)
         let sweptPriorPoc = false;
         if (idx >= 2) {
             for (let k = Math.max(0, idx - 6); k < idx - 1; k++) {
@@ -2788,9 +2747,6 @@ function drawAll() {
             }
         }
 
-        // =========================================================================
-        // V4.1 UPGRADED CANDLE-WISE DECISION MATRIX (USES WHALE LOTS + STACKED IMB + FVG)
-        // =========================================================================
         const cVol = c.volume || 0;
         const cTrades = Math.max(c.trades || 1, 1);
         const candleLotRatio = (cVol / cTrades) / baselineLotSize;
@@ -2818,29 +2774,22 @@ function drawAll() {
         } else {
             let cBull = 0, cBear = 0;
 
-            // 1. Absorption & Aggression
             if (mktSellPct >= 56 && (c.close >= c.open || lowerWick > bodySize * 0.75)) cBull += 34;
             if (mktBuyPct >= 56 && (c.close <= c.open || upperWick > bodySize * 0.75)) cBear += 34;
             if (mktBuyPct >= 58 && c.close > c.open && closePos >= 0.6) cBull += 30;
             if (mktSellPct >= 58 && c.close < c.open && closePos <= 0.4) cBear += 30;
-
-            // 2. Heavy Cell Absorptions & Spoof Pulls
-            if (botSummary && closePos >= 0.45) cBull += 22;
-            if (topSummary && closePos <= 0.55) cBear += 22;
-            if (cAskPullSum > cBidPullSum * 1.4) cBull += 12;
-            if (cBidPullSum > cAskPullSum * 1.4) cBear += 12;
-
-            // 3. POC Position
+            if (botSummary && closePos >= 0.45) cBull += 24;
+            if (topSummary && closePos <= 0.55) cBear += 24;
+            if (cAskPullSum > cBidPullSum * 1.4) cBull += 14;
+            if (cBidPullSum > cAskPullSum * 1.4) cBear += 14;
             if (pocBucketPrice != null) {
                 if (c.close > pocBucketPrice) cBull += 14;
                 else if (c.close < pocBucketPrice) cBear += 14;
             }
 
-            // 4. V4 NEW: Whale Lot Execution Bonus (◆)
             if (whaleBuyCount > whaleSellCount) cBull += 22;
             else if (whaleSellCount > whaleBuyCount) cBear += 22;
 
-            // 5. V4 NEW: Stacked Imbalance & BAAP-FVG Bonus (⚡)
             if (maxBuyStack >= 2) cBull += 18;
             if (maxSellStack >= 2) cBear += 18;
             if (fvgScoreBoost > 0) cBull += fvgScoreBoost;
@@ -2873,7 +2822,6 @@ function drawAll() {
 
             const whalePrefix = totalWhalesInCandle > 0 ? '◆' : '';
 
-            // Detect Retail FOMO Trap (Volume came in tiny retail lots and failed to hold!)
             if (isRetailCrowd && ((mktBuyPct >= 58 && closePos < 0.45) || (mktSellPct >= 58 && closePos > 0.55))) {
                 candleDecision = `🐑 RETAIL FOMO TRAP!`;
                 decisionCol = '#ffab00';
@@ -2994,7 +2942,7 @@ function drawAll() {
     ctx.fillStyle = '#00e5ff';
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | AvgVol:${fmt(avgFlowVol)} | BaseLot:${fmt(baselineLotSize)}`, 12, 17);
+    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | HeavyL:>${fmt(heavyLvlBenchmark)} | BaseLot:${fmt(baselineLotSize)}`, 12, 17);
 
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
