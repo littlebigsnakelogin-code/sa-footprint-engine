@@ -2717,37 +2717,56 @@ function drawAll() {
                     ctx.fillText(`${fmt(buyV)}${whaleBuyMark}`, spineX + 3, py);
                 }
 
-                // COMPACT ANTI-OVERLAP CELL TAGS (Leaves clean space around central numbers!)
-                if (proViewMode && candleW >= 125) {
+                // CLEAR & DISTINCT TAGS: ABSORPTION (H-B.ABS / b-abs) vs PULLED (H-BP / bp)
+                if (proViewMode && candleW >= 120) {
                     let leftTag = '';
                     let leftCol = '#fff';
-                    if (bidAbsType === 'heavy') { leftTag = `H-B:${bAbsPct}%`; leftCol = '#00e5ff'; }
-                    else if (bidAbsType === 'norm' && candleW >= 155) { leftTag = `b:${bAbsPct}%`; leftCol = '#84ffff'; }
+                    let leftBold = false;
 
+                    if (bidAbsType === 'heavy') {
+                        leftTag = `H-B.ABS ${bAbsPct}%`;
+                        leftCol = '#00e5ff';
+                        leftBold = true;
+                    } else if (bidAbsType === 'norm' && candleW >= 140) {
+                        leftTag = `b-abs ${bAbsPct}%`;
+                        leftCol = '#84ffff';
+                    }
+
+                    // If both pull & absorption happen, Heavy takes priority, or show pull clearly
                     if (bidPullType === 'heavy') {
                         leftTag = `H-BP:${fmt(bPull)}(${bPullPct}%)`;
                         leftCol = '#ff4081';
-                    } else if (bidPullType === 'norm' && !leftTag && candleW >= 150) {
+                        leftBold = true;
+                    } else if (bidPullType === 'norm' && !leftTag && candleW >= 140) {
                         leftTag = `bp:${fmt(bPull)}(${bPullPct}%)`;
                         leftCol = '#ff80ab';
                     }
 
                     if (leftTag) {
-                        ctx.font = (bidAbsType === 'heavy' || bidPullType === 'heavy') ? 'bold 8.5px monospace' : '8.5px monospace';
+                        ctx.font = leftBold ? 'bold 8.5px monospace' : '8.5px monospace';
                         ctx.fillStyle = leftCol;
                         ctx.textAlign = 'left';
-                        ctx.fillText(leftTag, spineX - halfW + 2, py);
+                        ctx.fillText(leftTag, boxL + 6, py);
                     }
 
                     let rightTag = '';
                     let rightCol = '#fff';
-                    if (askAbsType === 'heavy') { rightTag = `H-A:${aAbsPct}%`; rightCol = '#ff9100'; }
-                    else if (askAbsType === 'norm' && candleW >= 155) { rightTag = `a:${aAbsPct}%`; rightCol = '#ffd180'; }
+                    let rightBold = false;
+
+                    if (askAbsType === 'heavy') {
+                        rightTag = `H-A.ABS ${aAbsPct}%`;
+                        rightCol = '#ff9100';
+                        rightBold = true;
+                    } else if (askAbsType === 'norm' && candleW >= 140) {
+                        rightTag = `a-abs ${aAbsPct}%`;
+                        rightCol = '#ffd180';
+                    }
 
                     if (askPullType === 'heavy') {
                         rightTag = `H-AP:${fmt(aPull)}(${aPullPct}%)`;
                         rightCol = '#e040fb';
-                    } else if (askPullType === 'norm' && !rightTag && candleW >= 150) {
+                        rightBold = true;
+                    } else if (askPullType === 'norm' && !rightTag && candleW >= 140) {
                         rightTag = `ap:${fmt(aPull)}(${aPullPct}%)`;
                         rightCol = '#ea80fc';
                     }
@@ -2755,13 +2774,14 @@ function drawAll() {
                     if (!rightTag && isPoc) {
                         rightTag = 'POC';
                         rightCol = '#ffeb3b';
+                        rightBold = true;
                     }
 
                     if (rightTag) {
-                        ctx.font = (askAbsType === 'heavy' || askPullType === 'heavy' || isPoc) ? 'bold 8.5px monospace' : '8.5px monospace';
+                        ctx.font = rightBold ? 'bold 8.5px monospace' : '8.5px monospace';
                         ctx.fillStyle = rightCol;
                         ctx.textAlign = 'right';
-                        ctx.fillText(rightTag, boxR - 2, py);
+                        ctx.fillText(rightTag, boxR - 3, py);
                     }
                 }
             }
