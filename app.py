@@ -3095,10 +3095,6 @@ requestAnimationFrame(drawLoop);
 def hello():
     return "SA Footprint Engine OK"
 
-@app.route("/hello")
-def hello():
-    return "SA Footprint Engine OK"
-
 
 @app.route("/api/test")
 def api_test():
