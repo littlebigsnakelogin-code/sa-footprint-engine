@@ -1660,7 +1660,7 @@ def home():
 
     <div class="rule-sec" style="border-color:#ffd700;">
         <h4 style="color:#ffd700;">2. TRUE WHALE BLOCK DETECTOR (◆ Gold Diamond — Anti-Retail Fragmentation)</h4>
-        • <b style="color:#ffd700;">◆ Gold Diamond Rule:</b> Agar 24 BTC 111 chote trades me execute hua hai, toh woh retail/HFT bots hain, Whale nahi! <b style="color:#ffd700;">◆ Whale</b> sirf tab chhapega jab: (1) Level Volume heavy ho, AUR (2) <b>Average Lot Size &ge; 4.2x BaseLot</b> ho (High volume in very few concentrated institutional trades!).
+        • <b style="color:#ffd700;">◆ Gold Diamond Rule:</b> Agar 24 BTC 111 chote trades me execute hua hai, toh woh retail/HFT bots hain, Whale nahi! <b style="color:#ffd700;">◆ Whale</b> sirf tab chhapega jab: (1) Level Volume heavy ho, AUR (2) <b>Average Lot Size &ge; 2.8x BaseLot</b> ho (High volume in very few concentrated institutional trades!).
     </div>
 
     <div class="rule-sec">
@@ -2173,10 +2173,10 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
             if (sv >= cHeavyCut && bAbsPct >= 65 && c.close >= l.price) macroBidAbsorbs++;
             if (bv >= cHeavyCut && aAbsPct >= 65 && c.close <= l.price) macroAskAbsorbs++;
 
-            // STRICT WHALE BLOCK FILTER: High Volume + Lot Size >= 4.2x BaseLot!
+            // STRICT WHALE BLOCK FILTER: High Volume + Lot Size >= 2.8x BaseLot!
             const lt = Math.max(l.trades || 1, 1);
             const lvlLot = tv / lt;
-            if (tv >= Math.max(cAvgV * 1.25, heavyLvlBenchmark * 0.55) && lvlLot >= baselineLotSize * 4.2) {
+            if (tv >= Math.max(cAvgV * 1.25, heavyLvlBenchmark * 0.55) && lvlLot >= baselineLotSize * 2.8) {
                 cWhales++;
                 if (bv > sv) whaleBuyLots++;
                 else if (sv > bv) {
@@ -2589,8 +2589,8 @@ function drawAll() {
             const lvlLotSize = totV / trd;
             const lotRatio = lvlLotSize / baselineLotSize;
 
-            // STRICT WHALE BLOCK FILTER: High Volume + Lot Size >= 4.2x BaseLot (Eliminates 24 BTC in 111 trades!)
-            const isWhaleLot = totV >= Math.max(avgV * 1.15, heavyLvlBenchmark * 0.55) && lotRatio >= 4.2;
+            // BALANCED WHALE BLOCK FILTER: Rejects 111-trade retail splits, catches real 2.8x+ institutional sweeps!
+            const isWhaleLot = totV >= Math.max(avgV * 1.15, heavyLvlBenchmark * 0.50) && ((lotRatio >= 2.8 && trd <= 48) || lotRatio >= 4.5);
 
             if (isWhaleLot) {
                 if (buyV > sellV) whaleBuyCount++;
@@ -2732,7 +2732,6 @@ function drawAll() {
                         leftCol = '#84ffff';
                     }
 
-                    // If both pull & absorption happen, Heavy takes priority, or show pull clearly
                     if (bidPullType === 'heavy') {
                         leftTag = `H-BP:${fmt(bPull)}(${bPullPct}%)`;
                         leftCol = '#ff4081';
