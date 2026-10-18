@@ -1414,7 +1414,7 @@ def home():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SA Institutional Footprint & Macro Decision Engine</title>
+<title>SA Institutional Footprint & Macro Decision Engine V4</title>
 <style>
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
     body {
@@ -1449,7 +1449,7 @@ def home():
         display: flex;
         align-items: center;
         padding: 2px 8px;
-        gap: 8px;
+        gap: 6px;
         font-size: 11px;
         overflow-x: auto;
         white-space: nowrap;
@@ -1458,16 +1458,26 @@ def home():
     .bench-box {
         background: #151a28;
         border: 1px solid #2a324b;
-        padding: 4px 8px;
+        padding: 4px 7px;
         border-radius: 3px;
         display: flex;
-        gap: 8px;
+        gap: 6px;
         align-items: center;
         flex-shrink: 0;
     }
+    .smt-box {
+        background: #181d2c;
+        border: 1px solid #37474f;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-weight: bold;
+        font-size: 10px;
+        flex-shrink: 0;
+        color: #90a4ae;
+    }
     .verdict-box {
         flex: 1;
-        min-width: 320px;
+        min-width: 300px;
         padding: 4px 10px;
         border-radius: 3px;
         font-weight: bold;
@@ -1522,7 +1532,6 @@ def home():
     }
     .dom-slide-tab:hover { background: #00b0ff; color: #000; }
 
-    /* BUILT-IN ZERO-LOAD RULEBOOK MODAL */
     #ruleModal {
         display: none;
         position: fixed;
@@ -1553,7 +1562,7 @@ def home():
 <body>
 
 <div class="topbar">
-    <span class="brand">⚡ SA PRO</span>
+    <span class="brand">⚡ SA V4</span>
     <select id="symSel" onchange="setSym(this.value)">
         <option value="BTCUSDT" selected>BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
@@ -1586,6 +1595,7 @@ def home():
     <button class="btn" onclick="scaleX(1.18)">X+</button>
     <button class="btn" onclick="scaleX(0.84)">X-</button>
     <button class="btn" onclick="resetCamera()">Fit</button>
+    <button class="btn active" id="viewModeBtn" onclick="toggleViewMode()" title="Switch between Full Pro Tags and Clean Footprint">👁️ PRO</button>
     <button class="btn" id="domToggleBtn" onclick="toggleDOM()">DOM</button>
     <button class="btn" onclick="toggleRules()" style="border-color:#ffeb3b;color:#ffeb3b;font-weight:bold;">📖 RULES</button>
 
@@ -1594,6 +1604,7 @@ def home():
         <span class="lg" style="background:#ff9100;color:#000;">H-A.ABS</span>
         <span class="lg" style="background:#d500f9;color:#fff;">H-BP</span>
         <span class="lg" style="background:#aa00ff;color:#fff;">H-AP</span>
+        <span class="lg" style="background:#ffd700;color:#000;">◆ WHALE</span>
     </div>
 
     <div class="status-right">
@@ -1604,7 +1615,7 @@ def home():
 
 <div class="decision-bar">
     <div class="bench-box">
-        <span style="color:#8b93a7;">BENCHMARK:</span>
+        <span style="color:#8b93a7;">FLOW:</span>
         <span id="bmAvg" style="color:#d1d4dc;">Avg:--</span>
         <span style="color:#444;">|</span>
         <span id="bmHeavy" style="color:#ffeb3b;font-weight:bold;">HeavyC:>--</span>
@@ -1612,6 +1623,9 @@ def home():
         <span id="bmLvl" style="color:#00e5ff;font-weight:bold;">HeavyL:>--</span>
         <span style="color:#444;">|</span>
         <span id="bmCur" style="color:#fff;">Cur:--</span>
+    </div>
+    <div class="smt-box" id="smtRadarBox" title="Real-Time BTC vs ETH Cross-Market SMT & Orderflow Radar">
+        🔗 SMT: SCANNING...
     </div>
     <div class="verdict-box" id="masterVerdictBox">
         <span id="masterVerdictTitle">SCANNING MACRO MARKET ORDERFLOW...</span>
@@ -1624,10 +1638,10 @@ def home():
     <div id="domSlideTab" class="dom-slide-tab" onclick="toggleDOM()" title="Slide Orderbook Open/Close">❮ DOM</div>
 </div>
 
-<!-- BUILT-IN COMPLETE MASTER RULEBOOK POPUP -->
+<!-- BUILT-IN COMPLETE MASTER RULEBOOK POPUP (UPDATED WITH V4 STEALTH WEAPONS) -->
 <div id="ruleModal">
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #00e5ff; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
-        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT — MASTER EXECUTION RULEBOOK</b>
+        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT V4 — MASTER EXECUTION RULEBOOK</b>
         <button class="btn" onclick="toggleRules()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
     </div>
 
@@ -1649,33 +1663,33 @@ def home():
         • <b style="color:#00e5ff;">H-B.ABS (xx%) [Bright Cyan - Left]:</b> <b>Heavy Bid Absorption.</b> Aggressive Sellers ne sell mara, par Passive Limit Buyers ne <code>xx%</code> maal absorb kar liya = <b>STRONG INSTITUTIONAL FLOOR (BUY)</b>.<br>
         • <b style="color:#ff9100;">H-A.ABS (xx%) [Orange/Gold - Right]:</b> <b>Heavy Ask Absorption.</b> Aggressive Buyers ne buy mara, par Passive Limit Sellers ne <code>xx%</code> maal absorb karke rok liya = <b>STRONG INSTITUTIONAL CEILING (SELL)</b>.<br>
         • <b style="color:#ff4081;">H-BP:qty (xx%) [Neon Pink - Left]:</b> <b>Heavy Bid Pulled (Spoof).</b> Support par rakhe Buy orders price aate hi cancel kar liye gaye = <b>FAKE SUPPORT (Floor khali hai, price neeche tootega!)</b>.<br>
-        • <b style="color:#e040fb;">H-AP:qty (xx%) [Violet - Right]:</b> <b>Heavy Ask Pulled (Spoof).</b> Resistance par rakhe Sell orders cancel kar liye gaye = <b>FAKE RESISTANCE (Rasta saaf hai, price upar phatega!)</b>.<br>
-        • <b>b-abs / a-abs / bp / ap:</b> Normal intensity ke absorption aur pulling markers.
+        • <b style="color:#e040fb;">H-AP:qty (xx%) [Violet - Right]:</b> <b>Heavy Ask Pulled (Spoof).</b> Resistance par rakhe Sell orders cancel kar liye gaye = <b>FAKE RESISTANCE (Rasta saaf hai, price upar phatega!)</b>.
+    </div>
+
+    <div class="rule-sec" style="border-color:#ffd700;">
+        <h4 style="color:#ffd700;">3. NEW V4 STEALTH WEAPONS (Whale Lots, Spine Glow, nPOC/UNF Pins & SMT Radar)</h4>
+        • <b style="color:#ffd700;">◆ Gold Diamond (Whale Lot Size Detector):</b> Jab kisi price cell mein bada volume <b>bahut kam trades (Big Average Trade Size &gt;= 2.2x normal)</b> mein execute hota hai, toh number ke paas <b style="color:#ffd700;">◆</b> chhapta hai. Yeh prove karta hai ki wahan Retail bheed nahi, balki <b>Institutional Whale / Liquidation Engine</b> ne order mara hai! (Hover X-Ray box mein exact <code>Trades</code> aur <code>AvgLot [🐋 WHALE vs 🐑 RETAIL]</code> dikhta hai).<br>
+        • <b style="color:#00e5ff;">Left Spine Neon Glow (Stacked Imbalance & Baap FVG):</b> Jab किसी candle mein lagatar <b>2 ya 3+ price levels par ek-tarfa 250% Imbalance</b> aata hai, toh chart ganda kiye bina candle ki Left Spine par <b>Bright Cyan (Buy Stack)</b> ya <b>Bright Pink (Sell Stack)</b> glow bar ban jata hai. Aur agar wahan FVG hai, toh Floating Pill mein <b style="color:#00e676;">⚡ BAAP FVG (Stacked Imb)</b> ya <b style="color:#ff9100;">⚠️ BETA FVG (Weak)</b> print hota hai!<br>
+        • <b style="color:#ffeb3b;">◀ nPOC</b> & <b style="color:#e040fb;">◀ UNF (Y-Axis Price Scale Laser Pins):</b><br>
+          &nbsp;&nbsp;- <b style="color:#ffeb3b;">◀ nPOC (Naked POC):</b> Pichli candles ka wo POC jisko abhi tak price ne wapas touch nahi kiya hai. Yeh <b>Strongest Price Magnet</b> hota hai.<br>
+          &nbsp;&nbsp;- <b style="color:#e040fb;">◀ UNF (Unfinished Auction):</b> Pichli candle ka wo High ya Low jahan Buy aur Sell dono तरफ volume <code>&gt; 0</code> chhoot gaya (Incomplete Auction). Market 85% cases mein aisi Unfinished High/Low ko sweep karne wapas aata hai!<br>
+        • <b style="color:#00e5ff;">🔗 SMT Radar (BTC vs ETH Cross-Check):</b> Top bar mein BTC aur ETH ke structure aur CVD ko live compare karta hai. Agar ek coin naya Low banaye aur dusra coin apna Low hold karke Absorption de, toh <b style="color:#ffeb3b;">🚨 BULL/BEAR SMT DIVERGENCE</b> alert chamakta hai!<br>
+        • <b>👁️ PRO / CLEAN Button:</b> 1 click mein saare side tags chhupa kar raw footprint dekhne ke liye.
     </div>
 
     <div class="rule-sec">
-        <h4>3. THE 4-LINE FLOATING PILL UNDER EVERY CANDLE (Micro Candle Decision)</h4>
+        <h4>4. THE 4-LINE FLOATING PILL UNDER EVERY CANDLE (Micro Candle Decision)</h4>
         • <b>Line 1 (Δ | V | RVOL x):</b> Agar RVOL <code>&lt; 0.75x</code> hai toh <code>LOW FLOW</code> aayega—aisi halka volume candle ke signal par kabhi trade mat lena!<br>
         • <b>Line 2 (CVD | B vs S):</b> Running Cumulative Delta aur us candle ka exact Market Buy (<code>B</code>) vs Market Sell (<code>S</code>) volume.<br>
-        • <b>Line 3 (Market vs Limit Clash Mechanism):</b><br>
-          &nbsp;&nbsp;- <b style="color:#00e5ff;">🐳 LIM-BUY ACCUM:</b> High volume + heavy selling aayi par price nahi gira (Whales ne Limit Buy se absorb kiya).<br>
-          &nbsp;&nbsp;- <b style="color:#ff9100;">🐳 LIM-SELL DUMP:</b> High volume + heavy buying aayi par price upar nahi gaya (Whales ne Limit Sell se dump kiya).<br>
-          &nbsp;&nbsp;- <b style="color:#00e676;">🔥 MKT BUY IGNITION</b> / <b style="color:#ff1744;">🔥 MKT SELL DUMP:</b> Whales ne khud Market order maar kar badi displacement candle banayi.<br>
-        • <b>Line 4 (Final Candle Winner):</b> <b style="color:#00e676;">🟢 BUYERS WIN</b>, <b style="color:#ff5252;">🔴 SELLERS WIN</b>, ya <b style="color:#00e676;">🐳 BULL ABSORB WIN</b> (jab Delta negative ho par candle Green band ho = Sellers trapped!).
-    </div>
-
-    <div class="rule-sec">
-        <h4>4. UNIFIED LIVE DOM LADDER & X-RAY HOVER HUD</h4>
-        • <b>Center Price DOM:</b> Left = Resting Bids, Right = Resting Asks. Bracket mein <code>[qty]</code> us price par abhi execute hua volume hai.<br>
-        • <b style="color:#00e5ff;">★ Cyan</b> / <b style="color:#ffab00;">★ Orange Bars:</b> Poore orderbook ke Top 4 sabse badi Liquidity Walls (Magnet / Target zones).<br>
-        • <b>Top-Left X-Ray Box:</b> Kisi bhi candle cell par cursor/ungli rakhne par us exact price ka Executed Buy/Sell % aur Pulled Spoof % dikhata hai.
+        • <b>Line 3 (Mechanism + FVG Quality):</b> <code>🐳 LIM-BUY ACCUM</code>, <code>🐳 LIM-SELL DUMP</code>, <code>🔥 MKT IGNITION</code>, plus <code>[⚡BAAP-FVG]</code> ya <code>[⚠️BETA-FVG]</code> tag!<br>
+        • <b>Line 4 (Final Candle Winner):</b> <b style="color:#00e676;">🟢 BUYERS WIN</b>, <b style="color:#ff5252;">🔴 SELLERS WIN</b>, ya <b style="color:#00e676;">🐳 BULL ABSORB WIN</b>.
     </div>
 
     <div class="rule-sec" style="border-color:#00e676;">
-        <h4 style="color:#00e676;">🎯 3-STEP ICT FVG / ORDER BLOCK ENTRY CHECKLIST (SL SAVER FORMULA)</h4>
-        <b>1. FVG Tap Check:</b> Jab price Bullish FVG/OB mein aaye, toh cell mein <b style="color:#00e5ff;">H-B.ABS</b> ya <b style="color:#00e5ff;">▲ BID ABS</b> chhapna chahiye. (Agar wahan <b style="color:#ff4081;">H-BP Bid Pulled</b> dikhe toh entry mat le, FVG fail hone wala hai!).<br>
-        <b>2. Pill Check:</b> Candle ke neeche pill mein <code>RVOL &gt;= 1.1x</code> ho aur Line 4 mein <b style="color:#00e676;">BUYERS WIN</b> ya <b style="color:#00e676;">🐳 BULL ABSORB WIN</b> aaye.<br>
-        <b>3. POC Close Check:</b> Entry candle ka close uske Yellow <b>POC</b> box ke upar (Long ke liye) ya neeche (Short ke liye) hona chahiye.
+        <h4 style="color:#00e676;">🎯 MASTER SNIPER CHECKLIST (FVG / OB / SWEEP ENTRY)</h4>
+        <b>1. Location Check:</b> Kya tera FVG kisi <b style="color:#ffeb3b;">◀ nPOC</b> magnet ya <b style="color:#00e676;">⚡ BAAP FVG (Stacked Imb)</b> candle par bana hai?<br>
+        <b>2. Reaction Check:</b> Jab price FVG mein tap kare, toh wahan <b style="color:#00e5ff;">H-B.ABS</b> (Long) ya <b style="color:#ff9100;">H-A.ABS</b> (Short) + <b style="color:#ffd700;">◆ Whale Lot</b> dikhna chahiye (Pulling <code>H-BP/H-AP</code> nahi hona chahiye).<br>
+        <b>3. Trigger Check:</b> Candle pill mein <code>RVOL &gt;= 1.1x</code> ke sath <b style="color:#00e676;">BUYERS WIN / BULL ABSORB WIN</b> aaye aur candle POC ke upar close de!
     </div>
 </div>
 
@@ -1695,7 +1709,9 @@ const STEP_MAP = { BTCUSDT: 1.0, ETHUSDT: 0.1, SOLUSDT: 0.01, XRPUSDT: 0.0001 };
 let symbol = document.getElementById('symSel').value || 'BTCUSDT';
 let tf = '1m';
 let tickMultMode = document.getElementById('tickMultSel').value || 'auto';
+let proViewMode = true; // true = PRO (All tags), false = CLEAN (Digits + POC only)
 let candles = [];
+let peerCandles = []; // For BTC vs ETH Cross-Market SMT Radar
 let obData = { bids: [], asks: [] };
 let rawStep = STEP_MAP[symbol] || 1.0;
 
@@ -1716,6 +1732,14 @@ let needsRender = true;
 const TIME_H = 20;
 const PILL_SAFE_H = 66;
 
+function toggleViewMode() {
+    proViewMode = !proViewMode;
+    const btn = document.getElementById('viewModeBtn');
+    btn.innerText = proViewMode ? '👁️ PRO' : '👁️ CLEAN';
+    btn.classList.toggle('active', proViewMode);
+    needsRender = true;
+}
+
 function updateSlideTabUI() {
     isMobile = cv.width < 768;
     const domW = !showDOM ? 0 : (isMobile ? Math.min(200, Math.floor(cv.width * 0.52)) : 300);
@@ -1735,7 +1759,7 @@ function updateSlideTabUI() {
 
 function getLayout() {
     isMobile = cv.width < 768;
-    const yAxisW = isMobile ? 58 : 74;
+    const yAxisW = isMobile ? 62 : 78;
     const domW = !showDOM ? 0 : (isMobile ? Math.min(200, Math.floor(cv.width * 0.52)) : 300);
     const chartW = Math.max(100, cv.width - domW - yAxisW);
     const chartH = cv.height - TIME_H - PILL_SAFE_H;
@@ -1762,6 +1786,7 @@ function setSym(s) {
     rawStep = STEP_MAP[s] || 1.0;
     resetCamera();
     fetchData();
+    fetchSmtPeer();
 }
 function setTF(t, b) {
     tf = t;
@@ -1769,6 +1794,7 @@ function setTF(t, b) {
     b.classList.add('active');
     resetCamera();
     fetchData();
+    fetchSmtPeer();
 }
 function setTickMult(v) {
     tickMultMode = v;
@@ -1966,6 +1992,71 @@ async function fetchData() {
     }
 }
 
+// Lightweight background fetch (every 4.5s) of peer symbol (ETH for BTC, or BTC for others) for SMT Divergence
+async function fetchSmtPeer() {
+    const peerSym = (symbol === 'BTCUSDT') ? 'ETHUSDT' : 'BTCUSDT';
+    try {
+        const res = await fetch(`/api/candles?symbol=${peerSym}&timeframe=${tf}&limit=8`);
+        const d = await res.json();
+        if (d.status === 'ok' && d.candles) {
+            peerCandles = d.candles;
+            updateSmtRadar(peerSym);
+        }
+    } catch (e) {}
+}
+
+function updateSmtRadar(peerSym) {
+    const el = document.getElementById('smtRadarBox');
+    if (!candles || candles.length < 5 || !peerCandles || peerCandles.length < 5) return;
+
+    const curSet = candles.slice(-6);
+    const peerSet = peerCandles.slice(-6);
+    const cLast = curSet[curSet.length - 1];
+    const pLast = peerSet[peerSet.length - 1];
+
+    const cPrevLow = Math.min(...curSet.slice(0, -1).map(x => x.low));
+    const cPrevHigh = Math.max(...curSet.slice(0, -1).map(x => x.high));
+    const pPrevLow = Math.min(...peerSet.slice(0, -1).map(x => x.low));
+    const pPrevHigh = Math.max(...peerSet.slice(0, -1).map(x => x.high));
+
+    const cSweptLow = cLast.low <= cPrevLow;
+    const pSweptLow = pLast.low <= pPrevLow;
+    const cSweptHigh = cLast.high >= cPrevHigh;
+    const pSweptHigh = pLast.high >= pPrevHigh;
+
+    const c3Delta = curSet.slice(-2).reduce((a, b) => a + (b.delta || 0), 0);
+    const p3Delta = peerSet.slice(-2).reduce((a, b) => a + (b.delta || 0), 0);
+
+    const shortSym = symbol.replace('USDT', '');
+    const shortPeer = peerSym.replace('USDT', '');
+
+    if (cSweptLow !== pSweptLow) {
+        // Bullish SMT at Lows! One coin swept low while the other held higher low
+        const stronger = !cSweptLow ? shortSym : shortPeer;
+        el.style.background = 'rgba(0, 229, 255, 0.20)';
+        el.style.borderColor = '#00e5ff';
+        el.style.color = '#00e5ff';
+        el.innerText = `🚨 BULL SMT: ${stronger} Held Low!`;
+    } else if (cSweptHigh !== pSweptHigh) {
+        // Bearish SMT at Highs! One coin swept high while the other made lower high
+        const weaker = !cSweptHigh ? shortSym : shortPeer;
+        el.style.background = 'rgba(255, 145, 0, 0.22)';
+        el.style.borderColor = '#ff9100';
+        el.style.color = '#ffab00';
+        el.innerText = `🚨 BEAR SMT: ${weaker} Failed High!`;
+    } else if ((c3Delta > 0 && p3Delta < 0) || (c3Delta < 0 && p3Delta > 0)) {
+        el.style.background = 'rgba(213, 0, 249, 0.16)';
+        el.style.borderColor = '#e040fb';
+        el.style.color = '#ea80fc';
+        el.innerText = `⚡ DELTA SMT: ${shortSym}/${shortPeer} Split`;
+    } else {
+        el.style.background = '#181d2c';
+        el.style.borderColor = '#37474f';
+        el.style.color = '#90a4ae';
+        el.innerText = `🔗 SMT: ${shortSym}/${shortPeer} SYNCED`;
+    }
+}
+
 function fmt(v) {
     if (!v) return '0';
     const a = Math.abs(v);
@@ -1975,6 +2066,7 @@ function fmt(v) {
     return v.toFixed(2);
 }
 
+// Preserves trades count so we can compute Volume / Trades (Whale vs Retail Lot Size)!
 function groupFootprint(fpRaw, low, high, effStep, closePx) {
     const map = new Map();
     const arr = Array.isArray(fpRaw) ? fpRaw : Object.values(fpRaw || {});
@@ -1984,12 +2076,13 @@ function groupFootprint(fpRaw, low, high, effStep, closePx) {
         const key = bucket.toFixed(6);
         let g = map.get(key);
         if (!g) {
-            g = { price: bucket, buy: 0, sell: 0, volume: 0, bid_pulled: 0, ask_pulled: 0, pulled_qty: 0 };
+            g = { price: bucket, buy: 0, sell: 0, volume: 0, trades: 0, bid_pulled: 0, ask_pulled: 0, pulled_qty: 0 };
             map.set(key, g);
         }
         g.buy += (l.buy || 0);
         g.sell += (l.sell || 0);
         g.volume += (l.volume || 0);
+        g.trades += (l.trades || 0);
 
         let bp = l.bid_pulled || 0;
         let ap = l.ask_pulled || 0;
@@ -2184,23 +2277,63 @@ function drawAll() {
         return;
     }
 
-    let totalHistVol = 0, totalHistRange = 0, histCount = 0;
+    let totalHistVol = 0, totalHistTrades = 0, totalHistRange = 0, histCount = 0;
     candles.forEach((hc, idx) => {
         if (idx < candles.length - 1 || candles.length === 1) {
             totalHistVol += (hc.volume || 0);
+            totalHistTrades += (hc.trades || 1);
             totalHistRange += Math.max(hc.high - hc.low, rawStep);
             histCount++;
         }
     });
     const avgFlowVol = Math.max(totalHistVol / Math.max(1, histCount), 0.001);
     const avgFlowRange = Math.max(totalHistRange / Math.max(1, histCount), rawStep);
+    const baselineLotSize = Math.max(totalHistVol / Math.max(1, totalHistTrades), 0.0001);
+
+    // Pre-scan for Naked POCs (nPOC) & Unfinished Auctions (UNF) across historical candles
+    const nakedPocs = [];
+    const unfinishedLvls = [];
+    for (let i = 0; i < candles.length - 1; i++) {
+        const c = candles[i];
+        // Check if c.poc was touched by any subsequent candle
+        if (c.poc != null) {
+            let touched = false;
+            for (let j = i + 1; j < candles.length; j++) {
+                if (candles[j].low <= c.poc && candles[j].high >= c.poc) { touched = true; break; }
+            }
+            if (!touched) nakedPocs.push(c.poc);
+        }
+        // Check Unfinished High/Low on candle i if still unmitigated
+        const fpArr = Array.isArray(c.footprint) ? c.footprint : Object.values(c.footprint || {});
+        if (fpArr.length > 2) {
+            const sortedFp = [...fpArr].sort((a, b) => a.price - b.price);
+            const lowCell = sortedFp[0];
+            const highCell = sortedFp[sortedFp.length - 1];
+            // Unfinished Low: Both Buy & Sell > 0 at exact low
+            if (lowCell.buy > 0 && lowCell.sell > 0 && (lowCell.volume || 0) >= avgFlowVol * 0.08) {
+                let swept = false;
+                for (let j = i + 1; j < candles.length; j++) {
+                    if (candles[j].low < lowCell.price) { swept = true; break; }
+                }
+                if (!swept) unfinishedLvls.push({ price: lowCell.price, type: 'LOW' });
+            }
+            // Unfinished High: Both Buy & Sell > 0 at exact high
+            if (highCell.buy > 0 && highCell.sell > 0 && (highCell.volume || 0) >= avgFlowVol * 0.08) {
+                let swept = false;
+                for (let j = i + 1; j < candles.length; j++) {
+                    if (candles[j].high > highCell.price) { swept = true; break; }
+                }
+                if (!swept) unfinishedLvls.push({ price: highCell.price, type: 'HIGH' });
+            }
+        }
+    }
 
     const rightStart = chartW - candleW * 0.62 + panX;
     const vis = [];
     for (let i = candles.length - 1; i >= 0; i--) {
         const cx = rightStart - (candles.length - 1 - i) * candleW;
         if (cx + candleW < 0) break;
-        if (cx - candleW <= chartW) vis.push({ c: candles[i], cx });
+        if (cx - candleW <= chartW) vis.push({ c: candles[i], cx, idx: i });
     }
     if (vis.length === 0) return;
 
@@ -2256,7 +2389,7 @@ function drawAll() {
     let cvd = 0;
     let hoveredCellInfo = null;
 
-    vis.slice().reverse().forEach(({ c, cx }) => {
+    vis.slice().reverse().forEach(({ c, cx, idx }) => {
         cvd += (c.delta || 0);
         const isUp = c.close >= c.open;
         const col = isUp ? '#00e676' : '#ff5252';
@@ -2310,7 +2443,7 @@ function drawAll() {
             ctx.moveTo(boxL, yVal); ctx.lineTo(boxR, yVal);
             ctx.stroke();
 
-            if (candleW >= 65) {
+            if (candleW >= 65 && proViewMode) {
                 ctx.fillStyle = '#29b6f6';
                 ctx.font = 'bold 9px monospace';
                 ctx.textAlign = 'left';
@@ -2327,6 +2460,27 @@ function drawAll() {
         ctx.stroke();
         ctx.fillStyle = col;
         ctx.fillRect(barX - 3, Math.min(yO, yC), 6, Math.max(Math.abs(yC - yO), 2));
+
+        // Detect Consecutive Stacked Imbalances (2+ or 3+ consecutive levels) for Spine Glow & FVG X-Ray
+        let buyImbStreak = 0, sellImbStreak = 0;
+        let maxBuyStack = 0, maxSellStack = 0;
+        let whaleLevelsCount = 0;
+
+        fp.forEach(l => {
+            const sImb = l.sell > l.buy * 2.4 && l.sell >= avgV * 0.45;
+            const bImb = l.buy > l.sell * 2.4 && l.buy >= avgV * 0.45;
+            if (bImb) { buyImbStreak++; sellImbStreak = 0; if (buyImbStreak > maxBuyStack) maxBuyStack = buyImbStreak; }
+            else if (sImb) { sellImbStreak++; buyImbStreak = 0; if (sellImbStreak > maxSellStack) maxSellStack = sellImbStreak; }
+            else { buyImbStreak = 0; sellImbStreak = 0; }
+
+            // Draw Neon Spine Glow on Left OHLC Bar where Stacked Imbalance occurs (Zero Chart Clutter!)
+            if (proViewMode && (buyImbStreak >= 2 || sellImbStreak >= 2)) {
+                const py = pToY(l.price + effStep * 0.5);
+                const cellH = Math.max(rowH, 3);
+                ctx.fillStyle = buyImbStreak >= 2 ? '#00e5ff' : '#ff007f';
+                ctx.fillRect(barX - 4, py - cellH * 1.5, 8, cellH * 2);
+            }
+        });
 
         ctx.strokeStyle = '#262c3d';
         ctx.lineWidth = 1;
@@ -2346,6 +2500,12 @@ function drawAll() {
             const sellV = l.sell || 0;
             const buyV = l.buy || 0;
             const totV = l.volume || 0;
+            const trd = Math.max(l.trades || 1, 1);
+            const lvlLotSize = totV / trd; // Volume per Trade (Whale vs Retail)
+            const lotRatio = lvlLotSize / baselineLotSize;
+            const isWhaleLot = totV >= avgV * 0.85 && lotRatio >= 2.0;
+            if (isWhaleLot) whaleLevelsCount++;
+
             const bPull = l.bid_pulled || 0;
             const aPull = l.ask_pulled || 0;
             cBidPullSum += bPull;
@@ -2380,20 +2540,22 @@ function drawAll() {
             let bidPullType = bPull >= heavyPullCut ? 'heavy' : (bPull >= normPullCut ? 'norm' : null);
             let askPullType = aPull >= heavyPullCut ? 'heavy' : (aPull >= normPullCut ? 'norm' : null);
 
-            if (bidAbsType === 'heavy') {
-                ctx.fillStyle = 'rgba(0, 229, 255, 0.22)';
-                ctx.fillRect(spineX - halfW, topY, halfW, cellH);
-            } else if (bidPullType === 'heavy') {
-                ctx.fillStyle = 'rgba(213, 0, 249, 0.22)';
-                ctx.fillRect(spineX - halfW, topY, halfW, cellH);
-            }
+            if (proViewMode) {
+                if (bidAbsType === 'heavy') {
+                    ctx.fillStyle = 'rgba(0, 229, 255, 0.22)';
+                    ctx.fillRect(spineX - halfW, topY, halfW, cellH);
+                } else if (bidPullType === 'heavy') {
+                    ctx.fillStyle = 'rgba(213, 0, 249, 0.22)';
+                    ctx.fillRect(spineX - halfW, topY, halfW, cellH);
+                }
 
-            if (askAbsType === 'heavy') {
-                ctx.fillStyle = 'rgba(255, 145, 0, 0.25)';
-                ctx.fillRect(spineX, topY, halfW, cellH);
-            } else if (askPullType === 'heavy') {
-                ctx.fillStyle = 'rgba(170, 0, 255, 0.22)';
-                ctx.fillRect(spineX, topY, halfW, cellH);
+                if (askAbsType === 'heavy') {
+                    ctx.fillStyle = 'rgba(255, 145, 0, 0.25)';
+                    ctx.fillRect(spineX, topY, halfW, cellH);
+                } else if (askPullType === 'heavy') {
+                    ctx.fillStyle = 'rgba(170, 0, 255, 0.22)';
+                    ctx.fillRect(spineX, topY, halfW, cellH);
+                }
             }
 
             const sellRatio = Math.min(1, sellV / maxV);
@@ -2417,7 +2579,8 @@ function drawAll() {
             if (curX >= boxL && curX <= boxR && curY >= topY && curY <= topY + cellH) {
                 hoveredCellInfo = {
                     price: l.price, effStep, sellV, buyV, bPull, aPull,
-                    bPullPct, aPullPct, bAbsPct, aAbsPct, bidAbsType, askAbsType
+                    bPullPct, aPullPct, bAbsPct, aAbsPct, bidAbsType, askAbsType,
+                    trades: trd, lvlLotSize, lotRatio, isWhaleLot
                 };
                 ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 1;
@@ -2427,17 +2590,21 @@ function drawAll() {
             if (canPrint) {
                 ctx.textBaseline = 'middle';
 
-                ctx.font = (sellImb || isPoc) ? 'bold 10px monospace' : '10px monospace';
-                ctx.fillStyle = sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb');
+                // Sell & Buy Digits + Micro Gold Diamond (◆) if Whale Lot Size Executed here!
+                const whaleSellMark = (proViewMode && isWhaleLot && sellV >= buyV) ? '◆' : '';
+                const whaleBuyMark = (proViewMode && isWhaleLot && buyV > sellV) ? '◆' : '';
+
+                ctx.font = (sellImb || isPoc || whaleSellMark) ? 'bold 10px monospace' : '10px monospace';
+                ctx.fillStyle = whaleSellMark ? '#ffd700' : (sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
                 ctx.textAlign = 'right';
-                ctx.fillText(fmt(sellV), spineX - 3, py);
+                ctx.fillText(`${whaleSellMark}${fmt(sellV)}`, spineX - 3, py);
 
-                ctx.font = (buyImb || isPoc) ? 'bold 10px monospace' : '10px monospace';
-                ctx.fillStyle = buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#e0e3eb');
+                ctx.font = (buyImb || isPoc || whaleBuyMark) ? 'bold 10px monospace' : '10px monospace';
+                ctx.fillStyle = whaleBuyMark ? '#ffd700' : (buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
                 ctx.textAlign = 'left';
-                ctx.fillText(fmt(buyV), spineX + 3, py);
+                ctx.fillText(`${fmt(buyV)}${whaleBuyMark}`, spineX + 3, py);
 
-                if (candleW >= 115) {
+                if (proViewMode && candleW >= 115) {
                     let leftTag = '';
                     let leftCol = '#fff';
                     if (bidAbsType === 'heavy') { leftTag = `H-B.ABS(${bAbsPct}%)`; leftCol = '#00e5ff'; }
@@ -2486,6 +2653,22 @@ function drawAll() {
             }
         });
 
+        // Check if this candle created an ICT FVG (between idx-1 and idx+1) and grade it as BAAP or BETA!
+        let fvgBadge = '';
+        if (idx >= 1 && idx < candles.length - 1) {
+            const prevC = candles[idx - 1];
+            const nextC = candles[idx + 1];
+            const bullFvg = nextC.low > prevC.high;
+            const bearFvg = nextC.high < prevC.low;
+            if (bullFvg) {
+                const isBaap = (maxBuyStack >= 2 || whaleLevelsCount >= 1) && (c.volume >= avgFlowVol * 1.1);
+                fvgBadge = isBaap ? ' ⚡BAAP-FVG' : ' ⚠️BETA-FVG';
+            } else if (bearFvg) {
+                const isBaap = (maxSellStack >= 2 || whaleLevelsCount >= 1) && (c.volume >= avgFlowVol * 1.1);
+                fvgBadge = isBaap ? ' ⚡BAAP-FVG' : ' ⚠️BETA-FVG';
+            }
+        }
+
         const cVol = c.volume || 0;
         const rvol = cVol / avgFlowVol;
         const mktBuyPct = cVol > 0 ? Math.round(((c.buy_volume || 0) / cVol) * 100) : 50;
@@ -2497,15 +2680,15 @@ function drawAll() {
         const lowerWick = Math.min(c.open, c.close) - c.low;
         const closePos = (c.close - c.low) / cRange;
 
-        let flowVerdict = `MB:${mktBuyPct}% | MS:${mktSellPct}%`;
+        let flowVerdict = `MB:${mktBuyPct}%|MS:${mktSellPct}%${fvgBadge}`;
         let candleDecision = `⚪ NEUTRAL / CHOP`;
         let verdictCol = '#8b93a7';
         let decisionCol = '#9ba2b0';
         let isHighConviction = false;
 
         if (rvol < 0.70) {
-            flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x) | MB:${mktBuyPct}%`;
-            candleDecision = `⚪ SKIP (NO VOLUME)`;
+            flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x)${fvgBadge}`;
+            candleDecision = `⚪ SKIP (RETAIL NOISE)`;
             verdictCol = '#6c738a';
             decisionCol = '#78909c';
         } else {
@@ -2526,48 +2709,49 @@ function drawAll() {
             const cNet = cBull - cBear;
 
             if (mktBuyPct >= 58 && (c.close < c.open || upperWick > bodySize * 0.8)) {
-                flowVerdict = `🐳 LIM-SELL DUMP (MB:${mktBuyPct}%)`;
+                flowVerdict = `🐳LIM-SELL DUMP${fvgBadge}`;
                 verdictCol = '#ff9100';
                 isHighConviction = rvol >= 1.15;
             } else if (mktSellPct >= 58 && (c.close > c.open || lowerWick > bodySize * 0.8)) {
-                flowVerdict = `🐳 LIM-BUY ACCUM (MS:${mktSellPct}%)`;
+                flowVerdict = `🐳LIM-BUY ACCUM${fvgBadge}`;
                 verdictCol = '#00e5ff';
                 isHighConviction = rvol >= 1.15;
             } else if (mktSellPct >= 60 && c.close < c.open && bodySize >= cRange * 0.5) {
-                flowVerdict = `🔥 MKT SELL DUMP (MS:${mktSellPct}%)`;
+                flowVerdict = `🔥MKT SELL DUMP${fvgBadge}`;
                 verdictCol = '#ff1744';
                 isHighConviction = rvol >= 1.15;
             } else if (mktBuyPct >= 60 && c.close > c.open && bodySize >= cRange * 0.5) {
-                flowVerdict = `🔥 MKT BUY IGNITION (MB:${mktBuyPct}%)`;
+                flowVerdict = `🔥MKT IGNITION${fvgBadge}`;
                 verdictCol = '#00e676';
                 isHighConviction = rvol >= 1.15;
             } else {
-                flowVerdict = `MB:${mktBuyPct}% | MS:${mktSellPct}%`;
-                verdictCol = '#cfd8dc';
+                flowVerdict = `MB:${mktBuyPct}%|MS:${mktSellPct}%${fvgBadge}`;
+                verdictCol = fvgBadge.includes('BAAP') ? '#00e5ff' : '#cfd8dc';
             }
 
+            const whaleTag = whaleLevelsCount > 0 ? '◆' : '';
             if (cNet >= 20) {
                 const cPct = Math.min(95, Math.round(52 + (cNet / 90) * 43));
                 candleDecision = (c.delta < 0 && c.close >= c.open)
-                    ? `🐳 BULL ABSORB WIN (${cPct}%)`
-                    : `🟢 BUYERS WIN (${cPct}%)`;
+                    ? `${whaleTag}🐳 BULL ABSORB (${cPct}%)`
+                    : `${whaleTag}🟢 BUYERS WIN (${cPct}%)`;
                 decisionCol = '#00e676';
                 if (rvol >= 1.15) isHighConviction = true;
             } else if (cNet <= -20) {
                 const cPct = Math.min(95, Math.round(52 + (Math.abs(cNet) / 90) * 43));
                 candleDecision = (c.delta > 0 && c.close <= c.open)
-                    ? `🐳 BEAR ABSORB WIN (${cPct}%)`
-                    : `🔴 SELLERS WIN (${cPct}%)`;
+                    ? `${whaleTag}🐳 BEAR ABSORB (${cPct}%)`
+                    : `${whaleTag}🔴 SELLERS WIN (${cPct}%)`;
                 decisionCol = '#ff5252';
                 if (rvol >= 1.15) isHighConviction = true;
             } else {
-                candleDecision = `⚖️ TWO-WAY FIGHT`;
+                candleDecision = `${whaleTag}⚖️ TWO-WAY FIGHT`;
                 decisionCol = '#ffca28';
             }
         }
 
         let botYBanner = yL + 16;
-        if (candleW >= 70 && rvol >= 0.85) {
+        if (proViewMode && candleW >= 70 && rvol >= 0.85) {
             ctx.font = 'bold 9px monospace';
             ctx.textAlign = 'center';
 
@@ -2640,24 +2824,29 @@ function drawAll() {
         }
     });
 
-    const hudW = Math.min(chartW - 12, 410);
-    ctx.fillStyle = 'rgba(17, 21, 31, 0.88)';
-    ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 52 : 22);
+    // TOP-LEFT X-RAY INSPECTOR HUD (NOW WITH WHALE VS RETAIL LOT SIZE!)
+    const hudW = Math.min(chartW - 12, 440);
+    ctx.fillStyle = 'rgba(17, 21, 31, 0.90)';
+    ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
     ctx.strokeStyle = '#2962ff';
-    ctx.strokeRect(6, 6, hudW, hoveredCellInfo ? 52 : 22);
+    ctx.strokeRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
     ctx.fillStyle = '#00e5ff';
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | AvgVol:${fmt(avgFlowVol)}`, 12, 17);
+    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | AvgVol:${fmt(avgFlowVol)} | BaseLot:${fmt(baselineLotSize)}`, 12, 17);
 
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
         ctx.fillStyle = '#ffeb3b';
-        ctx.fillText(`Px:${h.price.toFixed(dec)} | MS:${fmt(h.sellV)}(${h.bAbsPct}%) MB:${fmt(h.buyV)}(${h.aAbsPct}%)`, 12, 33);
+        ctx.fillText(`Px:${h.price.toFixed(dec)} | MS:${fmt(h.sellV)}(${h.bAbsPct}%) | MB:${fmt(h.buyV)}(${h.aAbsPct}%)`, 12, 33);
         ctx.fillStyle = '#ff80ab';
-        ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%)`, 12, 48);
+        ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%)`, 12, 47);
+        ctx.fillStyle = h.isWhaleLot ? '#ffd700' : '#b0bec5';
+        const playerTag = h.isWhaleLot ? '🐋 WHALE LOT EXECUTION!' : (h.lotRatio < 0.7 ? '🐑 RETAIL CROWD' : '⚡ STANDARD FLOW');
+        ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 61);
     }
 
+    // Y-Axis Price Scale + Laser Pins for Naked POC (nPOC) & Unfinished Auctions (UNF)!
     const yAxisX = chartW;
     ctx.fillStyle = '#11151f';
     ctx.fillRect(yAxisX, 0, yAxisW, H);
@@ -2676,6 +2865,47 @@ function drawAll() {
     }
 
     const lastC = candles[candles.length - 1];
+
+    // Draw Non-Intrusive Y-Axis Laser Pins for nPOC & Unfinished Auctions!
+    if (proViewMode) {
+        nakedPocs.slice(-6).forEach(np => {
+            const ny = pToY(np);
+            if (ny > 10 && ny < chartH - 10) {
+                // Only draw subtle line if live price is approaching within 6 effSteps!
+                if (Math.abs(lastC.close - np) <= effStep * 6) {
+                    ctx.strokeStyle = 'rgba(255, 235, 59, 0.35)';
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath(); ctx.moveTo(chartW * 0.5, ny); ctx.lineTo(chartW, ny); ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+                ctx.fillStyle = '#ffeb3b';
+                ctx.fillRect(yAxisX - 34, ny - 6, 34, 12);
+                ctx.fillStyle = '#000';
+                ctx.font = 'bold 8px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText('◀nPOC', yAxisX - 17, ny);
+            }
+        });
+
+        unfinishedLvls.slice(-5).forEach(u => {
+            const uy = pToY(u.price);
+            if (uy > 10 && uy < chartH - 10) {
+                if (Math.abs(lastC.close - u.price) <= effStep * 5) {
+                    ctx.strokeStyle = 'rgba(224, 64, 251, 0.35)';
+                    ctx.setLineDash([2, 3]);
+                    ctx.beginPath(); ctx.moveTo(chartW * 0.6, uy); ctx.lineTo(chartW, uy); ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+                ctx.fillStyle = '#e040fb';
+                ctx.fillRect(yAxisX - 30, uy - 6, 30, 12);
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 8px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText('◀UNF', yAxisX - 15, uy);
+            }
+        });
+    }
+
     const curPy = pToY(lastC.close);
     if (curPy >= 0 && curPy <= chartH) {
         const pCol = lastC.close >= lastC.open ? '#00c853' : '#ff1744';
@@ -2690,6 +2920,7 @@ function drawAll() {
         ctx.fillRect(yAxisX, curPy - 10, yAxisW, 20);
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'left';
         ctx.fillText(lastC.close.toFixed(dec), yAxisX + 4, curPy);
     }
 
@@ -2705,6 +2936,7 @@ function drawAll() {
         ctx.fillStyle = '#2962ff';
         ctx.fillRect(yAxisX, curY - 10, yAxisW, 20);
         ctx.fillStyle = '#fff';
+        ctx.textAlign = 'left';
         ctx.fillText(yToP(curY).toFixed(dec), yAxisX + 4, curY);
     }
 
@@ -2850,12 +3082,18 @@ function drawAll() {
 }
 
 setInterval(fetchData, 1500);
+setInterval(fetchSmtPeer, 4500);
 fetchData();
+fetchSmtPeer();
 requestAnimationFrame(drawLoop);
 </script>
 </body>
 </html>"""
 
+
+@app.route("/hello")
+def hello():
+    return "SA Footprint Engine OK"
 
 @app.route("/hello")
 def hello():
