@@ -312,7 +312,7 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
     level["delta"] = level["buy"] - level["sell"]
 
 def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty, status_str):
-    """Stamps Bid-Pull and Ask-Pull consistently across all timeframes within 30 steps of live price."""
+    """Stamps Resting Bid-Pull and Ask-Pull across all timeframes within active spoofing zone."""
     step = PRICE_STEP.get(symbol, 1.0)
     try:
         p_float = float(price_str)
@@ -320,12 +320,11 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
         return
     bucket_price = round_price_to_step(p_float, step)
     key = str(bucket_price)
-    max_distance = step * 30
+    max_distance = step * 40  # Captures resting spoofs up to 40 steps away from live price
 
     with lock:
-        live_px = last_trade.get(symbol, {}).get("price") or bucket_price
-        # Filter relative to live price so 1m, 5m, 15m, 1h all record the exact same active zone!
-        if abs(bucket_price - float(live_px)) > max_distance:
+        live_px = last_trade.get(symbol, {}).get("price")
+        if live_px is not None and abs(bucket_price - float(live_px)) > max_distance:
             return
 
         for tf in TIMEFRAMES.keys():
@@ -350,7 +349,7 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
                 if pulled_qty > 0.0:
                     p_val = float(pulled_qty)
                     level["pulled_qty"] = round(float(level.get("pulled_qty", 0.0)) + p_val, 4)
-                    if side == "bid":
+                    if str(side).lower() == "bid":
                         level["bid_pulled"] = round(float(level.get("bid_pulled", 0.0)) + p_val, 4)
                     else:
                         level["ask_pulled"] = round(float(level.get("ask_pulled", 0.0)) + p_val, 4)
@@ -1416,7 +1415,7 @@ def home():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SA Institutional Footprint & Macro Decision Engine V4.2</title>
+<title>SA Institutional Footprint & Macro Decision Engine V4.3</title>
 <style>
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
     html, body {
@@ -1494,7 +1493,7 @@ def home():
         border: 1px solid #2c3347;
         background: #161b26;
     }
-    .brand { color: #00e5ff; font-weight: bold; margin-right: 4px; font-size: 12px; flex-shrink: 0; }
+    .brand { color: #00e676; font-weight: bold; margin-right: 4px; font-size: 12px; flex-shrink: 0; }
     select, .btn {
         background: #1a2030;
         color: #d1d4dc;
@@ -1567,7 +1566,7 @@ def home():
 <body>
 
 <div class="topbar">
-    <span class="brand">⚡ SA V4.2</span>
+    <span class="brand">⚡ SA V4.3</span>
     <select id="symSel" onchange="setSym(this.value)">
         <option value="BTCUSDT" selected>BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
@@ -1623,9 +1622,9 @@ def home():
         <span style="color:#8b93a7;">FLOW:</span>
         <span id="bmAvg" style="color:#d1d4dc;">Avg:--</span>
         <span style="color:#444;">|</span>
-        <span id="bmHeavy" style="color:#ffeb3b;font-weight:bold;">HeavyC:>--</span>
+        <span id="bmHeavy" style="color:#ffeb3b;font-weight:bold;">HeavyL:>--</span>
         <span style="color:#444;">|</span>
-        <span id="bmLvl" style="color:#00e5ff;font-weight:bold;">HeavyL:>--</span>
+        <span id="bmLvl" style="color:#00e5ff;font-weight:bold;">RestBook:--</span>
         <span style="color:#444;">|</span>
         <span id="bmCur" style="color:#fff;">Cur:--</span>
     </div>
@@ -1646,34 +1645,28 @@ def home():
 <!-- BUILT-IN COMPLETE MASTER RULEBOOK POPUP -->
 <div id="ruleModal">
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #00e5ff; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
-        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT V4.2 — MASTER EXECUTION RULEBOOK</b>
+        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT V4.3 — MASTER EXECUTION RULEBOOK</b>
         <button class="btn" onclick="toggleRules()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
     </div>
 
     <div class="rule-sec">
-        <h4>1. 65%+ HEAVY & 35%+ NORMAL CLUSTER ORDERFLOW CRITERIA</h4>
-        • <b>Dynamic Timeframe Scaling:</b> Jab tu <code>1m</code> se <code>15m</code> ya <code>1h</code> par shift karta hai, toh <code>HeavyL</code> us timeframe ke average orderflow ke hisab se automatic adjust hota hai[cite: 6].<br>
-        • <b style="color:#00e5ff;">H-B.ABS (&ge;65%) [Heavy Bid Absorption]:</b> Sirf tab chhapega jab: (1) Sell Volume <code>&ge; HeavyL * 0.60</code> ho, (2) Sell dominance us level par <b>&ge; 65%</b> ho, AUR (3) <b>Candle us level ke UPAR hold/close kare</b>.<br>
-        • <b style="color:#ff9100;">H-A.ABS (&ge;65%) [Heavy Ask Absorption]:</b> Sirf tab chhapega jab: (1) Buy Volume <code>&ge; HeavyL * 0.60</code> ho, (2) Buy dominance us level par <b>&ge; 65%</b> ho, AUR (3) <b>Candle us level ke NEECHE hold/close kare</b>.<br>
-        • <b style="color:#ff4081;">H-BP (&ge;65%)</b> & <b style="color:#e040fb;">H-AP (&ge;65%) [Heavy Bid/Ask Pulled]:</b> Sirf tab chhapega jab pulled ratio <b>&ge; 65%</b> ho. 35% se 64% wale pulls <code>bp/ap</code> (Cluster Normal) ke roop mein dikhenge, aur 35% se neeche ka kachra filter out ho jata hai.<br>
-        • <b>Cluster Liquidity:</b> Orders multiple levels par spread hote hain (jaise 80000, 80050, 80100), isliye normal aur heavy dono levels milkar candle pill mein cumulative calculation dete hain.
-    </div>
-
-    <div class="rule-sec">
-        <h4>2. TOP MACRO DECISION ENGINE (9-Factor Multi-Candle Institutional Matrix)</h4>
-        Top Macro Bar pichli 20 candles ke <b>9 Institutional Parameters</b> ko jod kar final market bias deta hai: POC Migration, CVD Divergence, True 65%+ Absorption, 65%+ Net Pulled Spoofs, DOM Depth, Whale Lots, Baap-FVG Count, SMT Divergence, aur nPOC/UNF Magnet Gravity.
+        <h4>1. LIVE RESTING BOOK + ACTIVE ORDERFLOW HYBRID FILTER (V4.3)</h4>
+        • <b>Why Hybrid Benchmark (`HeavyL` + `RestBook`):</b> Resting Pulls (Spoofs) aur Passive Absorption ka taluk <b>Live Orderbook Resting Depth (`RestBook`)</b> aur <b>Active Executed Flow (`HeavyL`)</b> dono se hota hai. Isliye V4.3 dono ko combine karke Normal Liquidity vs Institutional Activity ko अलग karta hai.<br>
+        • <b style="color:#00e5ff;">H-B.ABS (&ge;65%) [Institutional Bid Absorption]:</b> Retail ne bhari Market Sell mara (&ge;65% dominance), par Institution ke Resting Limit Bids ne sab absorb kar liya aur <b>Price us level ke UPAR hold/bounce kar gaya</b>.<br>
+        • <b style="color:#ff9100;">H-A.ABS (&ge;65%) [Institutional Ask Absorption]:</b> Retail ne bhari Market Buy mara (&ge;65% dominance), par Institution ke Resting Limit Asks ne sab absorb kar liya aur <b>Price us level ke NEECHE hold/reject ho gaya</b>.<br>
+        • <b style="color:#ff4081;">H-BP (&ge;65%)</b> & <b style="color:#e040fb;">H-AP (&ge;65%) [Heavy Spoof Pulled]:</b> Institution ne Retail ko dikhane ke liye normal resting depth se badi wall lagayi aur hit hone se pehle <b>&ge; 65% pull (cancel)</b> kar li!<br>
+        • <b>Cluster Pulls & Absorptions (bp / ap / b-abs / a-abs):</b> 30% se 64% wale pulls/absorptions जो multi-level clusters (e.g., 80000, 80050, 80100) par hote hain.
     </div>
 
     <div class="rule-sec" style="border-color:#ffd700;">
-        <h4 style="color:#ffd700;">3. V4 STEALTH WEAPONS (Whale Lots, Stacked Imb Bracket, nPOC/UNF Magnets & SMT)</h4>
-        • <b style="color:#ffd700;">◆ Gold Diamond (Whale Lot Size Detector):</b> Bade volume ke sath kam trades (Big Average Trade Size &gt;= 2.0x BaseLot) hone par <code>◆</code> chhapta hai.<br>
-        • <b style="color:#00e5ff;">Stacked Imbalance Neon Bracket:</b> Lagatar 2-3+ levels par 240%+ Imbalance aane par candle ke left kinare par bracket banta hai, aur FVG hone par Pill mein ⚡BAAP-FVG chhapta hai.<br>
-        • <b style="color:#ffeb3b;">◀ nPOC</b> & <b style="color:#e040fb;">◀ UNF (Y-Axis Price Scale Laser Magnets):</b> Untouched POC aur Unfinished High/Low magnets jo touch hote hi automatic mit-jate hain.
+        <h4 style="color:#ffd700;">2. TRUE WHALE BLOCK DETECTOR (◆ Gold Diamond — Anti-Retail Fragmentation)</h4>
+        • <b style="color:#ffd700;">◆ Gold Diamond Rule:</b> Agar 24 BTC 111 chote trades me execute hua hai, toh woh retail/HFT bots hain, Whale nahi! <b style="color:#ffd700;">◆ Whale</b> sirf tab chhapega jab: (1) Level Volume heavy ho, AUR (2) <b>Average Lot Size &ge; 4.2x BaseLot</b> ho (High volume in very few concentrated institutional trades!).
     </div>
 
     <div class="rule-sec">
-        <h4>4. THE 4-LINE FLOATING PILL (V4.2 Upgraded Candle Decision Matrix)</h4>
-        • <b>Line 1 (Δ | V | RVOL x)</b> | <b>Line 2 (CVD | B vs S)</b> | <b>Line 3 (Mechanism + FVG + RVOL)</b> | <b>Line 4 (V4.2 Final Candle Verdict):</b> <b style="color:#00e676;">◆🐳 WHALE BULL ABS</b>, <b style="color:#ff5252;">◆🐳 WHALE BEAR ABS</b>, ya <b style="color:#ffab00;">🐑 RETAIL FOMO TRAP</b>.
+        <h4>3. TOP MACRO DECISION ENGINE & 4-LINE CANDLE PILL</h4>
+        • <b>Top Macro Bar:</b> 9 Institutional factors (POC Migration, CVD Divergence, True 65%+ Floors/Caps, Resting Spoof Pulls, Whale Lots, Baap-FVG, SMT, aur nPOC/UNF Magnets) ka निचोड़.<br>
+        • <b>Candle Pill:</b> Line 3 & 4 me clear institutional mechanism (<b style="color:#00e5ff;">🐳LIM-BUY ACCUM</b>, <b style="color:#ff9100;">🐳LIM-SELL DUMP</b>, <b style="color:#00e676;">🔥MKT IGNITION</b>) aur final winner batata hai.
     </div>
 </div>
 
@@ -2069,7 +2062,7 @@ function groupFootprint(fpRaw, low, high, effStep, closePx) {
     const map = new Map();
     const arr = Array.isArray(fpRaw) ? fpRaw : Object.values(fpRaw || {});
     arr.forEach(l => {
-        if (l.price < low - effStep * 2 || l.price > high + effStep * 2) return;
+        if (l.price < low - effStep * 6 || l.price > high + effStep * 6) return;
         const bucket = Math.floor(l.price / effStep + 1e-9) * effStep;
         const key = bucket.toFixed(6);
         let g = map.get(key);
@@ -2095,7 +2088,33 @@ function groupFootprint(fpRaw, low, high, effStep, closePx) {
     return Array.from(map.values()).sort((a, b) => a.price - b.price);
 }
 
-function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls, heavyLvlBenchmark) {
+// Compute Live Resting Orderbook Benchmark per Bucket (For Spoof & Resting Wall Calibration!)
+function getLiveRestingBenchmark(effStep, lastClose) {
+    const bidsArr = obData.bids || [];
+    const asksArr = obData.asks || [];
+    if (bidsArr.length === 0 && asksArr.length === 0) return 0;
+
+    const bucketMap = new Map();
+    const maxDist = effStep * 25;
+    bidsArr.forEach(b => {
+        if (Math.abs(b.price - lastClose) <= maxDist) {
+            const k = Math.floor(b.price / effStep + 1e-9);
+            bucketMap.set('B' + k, (bucketMap.get('B' + k) || 0) + b.quantity);
+        }
+    });
+    asksArr.forEach(a => {
+        if (Math.abs(a.price - lastClose) <= maxDist) {
+            const k = Math.floor(a.price / effStep + 1e-9);
+            bucketMap.set('A' + k, (bucketMap.get('A' + k) || 0) + a.quantity);
+        }
+    });
+    const vals = Array.from(bucketMap.values()).filter(v => v > 0);
+    if (vals.length === 0) return 0;
+    const sum = vals.reduce((a, b) => a + b, 0);
+    return sum / vals.length;
+}
+
+function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls, heavyLvlBenchmark, liveRestBench) {
     if (!candles || candles.length < 3) return;
 
     const sample = candles.slice(-20);
@@ -2104,8 +2123,8 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
     const curRvol = (last.volume || 0) / avgFlowVol;
 
     document.getElementById('bmAvg').innerText = `Avg:${fmt(avgFlowVol)}`;
-    document.getElementById('bmHeavy').innerText = `HeavyC:>${fmt(avgFlowVol * 1.35)}`;
-    document.getElementById('bmLvl').innerText = `HeavyL:>${fmt(heavyLvlBenchmark)}`;
+    document.getElementById('bmHeavy').innerText = `HeavyL:>${fmt(heavyLvlBenchmark)}`;
+    document.getElementById('bmLvl').innerText = `RestBook:${fmt(liveRestBench)}`;
     document.getElementById('bmCur').innerText = `Cur:${fmt(last.volume)}(${curRvol.toFixed(1)}x)`;
     document.getElementById('bmCur').style.color = curRvol >= 1.3 ? '#00e676' : '#d1d4dc';
 
@@ -2117,6 +2136,8 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
     let macroBidPulled = 0, macroAskPulled = 0;
     let whaleBuyLots = 0, whaleSellLots = 0;
     let bullBaapFvgs = 0, bearBaapFvgs = 0;
+
+    const hybridPullBench = liveRestBench > 0 ? Math.min(heavyLvlBenchmark * 0.45, liveRestBench * 0.85) : heavyLvlBenchmark * 0.40;
 
     sample.forEach((c, idx) => {
         if (c.high > macroHigh) macroHigh = c.high;
@@ -2133,6 +2154,10 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
 
         const cRvol = (c.volume || 0) / avgFlowVol;
         const fpGrouped = groupFootprint(c.footprint, c.low, c.high, effStep, c.close);
+        const activeCells = fpGrouped.filter(x => x.volume > 0);
+        const cAvgV = activeCells.length > 0 ? (c.volume || 1) / activeCells.length : 1;
+        const cHeavyCut = Math.max(cAvgV * 1.35, heavyLvlBenchmark * 0.50);
+
         let bStack = 0, sStack = 0, maxBS = 0, maxSS = 0, cWhales = 0;
 
         fpGrouped.forEach(l => {
@@ -2143,13 +2168,15 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
             const bAbsPct = tv > 0 ? (sv / tv) * 100 : 0;
             const aAbsPct = tv > 0 ? (bv / tv) * 100 : 0;
 
-            if (bp >= heavyLvlBenchmark * 0.60 && bPullPct >= 65) macroBidPulled += bp;
-            if (ap >= heavyLvlBenchmark * 0.60 && aPullPct >= 65) macroAskPulled += ap;
-            if (sv >= heavyLvlBenchmark * 0.60 && bAbsPct >= 65 && c.close >= l.price) macroBidAbsorbs++;
-            if (bv >= heavyLvlBenchmark * 0.60 && aAbsPct >= 65 && c.close <= l.price) macroAskAbsorbs++;
+            if (bp >= hybridPullBench * 0.4 && bPullPct >= 35) macroBidPulled += bp;
+            if (ap >= hybridPullBench * 0.4 && aPullPct >= 35) macroAskPulled += ap;
+            if (sv >= cHeavyCut && bAbsPct >= 65 && c.close >= l.price) macroBidAbsorbs++;
+            if (bv >= cHeavyCut && aAbsPct >= 65 && c.close <= l.price) macroAskAbsorbs++;
 
+            // STRICT WHALE BLOCK FILTER: High Volume + Lot Size >= 4.2x BaseLot!
             const lt = Math.max(l.trades || 1, 1);
-            if (tv >= heavyLvlBenchmark * 0.55 && (tv / lt) >= baselineLotSize * 2.0) {
+            const lvlLot = tv / lt;
+            if (tv >= Math.max(cAvgV * 1.25, heavyLvlBenchmark * 0.55) && lvlLot >= baselineLotSize * 4.2) {
                 cWhales++;
                 if (bv > sv) whaleBuyLots++;
                 else if (sv > bv) {
@@ -2158,17 +2185,17 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
                 }
             }
 
-            if (bv > sv * 2.4 && bv >= heavyLvlBenchmark * 0.30) {
+            if (bv > sv * 2.4 && bv >= cAvgV * 0.45) {
                 bStack++; sStack = 0; if (bStack > maxBS) maxBS = bStack;
-            } else if (sv > bv * 2.4 && sv >= heavyLvlBenchmark * 0.30) {
+            } else if (sv > bv * 2.4 && sv >= cAvgV * 0.45) {
                 sStack++; bStack = 0; if (sStack > maxSS) maxSS = sStack;
             } else { bStack = 0; sStack = 0; }
         });
 
         if (idx >= 1 && idx < sample.length - 1) {
             const pC = sample[idx - 1], nC = sample[idx + 1];
-            if (nC.low > pC.high && (maxBS >= 2 || cWhales >= 1) && cRvol >= 1.05) bullBaapFvgs++;
-            if (nC.high < pC.low && (maxSS >= 2 || cWhales >= 1) && cRvol >= 1.05) bearBaapFvgs++;
+            if (nC.low > pC.high && (maxBS >= 2 || cWhales >= 1) && cRvol >= 1.0) bullBaapFvgs++;
+            if (nC.high < pC.low && (maxSS >= 2 || cWhales >= 1) && cRvol >= 1.0) bearBaapFvgs++;
         }
     });
 
@@ -2188,7 +2215,6 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         macroNotes.push(`POC Down(${pocDownSteps}↓)`);
     }
 
-    const cvdRatio = totalVol > 0 ? (totalCvd / totalVol) * 100 : 0;
     if (totalCvd > 0 && netPriceMove > macroSpan * 0.15) {
         bullPts += 20;
         macroNotes.push(`CVD +${fmt(totalCvd)}`);
@@ -2203,10 +2229,10 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         macroNotes.push(`Whale Ask Cap(CVD +${fmt(totalCvd)} Stalled)`);
     }
 
-    if (whaleBuyLots > whaleSellLots + 2) {
+    if (whaleBuyLots > whaleSellLots + 1) {
         bullPts += 20;
         macroNotes.push(`◆Whale Lots(${whaleBuyLots}B/${whaleSellLots}S)`);
-    } else if (whaleSellLots > whaleBuyLots + 2) {
+    } else if (whaleSellLots > whaleBuyLots + 1) {
         bearPts += 20;
         macroNotes.push(`◆Whale Lots(${whaleSellLots}S/${whaleBuyLots}B)`);
     }
@@ -2234,12 +2260,12 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         bearPts += 16;
         macroNotes.push(`65%+ Ask Caps(${macroAskAbsorbs})`);
     }
-    if (macroAskPulled > macroBidPulled * 1.3 && macroAskPulled > 0) {
+    if (macroAskPulled > macroBidPulled * 1.25 && macroAskPulled > 0) {
         bullPts += 12;
-        macroNotes.push(`65%+ Asks Pulled(${fmt(macroAskPulled)})`);
-    } else if (macroBidPulled > macroAskPulled * 1.3 && macroBidPulled > 0) {
+        macroNotes.push(`Asks Pulled(${fmt(macroAskPulled)})`);
+    } else if (macroBidPulled > macroAskPulled * 1.25 && macroBidPulled > 0) {
         bearPts += 12;
-        macroNotes.push(`65%+ Bids Pulled(${fmt(macroBidPulled)})`);
+        macroNotes.push(`Bids Pulled(${fmt(macroBidPulled)})`);
     }
 
     const magnetsAbove = nakedPocs.filter(p => p > last.close).length + unfinishedLvls.filter(u => u.price > last.close).length;
@@ -2325,7 +2351,6 @@ function drawAll() {
         }
     });
     const avgFlowVol = Math.max(totalHistVol / Math.max(1, histCount), 0.001);
-    const avgFlowRange = Math.max(totalHistRange / Math.max(1, histCount), rawStep);
     const baselineLotSize = Math.max(totalHistVol / Math.max(1, totalHistTrades), 0.0001);
 
     const nakedPocs = [];
@@ -2398,17 +2423,24 @@ function drawAll() {
     }
 
     const effStep = rawStep * mult;
+    const lastC = candles[candles.length - 1];
 
+    // 1. Rolling Executed Cell Flow + 2. Live Resting Orderbook Depth per Bucket!
     let totalVisBuckets = 0, totalVisVol = 0;
     vis.forEach(({ c }) => {
-        const gFp = groupFootprint(c.footprint, c.low, c.high, effStep, c.close);
+        const gFp = groupFootprint(c.footprint, c.low, c.high, effStep, c.close).filter(x => x.volume > 0);
         totalVisBuckets += Math.max(gFp.length, 1);
         totalVisVol += (c.volume || 0);
     });
     const tfAvgCellVol = Math.max(totalVisVol / Math.max(totalVisBuckets, 1), 0.001);
-    const heavyLvlBenchmark = tfAvgCellVol * 1.80;
+    const liveRestBench = getLiveRestingBenchmark(effStep, lastC.close);
 
-    updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls, heavyLvlBenchmark);
+    // Hybrid Benchmark combines active execution flow & live resting orderbook liquidity!
+    const heavyLvlBenchmark = liveRestBench > 0
+        ? Math.max(tfAvgCellVol * 1.45, Math.min(tfAvgCellVol * 2.2, liveRestBench * 1.25))
+        : tfAvgCellVol * 1.65;
+
+    updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls, heavyLvlBenchmark, liveRestBench);
 
     const pToY = p => chartH - ((p - minP) / pSpan) * chartH;
     const yToP = y => minP + ((chartH - y) / chartH) * pSpan;
@@ -2456,20 +2488,31 @@ function drawAll() {
         const spineX = cx;
 
         const fp = groupFootprint(c.footprint, c.low, c.high, effStep, c.close);
+        const tradedCells = fp.filter(x => x.volume > 0);
 
         let maxV = 1, sumV = 0;
         let pocBucketPrice = c.poc;
         let maxBucketV = -1;
 
-        fp.forEach(l => {
+        tradedCells.forEach(l => {
             if (l.volume > maxV) maxV = l.volume;
             if (l.volume > maxBucketV) { maxBucketV = l.volume; pocBucketPrice = l.price; }
             sumV += l.volume;
         });
 
-        const avgV = fp.length > 0 ? sumV / fp.length : 1;
-        const effectiveHeavyCut = Math.max(heavyLvlBenchmark * 0.60, avgV * 1.45);
-        const effectiveNormCut = Math.max(heavyLvlBenchmark * 0.25, avgV * 0.65);
+        const avgV = tradedCells.length > 0 ? sumV / tradedCells.length : tfAvgCellVol;
+
+        // =========================================================================
+        // V4.3 HYBRID RESTING + EXECUTED BENCHMARKS (100% SYMBOL-INDEPENDENT)
+        // =========================================================================
+        // 1. Absorption Cut: Retail market orders hitting Institutional passive limit walls
+        const effectiveHeavyAbsCut = Math.max(avgV * 1.40, heavyLvlBenchmark * 0.65);
+        const effectiveNormAbsCut = Math.max(avgV * 0.75, heavyLvlBenchmark * 0.30);
+
+        // 2. Resting Pull Cut: Calibrated against Live Resting Book (Spoof Wall vs Regular Resting Depth)
+        const baseRestRef = liveRestBench > 0 ? Math.min(avgV, liveRestBench) : avgV;
+        const effectiveHeavyPullQty = Math.max(baseRestRef * 0.65, heavyLvlBenchmark * 0.35);
+        const effectiveNormPullQty = Math.max(baseRestRef * 0.20, baselineLotSize * 1.5);
 
         if (c.vah != null && c.val != null) {
             const yVah = pToY(c.vah + effStep * 0.5);
@@ -2535,6 +2578,7 @@ function drawAll() {
         let topSummary = null;
         let botSummary = null;
         let cBidPullSum = 0, cAskPullSum = 0;
+        const cMidPrice = (c.high + c.low) * 0.5;
 
         fp.forEach(l => {
             const py = pToY(l.price + effStep * 0.5);
@@ -2544,12 +2588,14 @@ function drawAll() {
             const trd = Math.max(l.trades || 1, 1);
             const lvlLotSize = totV / trd;
             const lotRatio = lvlLotSize / baselineLotSize;
-            const isWhaleLot = totV >= avgV * 0.85 && lotRatio >= 2.0;
+
+            // STRICT WHALE BLOCK FILTER: High Volume + Lot Size >= 4.2x BaseLot (Eliminates 24 BTC in 111 trades!)
+            const isWhaleLot = totV >= Math.max(avgV * 1.15, heavyLvlBenchmark * 0.55) && lotRatio >= 4.2;
 
             if (isWhaleLot) {
                 if (buyV > sellV) whaleBuyCount++;
                 else if (sellV > buyV) {
-                    if (c.close >= c.open && l.price <= (c.high + c.low) * 0.5) whaleBuyCount++;
+                    if (c.close >= c.open && l.price <= cMidPrice) whaleBuyCount++;
                     else whaleSellCount++;
                 }
             }
@@ -2564,38 +2610,40 @@ function drawAll() {
             const bAbsPct = totV > 0 ? Math.round((sellV / totV) * 100) : 0;
             const aAbsPct = totV > 0 ? Math.round((buyV / totV) * 100) : 0;
 
-            // =========================================================================
-            // STRICT V4.2 CLUSTER & HEAVY THRESHOLDS (65%+ HEAVY, 35%+ NORMAL CLUSTER)
-            // =========================================================================
+            // 1. BID ABSORPTION: Heavy >= 65% | Cluster >= 50% (Must hold price >= level & be in lower/support zone!)
+            const inBidZone = l.price <= Math.max(cMidPrice + effStep, Math.min(c.open, c.close) + effStep * 2);
             let bidAbsType = null;
-            if (sellV >= effectiveHeavyCut && bAbsPct >= 65 && c.close >= l.price) {
+            if (sellV >= effectiveHeavyAbsCut && bAbsPct >= 65 && c.close >= l.price && inBidZone) {
                 bidAbsType = 'heavy';
                 if (!botSummary || sellV > botSummary.val) botSummary = { type: 'ABS', val: sellV, pct: bAbsPct };
-            } else if (sellV >= effectiveNormCut && bAbsPct >= 45 && c.close >= l.price) {
+            } else if (sellV >= effectiveNormAbsCut && bAbsPct >= 50 && c.close >= l.price && inBidZone) {
                 bidAbsType = 'norm';
-                if (!botSummary && sellV >= effectiveHeavyCut * 0.6) botSummary = { type: 'ABS', val: sellV, pct: bAbsPct };
+                if (!botSummary && sellV >= effectiveHeavyAbsCut * 0.70) botSummary = { type: 'ABS', val: sellV, pct: bAbsPct };
             }
 
+            // 2. ASK ABSORPTION: Heavy >= 65% | Cluster >= 50% (Must hold price <= level & be in upper/supply zone!)
+            const inAskZone = l.price >= Math.min(cMidPrice - effStep, Math.max(c.open, c.close) - effStep * 2);
             let askAbsType = null;
-            if (buyV >= effectiveHeavyCut && aAbsPct >= 65 && c.close <= l.price) {
+            if (buyV >= effectiveHeavyAbsCut && aAbsPct >= 65 && c.close <= l.price && inAskZone) {
                 askAbsType = 'heavy';
                 if (!topSummary || buyV > topSummary.val) topSummary = { type: 'ABS', val: buyV, pct: aAbsPct };
-            } else if (buyV >= effectiveNormCut && aAbsPct >= 45 && c.close <= l.price) {
+            } else if (buyV >= effectiveNormAbsCut && aAbsPct >= 50 && c.close <= l.price && inAskZone) {
                 askAbsType = 'norm';
-                if (!topSummary && buyV >= effectiveHeavyCut * 0.6) topSummary = { type: 'ABS', val: buyV, pct: aAbsPct };
+                if (!topSummary && buyV >= effectiveHeavyAbsCut * 0.70) topSummary = { type: 'ABS', val: buyV, pct: aAbsPct };
             }
 
+            // 3. RESTING BID & ASK PULLED (SPOOFING): Heavy STRICTLY >= 65% | Cluster 30% to 64%
             let bidPullType = null;
-            if (bPull >= effectiveHeavyCut * 0.55 && bPullPct >= 65) {
+            if (bPull >= effectiveHeavyPullQty && bPullPct >= 65) {
                 bidPullType = 'heavy';
-            } else if (bPull >= effectiveNormCut * 0.35 && bPullPct >= 35) {
+            } else if (bPull >= effectiveNormPullQty && bPullPct >= 30) {
                 bidPullType = 'norm';
             }
 
             let askPullType = null;
-            if (aPull >= effectiveHeavyCut * 0.55 && aPullPct >= 65) {
+            if (aPull >= effectiveHeavyPullQty && aPullPct >= 65) {
                 askPullType = 'heavy';
-            } else if (aPull >= effectiveNormCut * 0.35 && aPullPct >= 35) {
+            } else if (aPull >= effectiveNormPullQty && aPullPct >= 30) {
                 askPullType = 'norm';
             }
 
@@ -2657,32 +2705,35 @@ function drawAll() {
                 const whaleSellMark = (proViewMode && isWhaleLot && sellV >= buyV) ? '◆' : '';
                 const whaleBuyMark = (proViewMode && isWhaleLot && buyV > sellV) ? '◆' : '';
 
-                ctx.font = (sellImb || isPoc || whaleSellMark) ? 'bold 10px monospace' : '10px monospace';
-                ctx.fillStyle = whaleSellMark ? '#ffd700' : (sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
-                ctx.textAlign = 'right';
-                ctx.fillText(`${whaleSellMark}${fmt(sellV)}`, spineX - 3, py);
+                if (totV > 0 || bidPullType || askPullType) {
+                    ctx.font = (sellImb || isPoc || whaleSellMark) ? 'bold 10px monospace' : '10px monospace';
+                    ctx.fillStyle = whaleSellMark ? '#ffd700' : (sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
+                    ctx.textAlign = 'right';
+                    ctx.fillText(`${whaleSellMark}${fmt(sellV)}`, spineX - 3, py);
 
-                ctx.font = (buyImb || isPoc || whaleBuyMark) ? 'bold 10px monospace' : '10px monospace';
-                ctx.fillStyle = whaleBuyMark ? '#ffd700' : (buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
-                ctx.textAlign = 'left';
-                ctx.fillText(`${fmt(buyV)}${whaleBuyMark}`, spineX + 3, py);
+                    ctx.font = (buyImb || isPoc || whaleBuyMark) ? 'bold 10px monospace' : '10px monospace';
+                    ctx.fillStyle = whaleBuyMark ? '#ffd700' : (buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
+                    ctx.textAlign = 'left';
+                    ctx.fillText(`${fmt(buyV)}${whaleBuyMark}`, spineX + 3, py);
+                }
 
-                if (proViewMode && candleW >= 115) {
+                // COMPACT ANTI-OVERLAP CELL TAGS (Leaves clean space around central numbers!)
+                if (proViewMode && candleW >= 125) {
                     let leftTag = '';
                     let leftCol = '#fff';
-                    if (bidAbsType === 'heavy') { leftTag = `H-B.ABS(${bAbsPct}%)`; leftCol = '#00e5ff'; }
-                    else if (bidAbsType === 'norm') { leftTag = `b-abs(${bAbsPct}%)`; leftCol = '#84ffff'; }
+                    if (bidAbsType === 'heavy') { leftTag = `H-B:${bAbsPct}%`; leftCol = '#00e5ff'; }
+                    else if (bidAbsType === 'norm' && candleW >= 155) { leftTag = `b:${bAbsPct}%`; leftCol = '#84ffff'; }
 
                     if (bidPullType === 'heavy') {
                         leftTag = `H-BP:${fmt(bPull)}(${bPullPct}%)`;
                         leftCol = '#ff4081';
-                    } else if (bidPullType === 'norm' && !leftTag) {
+                    } else if (bidPullType === 'norm' && !leftTag && candleW >= 150) {
                         leftTag = `bp:${fmt(bPull)}(${bPullPct}%)`;
                         leftCol = '#ff80ab';
                     }
 
                     if (leftTag) {
-                        ctx.font = (bidAbsType === 'heavy' || bidPullType === 'heavy') ? 'bold 9px monospace' : '9px monospace';
+                        ctx.font = (bidAbsType === 'heavy' || bidPullType === 'heavy') ? 'bold 8.5px monospace' : '8.5px monospace';
                         ctx.fillStyle = leftCol;
                         ctx.textAlign = 'left';
                         ctx.fillText(leftTag, spineX - halfW + 2, py);
@@ -2690,13 +2741,13 @@ function drawAll() {
 
                     let rightTag = '';
                     let rightCol = '#fff';
-                    if (askAbsType === 'heavy') { rightTag = `H-A.ABS(${aAbsPct}%)`; rightCol = '#ff9100'; }
-                    else if (askAbsType === 'norm') { rightTag = `a-abs(${aAbsPct}%)`; rightCol = '#ffd180'; }
+                    if (askAbsType === 'heavy') { rightTag = `H-A:${aAbsPct}%`; rightCol = '#ff9100'; }
+                    else if (askAbsType === 'norm' && candleW >= 155) { rightTag = `a:${aAbsPct}%`; rightCol = '#ffd180'; }
 
                     if (askPullType === 'heavy') {
                         rightTag = `H-AP:${fmt(aPull)}(${aPullPct}%)`;
                         rightCol = '#e040fb';
-                    } else if (askPullType === 'norm' && !rightTag) {
+                    } else if (askPullType === 'norm' && !rightTag && candleW >= 150) {
                         rightTag = `ap:${fmt(aPull)}(${aPullPct}%)`;
                         rightCol = '#ea80fc';
                     }
@@ -2707,7 +2758,7 @@ function drawAll() {
                     }
 
                     if (rightTag) {
-                        ctx.font = (askAbsType === 'heavy' || askPullType === 'heavy' || isPoc) ? 'bold 9px monospace' : '9px monospace';
+                        ctx.font = (askAbsType === 'heavy' || askPullType === 'heavy' || isPoc) ? 'bold 8.5px monospace' : '8.5px monospace';
                         ctx.fillStyle = rightCol;
                         ctx.textAlign = 'right';
                         ctx.fillText(rightTag, boxR - 2, py);
@@ -2726,11 +2777,11 @@ function drawAll() {
             const bullFvg = nextC.low > prevC.high;
             const bearFvg = nextC.high < prevC.low;
             if (bullFvg) {
-                const isBaap = (maxBuyStack >= 2 || totalWhalesInCandle >= 1) && (c.volume >= avgFlowVol * 1.05);
+                const isBaap = (maxBuyStack >= 2 || totalWhalesInCandle >= 1) && (c.volume >= avgFlowVol * 0.95);
                 fvgBadge = isBaap ? ' ⚡BAAP-FVG' : ' ⚠️BETA-FVG';
                 fvgScoreBoost = isBaap ? 18 : -8;
             } else if (bearFvg) {
-                const isBaap = (maxSellStack >= 2 || totalWhalesInCandle >= 1) && (c.volume >= avgFlowVol * 1.05);
+                const isBaap = (maxSellStack >= 2 || totalWhalesInCandle >= 1) && (c.volume >= avgFlowVol * 0.95);
                 fvgBadge = isBaap ? ' ⚡BAAP-FVG' : ' ⚠️BETA-FVG';
                 fvgScoreBoost = isBaap ? -18 : 8;
             }
@@ -2766,7 +2817,7 @@ function drawAll() {
         let decisionCol = '#9ba2b0';
         let isHighConviction = false;
 
-        if (rvol < 0.70) {
+        if (rvol < 0.65 && totalWhalesInCandle === 0) {
             flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x)${fvgBadge}`;
             candleDecision = `⚪ SKIP (RETAIL NOISE)`;
             verdictCol = '#6c738a';
@@ -2780,8 +2831,8 @@ function drawAll() {
             if (mktSellPct >= 58 && c.close < c.open && closePos <= 0.4) cBear += 30;
             if (botSummary && closePos >= 0.45) cBull += 24;
             if (topSummary && closePos <= 0.55) cBear += 24;
-            if (cAskPullSum > cBidPullSum * 1.4) cBull += 14;
-            if (cBidPullSum > cAskPullSum * 1.4) cBear += 14;
+            if (cAskPullSum > cBidPullSum * 1.35) cBull += 14;
+            if (cBidPullSum > cAskPullSum * 1.35) cBear += 14;
             if (pocBucketPrice != null) {
                 if (c.close > pocBucketPrice) cBull += 14;
                 else if (c.close < pocBucketPrice) cBear += 14;
@@ -2801,19 +2852,19 @@ function drawAll() {
             if (mktBuyPct >= 58 && (c.close < c.open || upperWick > bodySize * 0.8)) {
                 flowVerdict = `🐳LIM-SELL DUMP${fvgBadge}`;
                 verdictCol = '#ff9100';
-                isHighConviction = rvol >= 1.15;
+                isHighConviction = rvol >= 1.1;
             } else if (mktSellPct >= 58 && (c.close > c.open || lowerWick > bodySize * 0.8)) {
                 flowVerdict = `🐳LIM-BUY ACCUM${fvgBadge}`;
                 verdictCol = '#00e5ff';
-                isHighConviction = rvol >= 1.15;
+                isHighConviction = rvol >= 1.1;
             } else if (mktSellPct >= 60 && c.close < c.open && bodySize >= cRange * 0.5) {
                 flowVerdict = `🔥MKT SELL DUMP${fvgBadge}`;
                 verdictCol = '#ff1744';
-                isHighConviction = rvol >= 1.15;
+                isHighConviction = rvol >= 1.1;
             } else if (mktBuyPct >= 60 && c.close > c.open && bodySize >= cRange * 0.5) {
                 flowVerdict = `🔥MKT IGNITION${fvgBadge}`;
                 verdictCol = '#00e676';
-                isHighConviction = rvol >= 1.15;
+                isHighConviction = rvol >= 1.1;
             } else {
                 const magTxt = sweptPriorPoc ? ' 🎯MAG-SWEPT' : '';
                 flowVerdict = `MB:${mktBuyPct}%|MS:${mktSellPct}%${fvgBadge || magTxt}`;
@@ -2835,7 +2886,7 @@ function drawAll() {
                     candleDecision = `${whalePrefix}🟢 BUYERS WIN (${cPct}%)`;
                 }
                 decisionCol = '#00e676';
-                if (rvol >= 1.15 || totalWhalesInCandle > 0) isHighConviction = true;
+                if (rvol >= 1.1 || totalWhalesInCandle > 0) isHighConviction = true;
             } else if (cNet <= -20) {
                 const cPct = Math.min(97, Math.round(52 + (Math.abs(cNet) / 110) * 45));
                 if (c.delta > 0 && c.close <= c.open) {
@@ -2846,7 +2897,7 @@ function drawAll() {
                     candleDecision = `${whalePrefix}🔴 SELLERS WIN (${cPct}%)`;
                 }
                 decisionCol = '#ff5252';
-                if (rvol >= 1.15 || totalWhalesInCandle > 0) isHighConviction = true;
+                if (rvol >= 1.1 || totalWhalesInCandle > 0) isHighConviction = true;
             } else {
                 candleDecision = `${whalePrefix}⚖️ TWO-WAY FIGHT`;
                 decisionCol = '#ffca28';
@@ -2854,7 +2905,7 @@ function drawAll() {
         }
 
         let botYBanner = yL + 16;
-        if (proViewMode && candleW >= 70 && rvol >= 0.85) {
+        if (proViewMode && candleW >= 70 && rvol >= 0.80) {
             ctx.font = 'bold 9px monospace';
             ctx.textAlign = 'center';
 
@@ -2934,7 +2985,7 @@ function drawAll() {
         }
     });
 
-    const hudW = Math.min(chartW - 12, 440);
+    const hudW = Math.min(chartW - 12, 460);
     ctx.fillStyle = 'rgba(17, 21, 31, 0.90)';
     ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
     ctx.strokeStyle = '#2962ff';
@@ -2942,7 +2993,7 @@ function drawAll() {
     ctx.fillStyle = '#00e5ff';
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | HeavyL:>${fmt(heavyLvlBenchmark)} | BaseLot:${fmt(baselineLotSize)}`, 12, 17);
+    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | HeavyL:>${fmt(heavyLvlBenchmark)} | RestBook:${fmt(liveRestBench)}`, 12, 17);
 
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
@@ -2951,7 +3002,7 @@ function drawAll() {
         ctx.fillStyle = '#ff80ab';
         ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%)`, 12, 47);
         ctx.fillStyle = h.isWhaleLot ? '#ffd700' : '#b0bec5';
-        const playerTag = h.isWhaleLot ? '🐋 WHALE LOT EXECUTION!' : (h.lotRatio < 0.7 ? '🐑 RETAIL CROWD' : '⚡ STANDARD FLOW');
+        const playerTag = h.isWhaleLot ? '🐋 WHALE BLOCK EXECUTION!' : (h.lotRatio < 1.2 ? '🐑 RETAIL / BOT SPLIT' : '⚡ STANDARD FLOW');
         ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 61);
     }
 
@@ -2971,8 +3022,6 @@ function drawAll() {
         const gy = (chartH / gCount) * i;
         ctx.fillText(yToP(gy).toFixed(dec), yAxisX + 4, gy);
     }
-
-    const lastC = candles[candles.length - 1];
 
     if (proViewMode) {
         nakedPocs.slice(-6).forEach(np => {
