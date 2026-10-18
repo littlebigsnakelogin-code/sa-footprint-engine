@@ -1414,22 +1414,23 @@ def home():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SA Institutional Footprint & Macro Decision Engine V4</title>
+<title>SA Institutional Footprint & Macro Decision Engine V4.1</title>
 <style>
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
-    body {
+    html, body {
         background: #090b10;
         color: #d1d4dc;
         font-family: monospace;
         overflow: hidden;
         height: 100vh;
+        height: 100dvh;
         width: 100vw;
         display: flex;
         flex-direction: column;
         touch-action: none;
     }
     .topbar {
-        min-height: 38px;
+        min-height: 36px;
         background: #11151f;
         border-bottom: 1px solid #232838;
         display: flex;
@@ -1440,10 +1441,11 @@ def home():
         overflow-x: auto;
         white-space: nowrap;
         scrollbar-width: none;
+        flex-shrink: 0;
     }
     .topbar::-webkit-scrollbar, .decision-bar::-webkit-scrollbar { display: none; }
     .decision-bar {
-        min-height: 36px;
+        min-height: 34px;
         background: #0d111a;
         border-bottom: 1px solid #232838;
         display: flex;
@@ -1454,11 +1456,12 @@ def home():
         overflow-x: auto;
         white-space: nowrap;
         scrollbar-width: none;
+        flex-shrink: 0;
     }
     .bench-box {
         background: #151a28;
         border: 1px solid #2a324b;
-        padding: 4px 7px;
+        padding: 3px 7px;
         border-radius: 3px;
         display: flex;
         gap: 6px;
@@ -1468,7 +1471,7 @@ def home():
     .smt-box {
         background: #181d2c;
         border: 1px solid #37474f;
-        padding: 4px 8px;
+        padding: 3px 8px;
         border-radius: 3px;
         font-weight: bold;
         font-size: 10px;
@@ -1478,7 +1481,7 @@ def home():
     .verdict-box {
         flex: 1;
         min-width: 300px;
-        padding: 4px 10px;
+        padding: 3px 10px;
         border-radius: 3px;
         font-weight: bold;
         font-size: 11px;
@@ -1508,7 +1511,7 @@ def home():
     .status-right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
     .live-px { font-size: 13px; font-weight: bold; padding: 2px 6px; background: #1a2030; border-radius: 3px; }
     #wrap { flex: 1; position: relative; overflow: hidden; background: #090b10; touch-action: none; }
-    canvas { display: block; cursor: crosshair; touch-action: none; }
+    canvas { display: block; touch-action: none; }
 
     .dom-slide-tab {
         position: absolute;
@@ -1562,7 +1565,7 @@ def home():
 <body>
 
 <div class="topbar">
-    <span class="brand">⚡ SA V4</span>
+    <span class="brand">⚡ SA V4.1</span>
     <select id="symSel" onchange="setSym(this.value)">
         <option value="BTCUSDT" selected>BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
@@ -1638,21 +1641,22 @@ def home():
     <div id="domSlideTab" class="dom-slide-tab" onclick="toggleDOM()" title="Slide Orderbook Open/Close">❮ DOM</div>
 </div>
 
-<!-- BUILT-IN COMPLETE MASTER RULEBOOK POPUP (UPDATED WITH V4 STEALTH WEAPONS) -->
+<!-- BUILT-IN COMPLETE MASTER RULEBOOK POPUP (UPDATED WITH V4.1 DECISION MATRIX) -->
 <div id="ruleModal">
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #00e5ff; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
-        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT V4 — MASTER EXECUTION RULEBOOK</b>
+        <b style="color:#00e5ff; font-size:14px;">⚡ SA ORDERFLOW & FOOTPRINT V4.1 — MASTER EXECUTION RULEBOOK</b>
         <button class="btn" onclick="toggleRules()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
     </div>
 
     <div class="rule-sec">
-        <h4>1. TOP MACRO BAR & BENCHMARK (Overall 20-Candle Market Context)</h4>
-        • <b>Avg / HeavyC / HeavyL:</b> <code>Avg</code> pichli 20 candles ka average volume hai. Jab kisi candle ka volume <code>HeavyC (1.35x)</code> se upar ho, tabhi usme asli institutional paisa laga hai. <code>HeavyL</code> batata hai ki ek single price cell mein kitni quantity ko Whale level maana jaye.<br>
-        • <b style="color:#00e676;">🟢 MACRO BULLISH DOMINANCE:</b> Price + POC upar shift ho rahe hain, CVD positive hai aur Bid floors defend ho rahe hain (Look for Longs).<br>
-        • <b style="color:#00e5ff;">🐳 MACRO BULL ACCUMULATION:</b> Pichli 20 candles mein net selling (Negative CVD) aayi hai, par price neeche nahi gir raha! Whales Limit Buy laga kar saara maal bhar rahe hain (Strongest Reversal Long Setup).<br>
-        • <b style="color:#ff5252;">🔴 MACRO BEARISH DOMINANCE:</b> Price + POC neeche shift ho rahe hain aur aggressive selling chal rahi hai (Look for Shorts).<br>
-        • <b style="color:#ff9100;">🐳 MACRO BEAR DISTRIBUTION:</b> Retail lagatar Market Buy maar raha hai (+CVD), par Whales Limit Sell laga kar top par cap kar rahe hain (Reversal Short Setup).<br>
-        • <b style="color:#ffca28;">🟡 MACRO SIDEWAYS ROTATIONAL CHOP:</b> Trend efficiency &lt; 16% hai. Beech mein trade mat le, sirf Range High/Low sweep hone par fade kar.
+        <h4>1. TOP MACRO DECISION ENGINE (9-Factor Multi-Candle Institutional Matrix)</h4>
+        Top Macro Bar pichli 20 candles ke <b>9 Institutional Parameters</b> ko jod kar final market bias deta hai:<br>
+        1) <b>POC Migration</b> &nbsp;2) <b>Macro CVD vs Price Divergence</b> &nbsp;3) <b>Bid/Ask Absorption Floors & Ceilings</b> &nbsp;4) <b>Net Liquidity Pulled (Spoofs)</b> &nbsp;5) <b>Live DOM Depth</b> &nbsp;6) <b style="color:#ffd700;">◆ Whale Lot Buy vs Sell Dominance</b> &nbsp;7) <b style="color:#00e5ff;">⚡ BAAP-FVG & Stacked Imbalance Count</b> &nbsp;8) <b style="color:#00e5ff;">🔗 BTC/ETH SMT Divergence</b> &nbsp;9) <b style="color:#ffeb3b;">◀ nPOC / UNF Magnet Gravity</b>.<br><br>
+        • <b style="color:#00e676;">🟢 MACRO BULLISH DOMINANCE:</b> Price + POC + Whale Lots + Stacked Imbalances sab upar ki taraf aligned hain (Look for Longs).<br>
+        • <b style="color:#00e5ff;">🐳 MACRO BULL ACCUMULATION:</b> Pichli 20 candles mein net selling (-CVD) aayi hai, par Whales ne Limit Buy + ◆ Whale Lots se saara maal absorb kar liya aur price girne nahi diya (Strongest Reversal Long Setup).<br>
+        • <b style="color:#ff5252;">🔴 MACRO BEARISH DOMINANCE:</b> Price + POC + Whale Lots + Stacked Sell Imbalances neeche ki taraf hain (Look for Shorts).<br>
+        • <b style="color:#ff9100;">🐳 MACRO BEAR DISTRIBUTION:</b> Retail lagatar Market Buy (+CVD) maar raha hai, par Whales Limit Sell se top par maal chipka rahe hain (Reversal Short Setup).<br>
+        • <b style="color:#ffca28;">🟡 MACRO SIDEWAYS ROTATIONAL CHOP:</b> Trend efficiency &lt; 16% hai. Mid-range mein trade mat le, sirf Range High/Low sweep hone par fade kar.
     </div>
 
     <div class="rule-sec">
@@ -1667,29 +1671,31 @@ def home():
     </div>
 
     <div class="rule-sec" style="border-color:#ffd700;">
-        <h4 style="color:#ffd700;">3. NEW V4 STEALTH WEAPONS (Whale Lots, Spine Glow, nPOC/UNF Pins & SMT Radar)</h4>
-        • <b style="color:#ffd700;">◆ Gold Diamond (Whale Lot Size Detector):</b> Jab kisi price cell mein bada volume <b>bahut kam trades (Big Average Trade Size &gt;= 2.2x normal)</b> mein execute hota hai, toh number ke paas <b style="color:#ffd700;">◆</b> chhapta hai. Yeh prove karta hai ki wahan Retail bheed nahi, balki <b>Institutional Whale / Liquidation Engine</b> ne order mara hai! (Hover X-Ray box mein exact <code>Trades</code> aur <code>AvgLot [🐋 WHALE vs 🐑 RETAIL]</code> dikhta hai).<br>
-        • <b style="color:#00e5ff;">Left Spine Neon Glow (Stacked Imbalance & Baap FVG):</b> Jab किसी candle mein lagatar <b>2 ya 3+ price levels par ek-tarfa 250% Imbalance</b> aata hai, toh chart ganda kiye bina candle ki Left Spine par <b>Bright Cyan (Buy Stack)</b> ya <b>Bright Pink (Sell Stack)</b> glow bar ban jata hai. Aur agar wahan FVG hai, toh Floating Pill mein <b style="color:#00e676;">⚡ BAAP FVG (Stacked Imb)</b> ya <b style="color:#ff9100;">⚠️ BETA FVG (Weak)</b> print hota hai!<br>
-        • <b style="color:#ffeb3b;">◀ nPOC</b> & <b style="color:#e040fb;">◀ UNF (Y-Axis Price Scale Laser Pins):</b><br>
-          &nbsp;&nbsp;- <b style="color:#ffeb3b;">◀ nPOC (Naked POC):</b> Pichli candles ka wo POC jisko abhi tak price ne wapas touch nahi kiya hai. Yeh <b>Strongest Price Magnet</b> hota hai.<br>
-          &nbsp;&nbsp;- <b style="color:#e040fb;">◀ UNF (Unfinished Auction):</b> Pichli candle ka wo High ya Low jahan Buy aur Sell dono तरफ volume <code>&gt; 0</code> chhoot gaya (Incomplete Auction). Market 85% cases mein aisi Unfinished High/Low ko sweep karne wapas aata hai!<br>
-        • <b style="color:#00e5ff;">🔗 SMT Radar (BTC vs ETH Cross-Check):</b> Top bar mein BTC aur ETH ke structure aur CVD ko live compare karta hai. Agar ek coin naya Low banaye aur dusra coin apna Low hold karke Absorption de, toh <b style="color:#ffeb3b;">🚨 BULL/BEAR SMT DIVERGENCE</b> alert chamakta hai!<br>
-        • <b>👁️ PRO / CLEAN Button:</b> 1 click mein saare side tags chhupa kar raw footprint dekhne ke liye.
+        <h4 style="color:#ffd700;">3. V4 STEALTH WEAPONS (Whale Lots, Stacked Imb Bracket, nPOC/UNF Magnets & SMT)</h4>
+        • <b style="color:#ffd700;">◆ Gold Diamond (Whale Lot Size Detector):</b> Jab kisi price cell mein bada volume <b>bahut kam trades (Big Average Trade Size &gt;= 2.0x BaseLot)</b> mein execute hota hai, toh number ke paas <b style="color:#ffd700;">◆</b> chhapta hai. Yeh prove karta hai ki wahan Retail bheed nahi, balki <b>Institutional Whale / Liquidation Engine</b> ne order mara hai!<br>
+        • <b style="color:#00e5ff;">Stacked Imbalance Neon Bracket (Left Outer Edge):</b> Jab किसी candle mein lagatar <b>2 ya 3+ price levels par ek-tarfa 240% Imbalance</b> aata hai, toh candle ke left kinare ke bahar ek patli <b>Cyan (Buy Stack)</b> ya <b>Pink (Sell Stack)</b> bracket line banti hai (bina candle ko chhupaye!). Aur agar wahan FVG hai, toh Floating Pill mein <b style="color:#00e676;">⚡ BAAP-FVG</b> ya <b style="color:#ff9100;">⚠️ BETA-FVG</b> print hota hai!<br>
+        • <b style="color:#ffeb3b;">◀ nPOC</b> & <b style="color:#e040fb;">◀ UNF (Y-Axis Price Scale Laser Magnets):</b><br>
+          &nbsp;&nbsp;- <b style="color:#ffeb3b;">◀ nPOC (Naked POC):</b> Pichli candles ka untouched POC. Jaise hi future mein price isko touch karega, yeh pin automatic hat jayega. Jab tak yeh dikh raha hai, yeh <b>Pending Price Magnet</b> hai!<br>
+          &nbsp;&nbsp;- <b style="color:#e040fb;">◀ UNF (Unfinished Auction):</b> Pichli candle ka High/Low jahan Buy aur Sell dono <code>&gt; 0</code> chhoot gaye. Market 85% cases mein aisi Unfinished High/Low ko sweep karne wapas aata hai, aur sweep hote hi yeh pin hat jata hai!<br>
+        • <b>Interactive Scales:</b> <b>Right Price Scale</b> ko upar-neeche drag karne se Y-axis zoom hota hai, aur <b>Bottom Time Scale</b> ko left-right drag karne se X-axis (Candle Width) phailta aur sikudta hai!
     </div>
 
     <div class="rule-sec">
-        <h4>4. THE 4-LINE FLOATING PILL UNDER EVERY CANDLE (Micro Candle Decision)</h4>
-        • <b>Line 1 (Δ | V | RVOL x):</b> Agar RVOL <code>&lt; 0.75x</code> hai toh <code>LOW FLOW</code> aayega—aisi halka volume candle ke signal par kabhi trade mat lena!<br>
+        <h4>4. THE 4-LINE FLOATING PILL (V4.1 Upgraded Candle Decision Matrix)</h4>
+        • <b>Line 1 (Δ | V | RVOL x):</b> Agar RVOL <code>&lt; 0.70x</code> hai toh <code>LOW FLOW</code> aayega—aisi halka volume candle ke signal par kabhi trade mat lena!<br>
         • <b>Line 2 (CVD | B vs S):</b> Running Cumulative Delta aur us candle ka exact Market Buy (<code>B</code>) vs Market Sell (<code>S</code>) volume.<br>
-        • <b>Line 3 (Mechanism + FVG Quality):</b> <code>🐳 LIM-BUY ACCUM</code>, <code>🐳 LIM-SELL DUMP</code>, <code>🔥 MKT IGNITION</code>, plus <code>[⚡BAAP-FVG]</code> ya <code>[⚠️BETA-FVG]</code> tag!<br>
-        • <b>Line 4 (Final Candle Winner):</b> <b style="color:#00e676;">🟢 BUYERS WIN</b>, <b style="color:#ff5252;">🔴 SELLERS WIN</b>, ya <b style="color:#00e676;">🐳 BULL ABSORB WIN</b>.
+        • <b>Line 3 (Mechanism + FVG + Magnet Sweep):</b> <code>🐳LIM-BUY ACCUM</code>, <code>🔥MKT IGNITION</code>, <code>⚡BAAP-FVG</code>, ya <code>🎯MAG-SWEPT</code> (jab candle ne purana nPOC/UNF sweep kiya ho)!<br>
+        • <b>Line 4 (V4.1 Final Candle Verdict):</b><br>
+          &nbsp;&nbsp;- <b style="color:#ffd700;">◆🐳 WHALE BULL ABSORB (xx%):</b> Whale lot + Passive Bid Absorption + Green Close (Sellers 100% Trapped = Best Long Trigger!).<br>
+          &nbsp;&nbsp;- <b style="color:#00e676;">◆🟢 WHALE BUY WIN (xx%):</b> Whale lots + Stacked Buy Imbalance + Close above POC.<br>
+          &nbsp;&nbsp;- <b style="color:#ff9100;">🐑 RETAIL FOMO TRAP:</b> Volume aaya par saare chote-chote retail trades the (AvgLot &lt; 0.75x) aur price reject ho gaya = Fakeout!
     </div>
 
     <div class="rule-sec" style="border-color:#00e676;">
         <h4 style="color:#00e676;">🎯 MASTER SNIPER CHECKLIST (FVG / OB / SWEEP ENTRY)</h4>
-        <b>1. Location Check:</b> Kya tera FVG kisi <b style="color:#ffeb3b;">◀ nPOC</b> magnet ya <b style="color:#00e676;">⚡ BAAP FVG (Stacked Imb)</b> candle par bana hai?<br>
-        <b>2. Reaction Check:</b> Jab price FVG mein tap kare, toh wahan <b style="color:#00e5ff;">H-B.ABS</b> (Long) ya <b style="color:#ff9100;">H-A.ABS</b> (Short) + <b style="color:#ffd700;">◆ Whale Lot</b> dikhna chahiye (Pulling <code>H-BP/H-AP</code> nahi hona chahiye).<br>
-        <b>3. Trigger Check:</b> Candle pill mein <code>RVOL &gt;= 1.1x</code> ke sath <b style="color:#00e676;">BUYERS WIN / BULL ABSORB WIN</b> aaye aur candle POC ke upar close de!
+        <b>1. Macro & Location Check:</b> Top Bar mein Macro Bias tere trade ki direction mein ho (ya <code>🐳 ACCUM/DIST</code> reversal de raha ho) aur FVG ke paas <b style="color:#ffeb3b;">◀ nPOC</b> / <b style="color:#e040fb;">◀ UNF</b> ya <b style="color:#00e676;">⚡ BAAP-FVG</b> ho.<br>
+        <b>2. Reaction Check:</b> Jab price FVG mein tap kare, toh wahan <b style="color:#00e5ff;">H-B.ABS</b> (Long) ya <b style="color:#ff9100;">H-A.ABS</b> (Short) + <b style="color:#ffd700;">◆ Whale Lot</b> dikhna chahiye.<br>
+        <b>3. Trigger Check:</b> Candle pill ki Line 4 mein <b style="color:#00e676;">◆🐳 WHALE BULL ABSORB / BUYERS WIN</b> (Long) ya <b style="color:#ff5252;">◆🐳 WHALE BEAR ABSORB / SELLERS WIN</b> (Short) chhapna chahiye!
     </div>
 </div>
 
@@ -1709,9 +1715,10 @@ const STEP_MAP = { BTCUSDT: 1.0, ETHUSDT: 0.1, SOLUSDT: 0.01, XRPUSDT: 0.0001 };
 let symbol = document.getElementById('symSel').value || 'BTCUSDT';
 let tf = '1m';
 let tickMultMode = document.getElementById('tickMultSel').value || 'auto';
-let proViewMode = true; // true = PRO (All tags), false = CLEAN (Digits + POC only)
+let proViewMode = true;
 let candles = [];
-let peerCandles = []; // For BTC vs ETH Cross-Market SMT Radar
+let peerCandles = [];
+let smtState = { bias: 0, text: 'SYNCED' }; // +1 = Bullish SMT, -1 = Bearish SMT, 0 = Synced
 let obData = { bids: [], asks: [] };
 let rawStep = STEP_MAP[symbol] || 1.0;
 
@@ -1729,7 +1736,7 @@ let curX = -1, curY = -1;
 let pinchDist = null;
 let needsRender = true;
 
-const TIME_H = 20;
+const TIME_H = 26;
 const PILL_SAFE_H = 66;
 
 function toggleViewMode() {
@@ -1822,9 +1829,12 @@ function resetCamera() {
     needsRender = true;
 }
 
-function detectZone(x) {
+function detectZone(x, y) {
     const { chartW, yAxisW } = getLayout();
-    if (x < chartW) return 'chart';
+    if (x < chartW) {
+        if (y >= cv.height - TIME_H - 6) return 'xaxis';
+        return 'chart';
+    }
     if (x <= chartW + yAxisW) return 'yaxis';
     return 'dom';
 }
@@ -1838,6 +1848,8 @@ function applyDrag(dx, dy) {
             minP += shift;
             maxP += shift;
         }
+    } else if (dragMode === 'xaxis') {
+        candleW = Math.max(35, Math.min(480, candleW * (1 + dx * 0.006)));
     } else if (dragMode === 'yaxis') {
         if (minP !== null && maxP !== null) {
             const mid = (maxP + minP) * 0.5;
@@ -1854,13 +1866,17 @@ cv.addEventListener('mousedown', e => {
     const r = cv.getBoundingClientRect();
     lastX = e.clientX - r.left;
     lastY = e.clientY - r.top;
-    dragMode = detectZone(lastX);
+    dragMode = detectZone(lastX, lastY);
 });
 
 window.addEventListener('mousemove', e => {
     const r = cv.getBoundingClientRect();
     curX = e.clientX - r.left;
     curY = e.clientY - r.top;
+
+    const z = detectZone(curX, curY);
+    cv.style.cursor = (z === 'xaxis') ? 'ew-resize' : ((z === 'yaxis') ? 'ns-resize' : ((z === 'dom') ? 'ns-resize' : 'crosshair'));
+
     if (dragMode) {
         applyDrag(curX - lastX, curY - lastY);
         lastX = curX;
@@ -1875,7 +1891,8 @@ window.addEventListener('mouseup', () => { dragMode = null; });
 cv.addEventListener('dblclick', e => {
     const r = cv.getBoundingClientRect();
     const x = e.clientX - r.left;
-    if (detectZone(x) === 'dom') {
+    const y = e.clientY - r.top;
+    if (detectZone(x, y) === 'dom') {
         domScrollRows = 0;
         needsRender = true;
     } else {
@@ -1886,13 +1903,15 @@ cv.addEventListener('dblclick', e => {
 cv.addEventListener('wheel', e => {
     e.preventDefault();
     const { chartW, yAxisW, chartH } = getLayout();
-    const zone = detectZone(curX);
+    const zone = detectZone(curX, curY);
     const zoomIn = e.deltaY < 0;
 
     if (zone === 'dom') {
         domScrollRows += (e.deltaY > 0 ? -3 : 3);
     } else if (zone === 'yaxis') {
         scaleY(zoomIn ? 0.84 : 1.19);
+    } else if (zone === 'xaxis') {
+        scaleX(zoomIn ? 1.15 : 0.87);
     } else {
         const zx = zoomIn ? 1.15 : 0.87;
         candleW = Math.max(35, Math.min(480, candleW * zx));
@@ -1917,7 +1936,7 @@ cv.addEventListener('touchstart', e => {
         lastY = e.touches[0].clientY - r.top;
         curX = lastX;
         curY = lastY;
-        dragMode = detectZone(lastX);
+        dragMode = detectZone(lastX, lastY);
         pinchDist = null;
     } else if (e.touches.length === 2) {
         dragMode = null;
@@ -1992,7 +2011,6 @@ async function fetchData() {
     }
 }
 
-// Lightweight background fetch (every 4.5s) of peer symbol (ETH for BTC, or BTC for others) for SMT Divergence
 async function fetchSmtPeer() {
     const peerSym = (symbol === 'BTCUSDT') ? 'ETHUSDT' : 'BTCUSDT';
     try {
@@ -2001,6 +2019,7 @@ async function fetchSmtPeer() {
         if (d.status === 'ok' && d.candles) {
             peerCandles = d.candles;
             updateSmtRadar(peerSym);
+            needsRender = true;
         }
     } catch (e) {}
 }
@@ -2031,25 +2050,27 @@ function updateSmtRadar(peerSym) {
     const shortPeer = peerSym.replace('USDT', '');
 
     if (cSweptLow !== pSweptLow) {
-        // Bullish SMT at Lows! One coin swept low while the other held higher low
         const stronger = !cSweptLow ? shortSym : shortPeer;
+        smtState = { bias: 1, text: `Bull SMT (${stronger} Held Low)` };
         el.style.background = 'rgba(0, 229, 255, 0.20)';
         el.style.borderColor = '#00e5ff';
         el.style.color = '#00e5ff';
         el.innerText = `🚨 BULL SMT: ${stronger} Held Low!`;
     } else if (cSweptHigh !== pSweptHigh) {
-        // Bearish SMT at Highs! One coin swept high while the other made lower high
         const weaker = !cSweptHigh ? shortSym : shortPeer;
+        smtState = { bias: -1, text: `Bear SMT (${weaker} Failed High)` };
         el.style.background = 'rgba(255, 145, 0, 0.22)';
         el.style.borderColor = '#ff9100';
         el.style.color = '#ffab00';
         el.innerText = `🚨 BEAR SMT: ${weaker} Failed High!`;
     } else if ((c3Delta > 0 && p3Delta < 0) || (c3Delta < 0 && p3Delta > 0)) {
+        smtState = { bias: c3Delta > 0 ? 0.5 : -0.5, text: `Delta SMT Split` };
         el.style.background = 'rgba(213, 0, 249, 0.16)';
         el.style.borderColor = '#e040fb';
         el.style.color = '#ea80fc';
         el.innerText = `⚡ DELTA SMT: ${shortSym}/${shortPeer} Split`;
     } else {
+        smtState = { bias: 0, text: 'SYNCED' };
         el.style.background = '#181d2c';
         el.style.borderColor = '#37474f';
         el.style.color = '#90a4ae';
@@ -2066,7 +2087,6 @@ function fmt(v) {
     return v.toFixed(2);
 }
 
-// Preserves trades count so we can compute Volume / Trades (Whale vs Retail Lot Size)!
 function groupFootprint(fpRaw, low, high, effStep, closePx) {
     const map = new Map();
     const arr = Array.isArray(fpRaw) ? fpRaw : Object.values(fpRaw || {});
@@ -2097,7 +2117,11 @@ function groupFootprint(fpRaw, low, high, effStep, closePx) {
     return Array.from(map.values()).sort((a, b) => a.price - b.price);
 }
 
-function updateMacroMarketDecision(avgFlowVol, effStep) {
+// =========================================================================
+// V4.1 UPGRADED 9-FACTOR MACRO INSTITUTIONAL DECISION ENGINE (TOP BAR)
+// Integrates POC + CVD + Absorptions + Pulls + DOM + Whale Lots + Baap FVGs + SMT + nPOC/UNF Magnets!
+// =========================================================================
+function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls) {
     if (!candles || candles.length < 3) return;
 
     const sample = candles.slice(-20);
@@ -2119,6 +2143,8 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
     let pocUpSteps = 0, pocDownSteps = 0;
     let macroBidAbsorbs = 0, macroAskAbsorbs = 0;
     let macroBidPulled = 0, macroAskPulled = 0;
+    let whaleBuyLots = 0, whaleSellLots = 0;
+    let bullBaapFvgs = 0, bearBaapFvgs = 0;
 
     sample.forEach((c, idx) => {
         if (c.high > macroHigh) macroHigh = c.high;
@@ -2143,11 +2169,40 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
             if (mbPct >= 56 && closePos <= 0.48) macroAskAbsorbs += cRvol;
         }
 
+        // Scan V4 Whale Lots & Stacked Imbalances across the 20-candle macro window
         const fpArr = Array.isArray(c.footprint) ? c.footprint : Object.values(c.footprint || {});
+        const cAvgCellV = fpArr.length > 0 ? (c.volume || 1) / fpArr.length : 1;
+        let bStack = 0, sStack = 0, maxBS = 0, maxSS = 0, cWhales = 0;
+
         fpArr.forEach(l => {
             macroBidPulled += (l.bid_pulled || 0);
             macroAskPulled += (l.ask_pulled || 0);
+
+            const lv = l.volume || 0;
+            const lt = Math.max(l.trades || 1, 1);
+            if (lv >= cAvgCellV * 0.85 && (lv / lt) >= baselineLotSize * 2.0) {
+                cWhales++;
+                if ((l.buy || 0) > (l.sell || 0)) whaleBuyLots++;
+                else if ((l.sell || 0) > (l.buy || 0)) {
+                    // If heavy whale sell lot happened in lower half of a green/defended candle, it's Passive Whale Bid Absorption!
+                    if (c.close >= c.open && l.price <= (c.high + c.low) * 0.5) whaleBuyLots++;
+                    else whaleSellLots++;
+                }
+            }
+
+            if ((l.buy || 0) > (l.sell || 0) * 2.4 && (l.buy || 0) >= cAvgCellV * 0.45) {
+                bStack++; sStack = 0; if (bStack > maxBS) maxBS = bStack;
+            } else if ((l.sell || 0) > (l.buy || 0) * 2.4 && (l.sell || 0) >= cAvgCellV * 0.45) {
+                sStack++; bStack = 0; if (sStack > maxSS) maxSS = sStack;
+            } else { bStack = 0; sStack = 0; }
         });
+
+        // Count Institutional BAAP FVGs in macro window
+        if (idx >= 1 && idx < sample.length - 1) {
+            const pC = sample[idx - 1], nC = sample[idx + 1];
+            if (nC.low > pC.high && (maxBS >= 2 || cWhales >= 1) && cRvol >= 1.05) bullBaapFvgs++;
+            if (nC.high < pC.low && (maxSS >= 2 || cWhales >= 1) && cRvol >= 1.05) bearBaapFvgs++;
+        }
     });
 
     const macroSpan = Math.max(macroHigh - macroLow, rawStep);
@@ -2158,97 +2213,133 @@ function updateMacroMarketDecision(avgFlowVol, effStep) {
     let bullPts = 0, bearPts = 0;
     let macroNotes = [];
 
-    if (netPriceMove > macroSpan * 0.25 && pocUpSteps > pocDownSteps + 1) {
-        bullPts += 28;
-        macroNotes.push(`POC Migration UP (${pocUpSteps}↑/${pocDownSteps}↓)`);
-    } else if (netPriceMove < -macroSpan * 0.25 && pocDownSteps > pocUpSteps + 1) {
-        bearPts += 28;
-        macroNotes.push(`POC Migration DOWN (${pocDownSteps}↓/${pocUpSteps}↑)`);
+    // 1. POC Migration
+    if (netPriceMove > macroSpan * 0.22 && pocUpSteps > pocDownSteps + 1) {
+        bullPts += 24;
+        macroNotes.push(`POC Up(${pocUpSteps}↑)`);
+    } else if (netPriceMove < -macroSpan * 0.22 && pocDownSteps > pocUpSteps + 1) {
+        bearPts += 24;
+        macroNotes.push(`POC Down(${pocDownSteps}↓)`);
     }
 
+    // 2. Macro CVD vs Price Structure
     const cvdRatio = totalVol > 0 ? (totalCvd / totalVol) * 100 : 0;
     if (totalCvd > 0 && netPriceMove > macroSpan * 0.15) {
-        bullPts += 24;
-        macroNotes.push(`Macro CVD +${fmt(totalCvd)} (+${cvdRatio.toFixed(0)}%)`);
+        bullPts += 20;
+        macroNotes.push(`CVD +${fmt(totalCvd)}`);
     } else if (totalCvd < 0 && netPriceMove < -macroSpan * 0.15) {
-        bearPts += 24;
-        macroNotes.push(`Macro CVD ${fmt(totalCvd)} (${cvdRatio.toFixed(0)}%)`);
+        bearPts += 20;
+        macroNotes.push(`CVD ${fmt(totalCvd)}`);
     } else if (totalCvd < -avgFlowVol * 0.8 && netPriceMove >= -macroSpan * 0.10) {
-        bullPts += 34;
-        macroNotes.push(`Whale Bid Absorption (CVD ${fmt(totalCvd)} Held)`);
+        bullPts += 32;
+        macroNotes.push(`Whale Bid Absorb(CVD ${fmt(totalCvd)} Held)`);
     } else if (totalCvd > avgFlowVol * 0.8 && netPriceMove <= macroSpan * 0.10) {
-        bearPts += 34;
-        macroNotes.push(`Whale Ask Distribution (CVD +${fmt(totalCvd)} Capped)`);
+        bearPts += 32;
+        macroNotes.push(`Whale Ask Cap(CVD +${fmt(totalCvd)} Stalled)`);
     }
 
+    // 3. V4 Whale Lot Dominance (◆)
+    if (whaleBuyLots > whaleSellLots + 2) {
+        bullPts += 20;
+        macroNotes.push(`◆Whale Lots(${whaleBuyLots}B/${whaleSellLots}S)`);
+    } else if (whaleSellLots > whaleBuyLots + 2) {
+        bearPts += 20;
+        macroNotes.push(`◆Whale Lots(${whaleSellLots}S/${whaleBuyLots}B)`);
+    }
+
+    // 4. V4 Institutional BAAP-FVG Dominance (⚡)
+    if (bullBaapFvgs > bearBaapFvgs) {
+        bullPts += 16;
+        macroNotes.push(`⚡${bullBaapFvgs} Bull Baap-FVG`);
+    } else if (bearBaapFvgs > bullBaapFvgs) {
+        bearPts += 16;
+        macroNotes.push(`⚡${bearBaapFvgs} Bear Baap-FVG`);
+    }
+
+    // 5. V4 Cross-Market SMT Divergence Boost (🚨)
+    if (smtState.bias >= 1) {
+        bullPts += 18;
+        macroNotes.push(`🚨${smtState.text}`);
+    } else if (smtState.bias <= -1) {
+        bearPts += 18;
+        macroNotes.push(`🚨${smtState.text}`);
+    }
+
+    // 6. Multi-Candle Floor vs Ceiling Defense & Spoofs
     if (macroBidAbsorbs > macroAskAbsorbs + 1.2) {
-        bullPts += 22;
-        macroNotes.push(`Bid Floors Defended (${macroBidAbsorbs.toFixed(1)}x)`);
+        bullPts += 16;
+        macroNotes.push(`Bid Floors Held`);
     } else if (macroAskAbsorbs > macroBidAbsorbs + 1.2) {
-        bearPts += 22;
-        macroNotes.push(`Ask Ceilings Defended (${macroAskAbsorbs.toFixed(1)}x)`);
+        bearPts += 16;
+        macroNotes.push(`Ask Ceilings Held`);
     }
-
     if (macroAskPulled > macroBidPulled * 1.35 && macroAskPulled > 0) {
-        bullPts += 14;
-        macroNotes.push(`Asks Pulled (${fmt(macroAskPulled)})`);
+        bullPts += 10;
+        macroNotes.push(`Asks Pulled`);
     } else if (macroBidPulled > macroAskPulled * 1.35 && macroBidPulled > 0) {
-        bearPts += 14;
-        macroNotes.push(`Bids Pulled (${fmt(macroBidPulled)})`);
+        bearPts += 10;
+        macroNotes.push(`Bids Pulled`);
     }
 
+    // 7. Live DOM Imbalance
     let bookBids = 0, bookAsks = 0;
     const scanDist = effStep * 25;
     (obData.bids || []).forEach(b => { if (last.close - b.price <= scanDist) bookBids += b.quantity; });
     (obData.asks || []).forEach(a => { if (a.price - last.close <= scanDist) bookAsks += a.quantity; });
     if (bookBids > bookAsks * 1.30) {
-        bullPts += 12;
-        macroNotes.push(`DOM Bid Support (${fmt(bookBids)})`);
+        bullPts += 10;
+        macroNotes.push(`DOM Bid Wall`);
     } else if (bookAsks > bookBids * 1.30) {
-        bearPts += 12;
-        macroNotes.push(`DOM Ask Supply (${fmt(bookAsks)})`);
+        bearPts += 10;
+        macroNotes.push(`DOM Ask Wall`);
     }
+
+    // 8. Pending Magnet Gravity (◀ nPOC & ◀ UNF Pull Direction)
+    const magnetsAbove = nakedPocs.filter(p => p > last.close).length + unfinishedLvls.filter(u => u.price > last.close).length;
+    const magnetsBelow = nakedPocs.filter(p => p < last.close).length + unfinishedLvls.filter(u => u.price < last.close).length;
+    if (magnetsAbove > magnetsBelow + 1) macroNotes.push(`🎯MagPull:UP(${magnetsAbove})`);
+    else if (magnetsBelow > magnetsAbove + 1) macroNotes.push(`🎯MagPull:DOWN(${magnetsBelow})`);
 
     const vBox = document.getElementById('masterVerdictBox');
     const vTitle = document.getElementById('masterVerdictTitle');
     const vReasons = document.getElementById('masterVerdictReasons');
     const netMacro = bullPts - bearPts;
 
-    const isChopRange = efficiency < 0.16 && Math.abs(netMacro) < 26;
+    const isChopRange = efficiency < 0.16 && Math.abs(netMacro) < 28;
 
     if (isChopRange) {
         vBox.style.background = 'rgba(255, 193, 7, 0.15)';
         vBox.style.borderColor = '#ffca28';
         vTitle.style.color = '#ffca28';
-        const zoneLoc = posInMacroRange > 0.7 ? 'Near Range High' : (posInMacroRange < 0.3 ? 'Near Range Low' : 'Mid-Range');
+        const zoneLoc = posInMacroRange > 0.7 ? 'Near High' : (posInMacroRange < 0.3 ? 'Near Low' : 'Mid-Range');
         vTitle.innerText = `🟡 MACRO: SIDEWAYS ROTATIONAL CHOP (${zoneLoc}) — FADE EXTREMES`;
-        vReasons.innerText = `Low trend efficiency (${(efficiency * 100).toFixed(0)}%) | CVD:${fmt(totalCvd)} | Wait for sweep`;
+        vReasons.innerText = macroNotes.slice(0, 4).join(' | ') || `Low efficiency (${(efficiency * 100).toFixed(0)}%) | Wait for sweep`;
     } else if (netMacro >= 18) {
-        const conf = Math.min(96, Math.round(52 + (netMacro / 85) * 44));
+        const conf = Math.min(97, Math.round(52 + (netMacro / 100) * 45));
         const isAccum = totalCvd < 0 && netPriceMove >= -macroSpan * 0.1;
         vBox.style.background = 'rgba(0, 200, 83, 0.18)';
         vBox.style.borderColor = '#00e676';
         vTitle.style.color = '#00e676';
         vTitle.innerText = isAccum
-            ? `🐳 MACRO: INSTITUTIONAL BULL ACCUMULATION (${conf}%) — LONG BIAS`
+            ? `🐳 MACRO: WHALE BULL ACCUMULATION (${conf}%) — LONG BIAS`
             : `🟢 MACRO: BULLISH ORDERFLOW DOMINANCE (${conf}%) — LONG BIAS`;
-        vReasons.innerText = macroNotes.slice(0, 3).join(' | ');
+        vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     } else if (netMacro <= -18) {
-        const conf = Math.min(96, Math.round(52 + (Math.abs(netMacro) / 85) * 44));
+        const conf = Math.min(97, Math.round(52 + (Math.abs(netMacro) / 100) * 45));
         const isDist = totalCvd > 0 && netPriceMove <= macroSpan * 0.1;
         vBox.style.background = 'rgba(255, 23, 68, 0.18)';
         vBox.style.borderColor = '#ff5252';
         vTitle.style.color = '#ff5252';
         vTitle.innerText = isDist
-            ? `🐳 MACRO: INSTITUTIONAL BEAR DISTRIBUTION (${conf}%) — SHORT BIAS`
+            ? `🐳 MACRO: WHALE BEAR DISTRIBUTION (${conf}%) — SHORT BIAS`
             : `🔴 MACRO: BEARISH ORDERFLOW DOMINANCE (${conf}%) — SHORT BIAS`;
-        vReasons.innerText = macroNotes.slice(0, 3).join(' | ');
+        vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     } else {
         vBox.style.background = 'rgba(38, 50, 56, 0.85)';
         vBox.style.borderColor = '#90a4ae';
         vTitle.style.color = '#eceff1';
         vTitle.innerText = `⚖️ MACRO: BALANCED TWO-WAY AUCTION — WAIT FOR DISPLACEMENT`;
-        vReasons.innerText = macroNotes.slice(0, 3).join(' | ') || `CVD:${fmt(totalCvd)} | Equal control`;
+        vReasons.innerText = macroNotes.slice(0, 4).join(' | ') || `CVD:${fmt(totalCvd)} | Equal control`;
     }
 }
 
@@ -2290,12 +2381,10 @@ function drawAll() {
     const avgFlowRange = Math.max(totalHistRange / Math.max(1, histCount), rawStep);
     const baselineLotSize = Math.max(totalHistVol / Math.max(1, totalHistTrades), 0.0001);
 
-    // Pre-scan for Naked POCs (nPOC) & Unfinished Auctions (UNF) across historical candles
     const nakedPocs = [];
     const unfinishedLvls = [];
     for (let i = 0; i < candles.length - 1; i++) {
         const c = candles[i];
-        // Check if c.poc was touched by any subsequent candle
         if (c.poc != null) {
             let touched = false;
             for (let j = i + 1; j < candles.length; j++) {
@@ -2303,13 +2392,11 @@ function drawAll() {
             }
             if (!touched) nakedPocs.push(c.poc);
         }
-        // Check Unfinished High/Low on candle i if still unmitigated
         const fpArr = Array.isArray(c.footprint) ? c.footprint : Object.values(c.footprint || {});
         if (fpArr.length > 2) {
             const sortedFp = [...fpArr].sort((a, b) => a.price - b.price);
             const lowCell = sortedFp[0];
             const highCell = sortedFp[sortedFp.length - 1];
-            // Unfinished Low: Both Buy & Sell > 0 at exact low
             if (lowCell.buy > 0 && lowCell.sell > 0 && (lowCell.volume || 0) >= avgFlowVol * 0.08) {
                 let swept = false;
                 for (let j = i + 1; j < candles.length; j++) {
@@ -2317,7 +2404,6 @@ function drawAll() {
                 }
                 if (!swept) unfinishedLvls.push({ price: lowCell.price, type: 'LOW' });
             }
-            // Unfinished High: Both Buy & Sell > 0 at exact high
             if (highCell.buy > 0 && highCell.sell > 0 && (highCell.volume || 0) >= avgFlowVol * 0.08) {
                 let swept = false;
                 for (let j = i + 1; j < candles.length; j++) {
@@ -2365,7 +2451,9 @@ function drawAll() {
     }
 
     const effStep = rawStep * mult;
-    updateMacroMarketDecision(avgFlowVol, effStep);
+
+    // Run V4.1 9-Factor Macro Decision Engine!
+    updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLvls);
 
     const pToY = p => chartH - ((p - minP) / pSpan) * chartH;
     const yToP = y => minP + ((chartH - y) / chartH) * pSpan;
@@ -2384,6 +2472,14 @@ function drawAll() {
     ctx.strokeStyle = '#192030';
     ctx.beginPath();
     ctx.moveTo(0, chartH); ctx.lineTo(chartW, chartH);
+    ctx.stroke();
+
+    const timeBarTop = H - TIME_H;
+    ctx.fillStyle = '#11151f';
+    ctx.fillRect(0, timeBarTop, chartW, TIME_H);
+    ctx.strokeStyle = '#232838';
+    ctx.beginPath();
+    ctx.moveTo(0, timeBarTop); ctx.lineTo(chartW, timeBarTop);
     ctx.stroke();
 
     let cvd = 0;
@@ -2447,10 +2543,31 @@ function drawAll() {
                 ctx.fillStyle = '#29b6f6';
                 ctx.font = 'bold 9px monospace';
                 ctx.textAlign = 'left';
-                ctx.fillText(`VAH`, boxL + 5, yVah - 3);
-                ctx.fillText(`VAL`, boxL + 5, yVal + 9);
+                ctx.fillText(`VAH`, boxL + 7, yVah - 3);
+                ctx.fillText(`VAL`, boxL + 7, yVal + 9);
             }
         }
+
+        let buyImbStreak = 0, sellImbStreak = 0;
+        let maxBuyStack = 0, maxSellStack = 0;
+        let whaleBuyCount = 0, whaleSellCount = 0;
+
+        fp.forEach(l => {
+            const sImb = l.sell > l.buy * 2.4 && l.sell >= avgV * 0.45;
+            const bImb = l.buy > l.sell * 2.4 && l.buy >= avgV * 0.45;
+            if (bImb) { buyImbStreak++; sellImbStreak = 0; if (buyImbStreak > maxBuyStack) maxBuyStack = buyImbStreak; }
+            else if (sImb) { sellImbStreak++; buyImbStreak = 0; if (sellImbStreak > maxSellStack) maxSellStack = sellImbStreak; }
+            else { buyImbStreak = 0; sellImbStreak = 0; }
+
+            if (proViewMode && (buyImbStreak >= 2 || sellImbStreak >= 2)) {
+                const py = pToY(l.price + effStep * 0.5);
+                const cellH = Math.max(rowH, 3);
+                ctx.fillStyle = buyImbStreak >= 2 ? 'rgba(0, 229, 255, 0.10)' : 'rgba(255, 0, 127, 0.10)';
+                ctx.fillRect(boxL, py - cellH * 1.5, boxW, cellH * 2);
+                ctx.fillStyle = buyImbStreak >= 2 ? '#00e5ff' : '#ff007f';
+                ctx.fillRect(boxL - 2, py - cellH * 1.5, 2, cellH * 2);
+            }
+        });
 
         const barX = boxL + 3;
         ctx.strokeStyle = col;
@@ -2460,27 +2577,6 @@ function drawAll() {
         ctx.stroke();
         ctx.fillStyle = col;
         ctx.fillRect(barX - 3, Math.min(yO, yC), 6, Math.max(Math.abs(yC - yO), 2));
-
-        // Detect Consecutive Stacked Imbalances (2+ or 3+ consecutive levels) for Spine Glow & FVG X-Ray
-        let buyImbStreak = 0, sellImbStreak = 0;
-        let maxBuyStack = 0, maxSellStack = 0;
-        let whaleLevelsCount = 0;
-
-        fp.forEach(l => {
-            const sImb = l.sell > l.buy * 2.4 && l.sell >= avgV * 0.45;
-            const bImb = l.buy > l.sell * 2.4 && l.buy >= avgV * 0.45;
-            if (bImb) { buyImbStreak++; sellImbStreak = 0; if (buyImbStreak > maxBuyStack) maxBuyStack = buyImbStreak; }
-            else if (sImb) { sellImbStreak++; buyImbStreak = 0; if (sellImbStreak > maxSellStack) maxSellStack = sellImbStreak; }
-            else { buyImbStreak = 0; sellImbStreak = 0; }
-
-            // Draw Neon Spine Glow on Left OHLC Bar where Stacked Imbalance occurs (Zero Chart Clutter!)
-            if (proViewMode && (buyImbStreak >= 2 || sellImbStreak >= 2)) {
-                const py = pToY(l.price + effStep * 0.5);
-                const cellH = Math.max(rowH, 3);
-                ctx.fillStyle = buyImbStreak >= 2 ? '#00e5ff' : '#ff007f';
-                ctx.fillRect(barX - 4, py - cellH * 1.5, 8, cellH * 2);
-            }
-        });
 
         ctx.strokeStyle = '#262c3d';
         ctx.lineWidth = 1;
@@ -2501,10 +2597,17 @@ function drawAll() {
             const buyV = l.buy || 0;
             const totV = l.volume || 0;
             const trd = Math.max(l.trades || 1, 1);
-            const lvlLotSize = totV / trd; // Volume per Trade (Whale vs Retail)
+            const lvlLotSize = totV / trd;
             const lotRatio = lvlLotSize / baselineLotSize;
             const isWhaleLot = totV >= avgV * 0.85 && lotRatio >= 2.0;
-            if (isWhaleLot) whaleLevelsCount++;
+
+            if (isWhaleLot) {
+                if (buyV > sellV) whaleBuyCount++;
+                else if (sellV > buyV) {
+                    if (c.close >= c.open && l.price <= (c.high + c.low) * 0.5) whaleBuyCount++; // Passive Whale Bid Absorption
+                    else whaleSellCount++;
+                }
+            }
 
             const bPull = l.bid_pulled || 0;
             const aPull = l.ask_pulled || 0;
@@ -2590,7 +2693,6 @@ function drawAll() {
             if (canPrint) {
                 ctx.textBaseline = 'middle';
 
-                // Sell & Buy Digits + Micro Gold Diamond (◆) if Whale Lot Size Executed here!
                 const whaleSellMark = (proViewMode && isWhaleLot && sellV >= buyV) ? '◆' : '';
                 const whaleBuyMark = (proViewMode && isWhaleLot && buyV > sellV) ? '◆' : '';
 
@@ -2653,23 +2755,45 @@ function drawAll() {
             }
         });
 
-        // Check if this candle created an ICT FVG (between idx-1 and idx+1) and grade it as BAAP or BETA!
+        const totalWhalesInCandle = whaleBuyCount + whaleSellCount;
+
+        // Check if this candle created an ICT FVG (BAAP vs BETA)
         let fvgBadge = '';
+        let fvgScoreBoost = 0;
         if (idx >= 1 && idx < candles.length - 1) {
             const prevC = candles[idx - 1];
             const nextC = candles[idx + 1];
             const bullFvg = nextC.low > prevC.high;
             const bearFvg = nextC.high < prevC.low;
             if (bullFvg) {
-                const isBaap = (maxBuyStack >= 2 || whaleLevelsCount >= 1) && (c.volume >= avgFlowVol * 1.1);
+                const isBaap = (maxBuyStack >= 2 || totalWhalesInCandle >= 1) && (c.volume >= avgFlowVol * 1.05);
                 fvgBadge = isBaap ? ' ⚡BAAP-FVG' : ' ⚠️BETA-FVG';
+                fvgScoreBoost = isBaap ? 18 : -8;
             } else if (bearFvg) {
-                const isBaap = (maxSellStack >= 2 || whaleLevelsCount >= 1) && (c.volume >= avgFlowVol * 1.1);
+                const isBaap = (maxSellStack >= 2 || totalWhalesInCandle >= 1) && (c.volume >= avgFlowVol * 1.05);
                 fvgBadge = isBaap ? ' ⚡BAAP-FVG' : ' ⚠️BETA-FVG';
+                fvgScoreBoost = isBaap ? -18 : 8;
             }
         }
 
+        // Check if this candle swept & mitigated a prior candle's POC (Magnet Sweep!)
+        let sweptPriorPoc = false;
+        if (idx >= 2) {
+            for (let k = Math.max(0, idx - 6); k < idx - 1; k++) {
+                const oldPoc = candles[k].poc;
+                if (oldPoc != null && c.low <= oldPoc && c.high >= oldPoc) {
+                    sweptPriorPoc = true;
+                    break;
+                }
+            }
+        }
+
+        // =========================================================================
+        // V4.1 UPGRADED CANDLE-WISE DECISION MATRIX (USES WHALE LOTS + STACKED IMB + FVG)
+        // =========================================================================
         const cVol = c.volume || 0;
+        const cTrades = Math.max(c.trades || 1, 1);
+        const candleLotRatio = (cVol / cTrades) / baselineLotSize;
         const rvol = cVol / avgFlowVol;
         const mktBuyPct = cVol > 0 ? Math.round(((c.buy_volume || 0) / cVol) * 100) : 50;
         const mktSellPct = 100 - mktBuyPct;
@@ -2693,20 +2817,37 @@ function drawAll() {
             decisionCol = '#78909c';
         } else {
             let cBull = 0, cBear = 0;
-            if (mktSellPct >= 56 && (c.close >= c.open || lowerWick > bodySize * 0.75)) cBull += 40;
-            if (mktBuyPct >= 56 && (c.close <= c.open || upperWick > bodySize * 0.75)) cBear += 40;
-            if (mktBuyPct >= 58 && c.close > c.open && closePos >= 0.6) cBull += 35;
-            if (mktSellPct >= 58 && c.close < c.open && closePos <= 0.4) cBear += 35;
-            if (botSummary && closePos >= 0.45) cBull += 25;
-            if (topSummary && closePos <= 0.55) cBear += 25;
-            if (cAskPullSum > cBidPullSum * 1.4) cBull += 15;
-            if (cBidPullSum > cAskPullSum * 1.4) cBear += 15;
+
+            // 1. Absorption & Aggression
+            if (mktSellPct >= 56 && (c.close >= c.open || lowerWick > bodySize * 0.75)) cBull += 34;
+            if (mktBuyPct >= 56 && (c.close <= c.open || upperWick > bodySize * 0.75)) cBear += 34;
+            if (mktBuyPct >= 58 && c.close > c.open && closePos >= 0.6) cBull += 30;
+            if (mktSellPct >= 58 && c.close < c.open && closePos <= 0.4) cBear += 30;
+
+            // 2. Heavy Cell Absorptions & Spoof Pulls
+            if (botSummary && closePos >= 0.45) cBull += 22;
+            if (topSummary && closePos <= 0.55) cBear += 22;
+            if (cAskPullSum > cBidPullSum * 1.4) cBull += 12;
+            if (cBidPullSum > cAskPullSum * 1.4) cBear += 12;
+
+            // 3. POC Position
             if (pocBucketPrice != null) {
-                if (c.close > pocBucketPrice) cBull += 15;
-                else if (c.close < pocBucketPrice) cBear += 15;
+                if (c.close > pocBucketPrice) cBull += 14;
+                else if (c.close < pocBucketPrice) cBear += 14;
             }
 
+            // 4. V4 NEW: Whale Lot Execution Bonus (◆)
+            if (whaleBuyCount > whaleSellCount) cBull += 22;
+            else if (whaleSellCount > whaleBuyCount) cBear += 22;
+
+            // 5. V4 NEW: Stacked Imbalance & BAAP-FVG Bonus (⚡)
+            if (maxBuyStack >= 2) cBull += 18;
+            if (maxSellStack >= 2) cBear += 18;
+            if (fvgScoreBoost > 0) cBull += fvgScoreBoost;
+            if (fvgScoreBoost < 0) cBear += Math.abs(fvgScoreBoost);
+
             const cNet = cBull - cBear;
+            const isRetailCrowd = totalWhalesInCandle === 0 && candleLotRatio < 0.78;
 
             if (mktBuyPct >= 58 && (c.close < c.open || upperWick > bodySize * 0.8)) {
                 flowVerdict = `🐳LIM-SELL DUMP${fvgBadge}`;
@@ -2725,27 +2866,41 @@ function drawAll() {
                 verdictCol = '#00e676';
                 isHighConviction = rvol >= 1.15;
             } else {
-                flowVerdict = `MB:${mktBuyPct}%|MS:${mktSellPct}%${fvgBadge}`;
+                const magTxt = sweptPriorPoc ? ' 🎯MAG-SWEPT' : '';
+                flowVerdict = `MB:${mktBuyPct}%|MS:${mktSellPct}%${fvgBadge || magTxt}`;
                 verdictCol = fvgBadge.includes('BAAP') ? '#00e5ff' : '#cfd8dc';
             }
 
-            const whaleTag = whaleLevelsCount > 0 ? '◆' : '';
-            if (cNet >= 20) {
-                const cPct = Math.min(95, Math.round(52 + (cNet / 90) * 43));
-                candleDecision = (c.delta < 0 && c.close >= c.open)
-                    ? `${whaleTag}🐳 BULL ABSORB (${cPct}%)`
-                    : `${whaleTag}🟢 BUYERS WIN (${cPct}%)`;
+            const whalePrefix = totalWhalesInCandle > 0 ? '◆' : '';
+
+            // Detect Retail FOMO Trap (Volume came in tiny retail lots and failed to hold!)
+            if (isRetailCrowd && ((mktBuyPct >= 58 && closePos < 0.45) || (mktSellPct >= 58 && closePos > 0.55))) {
+                candleDecision = `🐑 RETAIL FOMO TRAP!`;
+                decisionCol = '#ffab00';
+            } else if (cNet >= 20) {
+                const cPct = Math.min(97, Math.round(52 + (cNet / 110) * 45));
+                if (c.delta < 0 && c.close >= c.open) {
+                    candleDecision = `${whalePrefix}🐳 WHALE BULL ABS (${cPct}%)`;
+                } else if (maxBuyStack >= 2 && totalWhalesInCandle > 0) {
+                    candleDecision = `◆🟢 WHALE BUY WIN (${cPct}%)`;
+                } else {
+                    candleDecision = `${whalePrefix}🟢 BUYERS WIN (${cPct}%)`;
+                }
                 decisionCol = '#00e676';
-                if (rvol >= 1.15) isHighConviction = true;
+                if (rvol >= 1.15 || totalWhalesInCandle > 0) isHighConviction = true;
             } else if (cNet <= -20) {
-                const cPct = Math.min(95, Math.round(52 + (Math.abs(cNet) / 90) * 43));
-                candleDecision = (c.delta > 0 && c.close <= c.open)
-                    ? `${whaleTag}🐳 BEAR ABSORB (${cPct}%)`
-                    : `${whaleTag}🔴 SELLERS WIN (${cPct}%)`;
+                const cPct = Math.min(97, Math.round(52 + (Math.abs(cNet) / 110) * 45));
+                if (c.delta > 0 && c.close <= c.open) {
+                    candleDecision = `${whalePrefix}🐳 WHALE BEAR ABS (${cPct}%)`;
+                } else if (maxSellStack >= 2 && totalWhalesInCandle > 0) {
+                    candleDecision = `◆🔴 WHALE SELL WIN (${cPct}%)`;
+                } else {
+                    candleDecision = `${whalePrefix}🔴 SELLERS WIN (${cPct}%)`;
+                }
                 decisionCol = '#ff5252';
-                if (rvol >= 1.15) isHighConviction = true;
+                if (rvol >= 1.15 || totalWhalesInCandle > 0) isHighConviction = true;
             } else {
-                candleDecision = `${whaleTag}⚖️ TWO-WAY FIGHT`;
+                candleDecision = `${whalePrefix}⚖️ TWO-WAY FIGHT`;
                 decisionCol = '#ffca28';
             }
         }
@@ -2815,16 +2970,22 @@ function drawAll() {
             ctx.fillText(candleDecision, cx, pillY + 44);
         }
 
-        if (candleW >= 50) {
+        if (candleW >= 40) {
             const tStr = new Date(c.start).toTimeString().slice(0, 5);
-            ctx.fillStyle = '#6c738a';
-            ctx.font = '10px monospace';
+            ctx.strokeStyle = '#2c3347';
+            ctx.beginPath();
+            ctx.moveTo(cx, timeBarTop);
+            ctx.lineTo(cx, timeBarTop + 4);
+            ctx.stroke();
+
+            ctx.fillStyle = '#9ba2b0';
+            ctx.font = 'bold 10px monospace';
             ctx.textAlign = 'center';
-            ctx.fillText(tStr, cx, H - TIME_H * 0.5);
+            ctx.textBaseline = 'middle';
+            ctx.fillText(tStr, cx, timeBarTop + TIME_H * 0.55);
         }
     });
 
-    // TOP-LEFT X-RAY INSPECTOR HUD (NOW WITH WHALE VS RETAIL LOT SIZE!)
     const hudW = Math.min(chartW - 12, 440);
     ctx.fillStyle = 'rgba(17, 21, 31, 0.90)';
     ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
@@ -2846,7 +3007,6 @@ function drawAll() {
         ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 61);
     }
 
-    // Y-Axis Price Scale + Laser Pins for Naked POC (nPOC) & Unfinished Auctions (UNF)!
     const yAxisX = chartW;
     ctx.fillStyle = '#11151f';
     ctx.fillRect(yAxisX, 0, yAxisW, H);
@@ -2866,12 +3026,10 @@ function drawAll() {
 
     const lastC = candles[candles.length - 1];
 
-    // Draw Non-Intrusive Y-Axis Laser Pins for nPOC & Unfinished Auctions!
     if (proViewMode) {
         nakedPocs.slice(-6).forEach(np => {
             const ny = pToY(np);
             if (ny > 10 && ny < chartH - 10) {
-                // Only draw subtle line if live price is approaching within 6 effSteps!
                 if (Math.abs(lastC.close - np) <= effStep * 6) {
                     ctx.strokeStyle = 'rgba(255, 235, 59, 0.35)';
                     ctx.setLineDash([3, 3]);
