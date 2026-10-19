@@ -446,97 +446,58 @@ def fetch_orderbook_snapshot_ws(symbol):
 # ============================================================
 
 def finalize_liquidity_records(symbol, current_time_ms=None):
-    if symbol not in orderbook:
-        return 0
-
-    has_event_time = current_time_ms is not None
     if current_time_ms is None:
         current_time_ms = now_ms()
 
-    finalized_count = 0
     state = orderbook[symbol]
-    liquidity_history = state["liquidity_history"]
+    history = state["liquidity_history"]
 
-    for record in liquidity_history:
-        if not isinstance(record, dict) or record.get("finalized"):
-            continue
-
-        reduced_qty = float(record.get("reduced_qty", 0.0))
-        if reduced_qty <= 0.0:
+    for record in history:
+        if record.get("finalized"):
             continue
 
         record_time = int(record.get("time", current_time_ms))
         if current_time_ms - record_time < 450:
             continue
 
-        executed_qty = max(0.0, min(reduced_qty, float(record.get("executed_qty", 0.0))))
-        unmatched_qty = reduced_qty - executed_qty
+        reduced_qty = float(record.get("reduced_qty", 0.0))
+        executed_qty = min(float(record.get("executed_qty", 0.0)), reduced_qty)
 
-        epsilon = max(reduced_qty, executed_qty) * 1e-12
-        if abs(unmatched_qty) <= epsilon:
-            executed_qty = reduced_qty
-            unmatched_qty = 0.0
-        else:
-            unmatched_qty = max(0.0, unmatched_qty)
+        # STRICT 10-SECOND AGED FIFO/LIFO RULE:
+        # Only count pulls that came from >= 10s old Resting Heatmap Walls!
+        aged_unmatched_qty = float(record.get("aged_unmatched_qty", 0.0))
+        aged_consumed_qty = float(record.get("aged_consumed_qty", 0.0))
 
-        pulled_qty = unmatched_qty
-        pull_pct = (pulled_qty / reduced_qty) * 100.0 if reduced_qty > 0 else 0.0
+        pulled_qty = max(0.0, aged_unmatched_qty)
+        pull_pct = (pulled_qty / aged_consumed_qty) if aged_consumed_qty > 0 else 0.0
 
-        record["executed_qty"] = executed_qty
-        record["unmatched_qty"] = unmatched_qty
-        record["pulled_qty"] = pulled_qty
-        record["pull_pct"] = pull_pct
+        record["executed_qty"] = round(executed_qty, 8)
+        record["unmatched_qty"] = round(max(reduced_qty - executed_qty, 0.0), 8)
+        record["pulled_qty"] = round(pulled_qty, 8)
+        record["pull_pct"] = round(pull_pct, 4)
         record["finalized"] = True
 
-        if executed_qty > 0.0 and pulled_qty > 0.0:
-            record["status"] = "PARTIAL_EXECUTION_PULL"
-        elif executed_qty > 0.0:
-            record["status"] = "EXECUTED"
-        elif pulled_qty > 0.0:
+        if reduced_qty <= 0:
+            record["status"] = "NO_REDUCTION"
+        elif executed_qty >= reduced_qty * 0.7:
+            record["status"] = "HEAVY ABSORPTION"
+        elif pulled_qty > 0 and pull_pct >= 0.65:
             record["status"] = "LIQUIDITY_PULLED"
+        elif executed_qty > 0 and pulled_qty > 0:
+            record["status"] = "PARTIAL_EXECUTION_PULL"
         else:
-            record["status"] = "REDUCTION_ZERO"
+            record["status"] = "UNCONFIRMED_REDUCTION"
 
-        # Stamp pull event onto active footprint candles
+        # Stamp ONLY genuine >=10s Aged Resting Wall pulls to the footprint!
         if pulled_qty > 0.0:
-            stamp_liquidity_event_to_active_candles(symbol, record.get("price"), record.get("side"), pulled_qty, record.get("old_qty", pulled_qty), record["status"])
-
-        finalized_count += 1
-
-    liquidity_index = state.get("liquidity_match_index")
-    if isinstance(liquidity_index, dict):
-        history_ids = {id(r) for r in liquidity_history if isinstance(r, dict)}
-        for key, records in list(liquidity_index.items()):
-            retained = deque(
-                r for r in records
-                if isinstance(r, dict) and id(r) in history_ids and not r.get("finalized")
+            stamp_liquidity_event_to_active_candles(
+                symbol,
+                record.get("price"),
+                record.get("side"),
+                pulled_qty,
+                max(aged_consumed_qty, pulled_qty),
+                record["status"],
             )
-            if retained:
-                liquidity_index[key] = retained
-            else:
-                liquidity_index.pop(key, None)
-
-    trade_index = state.get("trade_match_index")
-    if isinstance(trade_index, dict):
-        trade_cutoff = current_time_ms - 300 if has_event_time else None
-        for key, trades in list(trade_index.items()):
-            retained_trades = deque()
-            for trade in trades:
-                if not isinstance(trade, dict):
-                    continue
-                t_time = int(trade.get("time", 0))
-                rem_qty = float(trade.get("remaining_qty", 0.0))
-                if rem_qty <= 1e-12:
-                    continue
-                if trade_cutoff is not None and t_time < trade_cutoff:
-                    continue
-                retained_trades.append(trade)
-            if retained_trades:
-                trade_index[key] = retained_trades
-            else:
-                trade_index.pop(key, None)
-
-    return finalized_count
 
 
 def record_trade_for_execution_matching(symbol, price, quantity, trade_time, is_buyer_maker):
@@ -706,9 +667,9 @@ def apply_orderbook_event(symbol, event):
     finalize_liquidity_records(symbol, event_time)
     liquidity_index = state["liquidity_match_index"]
 
-    # Micro-flicker noise filter: ignores 0.001 tiny bot flickers so real pulls never get dropped!
-    min_pull_map = {"BTCUSDT": 0.15, "ETHUSDT": 1.2, "SOLUSDT": 12.0, "XRPUSDT": 1500.0}
-    min_track_qty = min_pull_map.get(symbol, 0.1)
+    min_pull_map = {"BTCUSDT": 0.40, "ETHUSDT": 3.0, "SOLUSDT": 25.0, "XRPUSDT": 3000.0}
+    min_track_qty = min_pull_map.get(symbol, 0.2)
+    MIN_WALL_AGE_MS = 10000  # 10 Seconds Minimum Age to qualify as a Resting Heatmap Wall
 
     def process_side(side, event_levels, book):
         for price, quantity in event_levels:
@@ -737,59 +698,83 @@ def apply_orderbook_event(symbol, event):
                 })
 
             fifo_consumption = []
-            fifo_unattributed_qty = 0.0
+            aged_consumed_qty = 0.0
+            aged_executed_qty = 0.0
+            aged_unmatched_qty = 0.0
 
             if reduced_qty >= min_track_qty:
-                remaining_reduction = reduced_qty
-                while remaining_reduction > 1e-12 and lots:
-                    oldest_lot = lots[0]
-                    lot_remaining = float(oldest_lot.get("remaining_qty", 0.0))
-                    if lot_remaining <= 1e-12:
-                        lots.popleft()
-                        continue
-
-                    consumed_qty = min(lot_remaining, remaining_reduction)
-                    remaining_after = max(0.0, lot_remaining - consumed_qty)
-                    oldest_lot["remaining_qty"] = remaining_after
-
-                    fifo_consumption.append({
-                        "lot_id": oldest_lot.get("lot_id"),
-                        "origin": oldest_lot.get("origin"),
-                        "origin_time": int(oldest_lot.get("time", event_time)),
-                        "origin_update_id": oldest_lot.get("update_id"),
-                        "original_qty": float(oldest_lot.get("original_qty", 0.0)),
-                        "consumed_qty": consumed_qty,
-                        "remaining_qty_after": remaining_after,
-                        "execution_qty": 0.0,
-                        "unmatched_qty": consumed_qty,
-                    })
-
-                    remaining_reduction -= consumed_qty
-                    if oldest_lot["remaining_qty"] <= 1e-12:
-                        lots.popleft()
-
-                fifo_unattributed_qty = max(remaining_reduction, 0.0)
-
-            if not lots:
-                state["liquidity_lots"][side].pop(price, None)
-
-            if reduced_qty >= min_track_qty:
+                # 1. Match genuine market executions FIRST
                 executed_qty = match_trade_to_liquidity_reduction(
                     symbol, side, price, reduced_qty, event_time
                 )
-
                 executed_qty = min(max(float(executed_qty), 0.0), reduced_qty)
-                unmatched_qty = max(reduced_qty - executed_qty, 0.0)
+                canceled_qty = max(reduced_qty - executed_qty, 0.0)
 
+                # 2. EXECUTIONS consume from FRONT of queue (True FIFO: Oldest Resting Orders Eat First!)
                 rem_exec = executed_qty
-                for item in fifo_consumption:
-                    if rem_exec <= 1e-12:
-                        break
-                    c_qty = float(item["consumed_qty"])
-                    alloc = min(c_qty, rem_exec)
-                    item["execution_qty"] = alloc
-                    item["unmatched_qty"] = max(0.0, c_qty - alloc)
-                    rem_exec -= alloc
+                while rem_exec > 1e-12 and lots:
+                    oldest_lot = lots[0]
+                    lot_rem = float(oldest_lot.get("remaining_qty", 0.0))
+                    if lot_rem <= 1e-12:
+                        lots.popleft()
+                        continue
+
+                    take = min(lot_rem, rem_exec)
+                    oldest_lot["remaining_qty"] = max(0.0, lot_rem - take)
+                    lot_age = event_time - int(oldest_lot.get("time", event_time))
+                    is_aged = (lot_age >= MIN_WALL_AGE_MS) or (oldest_lot.get("origin") == "snapshot")
+
+                    if is_aged:
+                        aged_consumed_qty += take
+                        aged_executed_qty += take
+
+                    fifo_consumption.append({
+                        "lot_id": oldest_lot.get("lot_id"),
+                        "origin_time": int(oldest_lot.get("time", event_time)),
+                        "is_aged": is_aged,
+                        "consumed_qty": take,
+                        "execution_qty": take,
+                        "unmatched_qty": 0.0,
+                    })
+
+                    rem_exec -= take
+                    if oldest_lot["remaining_qty"] <= 1e-12:
+                        lots.popleft()
+
+                # 3. CANCELLATIONS (Pulls) remove from BACK of queue FIRST (LIFO: Sub-10s HFT Flickers Stripped First with 0 Spoof Count!)
+                rem_cancel = canceled_qty
+                while rem_cancel > 1e-12 and lots:
+                    newest_lot = lots[-1]
+                    lot_rem = float(newest_lot.get("remaining_qty", 0.0))
+                    if lot_rem <= 1e-12:
+                        lots.pop()
+                        continue
+
+                    take = min(lot_rem, rem_cancel)
+                    newest_lot["remaining_qty"] = max(0.0, lot_rem - take)
+                    lot_age = event_time - int(newest_lot.get("time", event_time))
+                    is_aged = (lot_age >= MIN_WALL_AGE_MS) or (newest_lot.get("origin") == "snapshot")
+
+                    # ONLY count as a Pull/Spoof if this canceled lot was >= 10 seconds old!
+                    if is_aged:
+                        aged_consumed_qty += take
+                        aged_unmatched_qty += take
+
+                    fifo_consumption.append({
+                        "lot_id": newest_lot.get("lot_id"),
+                        "origin_time": int(newest_lot.get("time", event_time)),
+                        "is_aged": is_aged,
+                        "consumed_qty": take,
+                        "execution_qty": 0.0,
+                        "unmatched_qty": take if is_aged else 0.0,
+                    })
+
+                    rem_cancel -= take
+                    if newest_lot["remaining_qty"] <= 1e-12:
+                        lots.pop()
+
+                if not lots:
+                    state["liquidity_lots"][side].pop(price, None)
 
                 liquidity_record = {
                     "time": event_time,
@@ -801,23 +786,24 @@ def apply_orderbook_event(symbol, event):
                     "added_qty": added_qty,
                     "reduced_qty": reduced_qty,
                     "executed_qty": executed_qty,
-                    "unmatched_qty": unmatched_qty,
+                    "unmatched_qty": canceled_qty,
+                    "aged_consumed_qty": aged_consumed_qty,
+                    "aged_executed_qty": aged_executed_qty,
+                    "aged_unmatched_qty": aged_unmatched_qty,
                     "pulled_qty": 0.0,
                     "pull_pct": 0.0,
                     "finalized": False,
                     "fifo_reduction": True,
                     "fifo_consumption": fifo_consumption,
-                    "fifo_consumed_qty": sum(float(i["consumed_qty"]) for i in fifo_consumption),
-                    "fifo_unattributed_qty": fifo_unattributed_qty,
-                    "fifo_executed_qty": sum(float(i["execution_qty"]) for i in fifo_consumption),
-                    "fifo_unmatched_qty": sum(float(i["unmatched_qty"]) for i in fifo_consumption),
                     "status": "reduction_pending",
                 }
 
                 state["liquidity_history"].append(liquidity_record)
-
                 price_key = round(float(price), 8)
                 liquidity_index[(side, price_key)].append(liquidity_record)
+            else:
+                if not lots:
+                    state["liquidity_lots"][side].pop(price, None)
 
     process_side("bid", event.get("b", []), state["bids"])
     process_side("ask", event.get("a", []), state["asks"])
@@ -2545,7 +2531,7 @@ function drawAll() {
                 ctx.textAlign = 'left';
                 ctx.fillText(`${fmt(buyV)}${whaleBuyMark}`, spineX + 4, py);
 
-                // LEVEL TAGS WITH PULLING DELTA (Only prints dominant pull delta on heavy orderflow levels!)
+                // LEVEL TAGS: Pure 10s+ Resting Wall Pull Qty & Pull % (H-BP / bp / H-AP / ap) + Absorption % (NO P-Delta on price levels!)
                 if (proViewMode && candleW >= 135) {
                     let bParts = [];
                     let leftCol = '#84ffff';
@@ -2554,11 +2540,13 @@ function drawAll() {
                     if (bidAbsType === 'heavy') { bParts.push(`H-B.ABS:${bAbsPct}%`); leftCol = '#00e5ff'; leftBold = true; }
                     else if (bidAbsType === 'norm' && candleW >= 165) { bParts.push(`b-abs:${bAbsPct}%`); }
 
-                    // Show Bid Pull & PDelta on Left ONLY if Bid Pull is dominant (lvlPullDelta > 0)
-                    if (lvlPullDelta > 0 && (bidPullType === 'heavy' || (bidPullType === 'norm' && totV >= avgV * 0.75))) {
-                        bParts.push(`BP:${fmt(bPull)}(PΔ+${fmt(lvlPullDelta)})`);
+                    if (bidPullType === 'heavy') {
+                        bParts.push(`H-BP:${fmt(bPull)}(${bPullPct}%)`);
                         if (!bidAbsType) leftCol = '#ff4081';
-                        if (bidPullType === 'heavy') leftBold = true;
+                        leftBold = true;
+                    } else if (bidPullType === 'norm' && candleW >= 165) {
+                        bParts.push(`bp:${fmt(bPull)}(${bPullPct}%)`);
+                        if (!bidAbsType) leftCol = '#ff80ab';
                     }
 
                     if (bParts.length > 0) {
@@ -2575,11 +2563,13 @@ function drawAll() {
                     if (askAbsType === 'heavy') { aParts.push(`H-A.ABS:${aAbsPct}%`); rightCol = '#ff9100'; rightBold = true; }
                     else if (askAbsType === 'norm' && candleW >= 165) { aParts.push(`a-abs:${aAbsPct}%`); }
 
-                    // Show Ask Pull & PDelta on Right ONLY if Ask Pull is dominant (lvlPullDelta < 0)
-                    if (lvlPullDelta < 0 && (askPullType === 'heavy' || (askPullType === 'norm' && totV >= avgV * 0.75))) {
-                        aParts.push(`AP:${fmt(aPull)}(PΔ${fmt(lvlPullDelta)})`);
+                    if (askPullType === 'heavy') {
+                        aParts.push(`H-AP:${fmt(aPull)}(${aPullPct}%)`);
                         if (!askAbsType) rightCol = '#e040fb';
-                        if (askPullType === 'heavy') rightBold = true;
+                        rightBold = true;
+                    } else if (askPullType === 'norm' && candleW >= 165) {
+                        aParts.push(`ap:${fmt(aPull)}(${aPullPct}%)`);
+                        if (!askAbsType) rightCol = '#ea80fc';
                     }
 
                     if (aParts.length === 0 && isPoc) {
@@ -2609,17 +2599,28 @@ function drawAll() {
         const lowerWick = Math.min(c.open, c.close) - c.low;
         const closePos = (c.close - c.low) / cRange;
 
-        // CANDLE LEVEL PULLING DELTA: BP - AP
+        // 1. SWING HIGH / SWING LOW RETAIL SL-SWEEP vs INSTITUTIONAL FAKE-WALL vs SOLID-WALL DETECTOR
+        let prevSwingHigh = -Infinity, prevSwingLow = Infinity;
+        for (let k = Math.max(0, idx - 5); k < idx; k++) {
+            if (candles[k].high > prevSwingHigh) prevSwingHigh = candles[k].high;
+            if (candles[k].low < prevSwingLow) prevSwingLow = candles[k].low;
+        }
+        const sweptSwingHigh = idx > 0 && c.high > prevSwingHigh;
+        const sweptSwingLow = idx > 0 && c.low < prevSwingLow;
+        const candleAvgLot = cVol / Math.max(c.trades || 1, 1);
+        const isRetailLotBurst = (candleAvgLot < baselineLotSize * 1.15) && (rvol >= 0.85);
+
+        // 2. CANDLE-LEVEL PULLING DELTA (PΔ = Total 10s+ Bid Pull - Total 10s+ Ask Pull) -> Stays ONLY in Candle Pill!
         const candlePullDelta = cBidPullSum - cAskPullSum;
         const cBpPct = cBidPullSum > 0 ? Math.round((cBidPullSum / (cBidPullSum + (c.sell_volume || 1))) * 100) : 0;
         const cApPct = cAskPullSum > 0 ? Math.round((cAskPullSum / (cAskPullSum + (c.buy_volume || 1))) * 100) : 0;
 
         let pullDeltaLine = `BP:${fmt(cBidPullSum)}(${cBpPct}%) AP:${fmt(cAskPullSum)}(${cApPct}%) PΔ:${candlePullDelta >= 0 ? '+' : ''}${fmt(candlePullDelta)}`;
         let pullDeltaCol = '#b0bec5';
-        if (candlePullDelta < -avgV * 0.5 && c.close > c.open) {
-            pullDeltaCol = '#00e5ff'; // Ask Spoof pulled + Price moving UP = Bullish Win-Win!
-        } else if (candlePullDelta > avgV * 0.5 && c.close < c.open) {
-            pullDeltaCol = '#ff4081'; // Bid Spoof pulled + Price moving DOWN = Bearish Win-Win!
+        if (candlePullDelta < -avgV * 0.4 && c.close > c.open) {
+            pullDeltaCol = '#00e5ff'; // Ask Spoof pulled + Price UP = Bull Win!
+        } else if (candlePullDelta > avgV * 0.4 && c.close < c.open) {
+            pullDeltaCol = '#ff4081'; // Bid Spoof pulled + Price DOWN = Bear Win!
         }
 
         let flowVerdict = `MB:${mktBuyPct}%|MS:${mktSellPct}%`;
@@ -2639,24 +2640,28 @@ function drawAll() {
             if (mktSellPct >= 58 && c.close < c.open && closePos <= 0.4) cBear += 30;
             if (botSummary && closePos >= 0.45) cBull += 24;
             if (topSummary && closePos <= 0.55) cBear += 24;
-            // Pulling Delta + Price Direction alignment bonus!
             if (candlePullDelta < 0 && c.close > c.open) cBull += 20;
             if (candlePullDelta > 0 && c.close < c.open) cBear += 20;
             if (whaleBuyCount > whaleSellCount) cBull += 22;
             else if (whaleSellCount > whaleBuyCount) cBear += 22;
 
+            // Priority Classification: Retail SL-Sweep vs Institutional Fake-Wall vs Solid-Wall
+            if (sweptSwingLow && c.close > prevSwingLow && isRetailLotBurst && cBidPullSum < cVol * 0.25) {
+                flowVerdict = `🎯SSL-SWEEP: Retail SLs Eaten ➔ Reversal!`; verdictCol = '#00e5ff'; isHighConviction = true; cBull += 25;
+            } else if (sweptSwingHigh && c.close < prevSwingHigh && isRetailLotBurst && cAskPullSum < cVol * 0.25) {
+                flowVerdict = `🎯BSL-SWEEP: Retail SLs Eaten ➔ Reject!`; verdictCol = '#ff9100'; isHighConviction = true; cBear += 25;
+            } else if (candlePullDelta < -avgV * 0.6 && cApPct >= 55 && c.close > c.open) {
+                flowVerdict = `⚠️FAKE-ASK WALL PULLED ➔ BULL BREAK!`; verdictCol = '#e040fb'; isHighConviction = true;
+            } else if (candlePullDelta > avgV * 0.6 && cBpPct >= 55 && c.close < c.open) {
+                flowVerdict = `⚠️FAKE-BID WALL PULLED ➔ BEAR DUMP!`; verdictCol = '#ff4081'; isHighConviction = true;
+            } else if (topSummary && cAskPullSum < topSummary.val * 0.3 && c.close <= c.open) {
+                flowVerdict = `🛡️SOLID-ASK WALL: Absorbed & Capped!`; verdictCol = '#ff9100'; isHighConviction = true;
+            } else if (botSummary && cBidPullSum < botSummary.val * 0.3 && c.close >= c.open) {
+                flowVerdict = `🛡️SOLID-BID WALL: Absorbed & Held!`; verdictCol = '#00e5ff'; isHighConviction = true;
+            }
+
             const cNet = cBull - cBear;
             const whalePrefix = totalWhalesInCandle > 0 ? '◆' : '';
-
-            if (candlePullDelta < -avgV && c.close > c.open) {
-                flowVerdict = `🎯ASK SPOOF SWEPT ➔ SHORTS TRAPPED!`; verdictCol = '#00e5ff'; isHighConviction = true;
-            } else if (candlePullDelta > avgV && c.close < c.open) {
-                flowVerdict = `🎯BID SPOOF SWEPT ➔ LONGS TRAPPED!`; verdictCol = '#ff4081'; isHighConviction = true;
-            } else if (mktBuyPct >= 58 && (c.close < c.open || upperWick > bodySize * 0.8)) {
-                flowVerdict = `🐳LIM-SELL ABSORB DUMP`; verdictCol = '#ff9100'; isHighConviction = true;
-            } else if (mktSellPct >= 58 && (c.close > c.open || lowerWick > bodySize * 0.8)) {
-                flowVerdict = `🐳LIM-BUY ABSORB ACCUM`; verdictCol = '#00e5ff'; isHighConviction = true;
-            }
 
             if (cNet >= 20) {
                 const cPct = Math.min(97, Math.round(52 + (cNet / 110) * 45));
@@ -2692,9 +2697,9 @@ function drawAll() {
             }
         }
 
-        // 5-LINE CANDLE PILL (Includes Dedicated Pulling Delta Row!)
+        // 5-LINE CANDLE PILL (With Candle-Level Pulling Delta & SL-Sweep / Wall Verdict)
         if (candleW >= 65) {
-            const pillW = Math.min(candleW * 0.96, 196);
+            const pillW = Math.min(candleW * 0.96, 198);
             const pillH = 64;
             const maxAllowedY = H - TIME_H - pillH - 3;
             const pillY = Math.min(Math.max(botYBanner + 5, yL + 18), maxAllowedY);
@@ -2715,12 +2720,12 @@ function drawAll() {
             ctx.fillStyle = '#b0b8c8';
             ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} | B:${fmt(c.buy_volume)} S:${fmt(c.sell_volume)}`, cx, pillY + 19);
 
-            // Line 3: Pulling Delta (BP vs AP & PΔ)
+            // Line 3: Candle Pulling Delta (10s+ Old Resting Walls Only)
             ctx.font = 'bold 8.5px monospace';
             ctx.fillStyle = pullDeltaCol;
             ctx.fillText(pullDeltaLine, cx, pillY + 31);
 
-            // Line 4: Institutional Trap / Mechanism Verdict
+            // Line 4: Retail SL-Sweep / Fake-Wall / Solid-Wall Verdict
             ctx.font = '8.5px monospace';
             ctx.fillStyle = verdictCol;
             ctx.fillText(flowVerdict, cx, pillY + 43);
