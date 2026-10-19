@@ -1903,8 +1903,8 @@ async function fetchData() {
     fetching = true;
     try {
         const [cRes, obRes] = await Promise.all([
-            fetch(`/api/candles?symbol=${symbol}&timeframe=${tf}&limit=30`),
-            fetch(`/api/orderbook?symbol=${symbol}&limit=1000`)
+            fetch(`/api/candles?symbol=${symbol}&timeframe=${tf}&limit=18`),
+            fetch(`/api/orderbook?symbol=${symbol}&limit=80`)
         ]);
         const cData = await cRes.json();
         const oData = await obRes.json();
@@ -2995,8 +2995,8 @@ function drawAll() {
     ctx.stroke();
 }
 
-setInterval(fetchData, 1500);
-setInterval(fetchSmtPeer, 4500);
+setInterval(fetchData, 2500);
+setInterval(fetchSmtPeer, 10000);
 fetchData();
 fetchSmtPeer();
 requestAnimationFrame(drawLoop);
@@ -3304,6 +3304,21 @@ def api_scan():
         "bids_zone": bids_out,
         "asks_zone": asks_out,
     })
+
+
+import gzip
+@app.after_request
+def compress_response(response):
+    if response.status_code != 200 or len(response.get_data()) < 500:
+        return response
+    accept_encoding = request.headers.get('Accept-Encoding', '')
+    if 'gzip' not in accept_encoding.lower():
+        return response
+    response.direct_passthrough = False
+    response.set_data(gzip.compress(response.get_data(), compresslevel=5))
+    response.headers['Content-Encoding'] = 'gzip'
+    response.headers['Content-Length'] = len(response.get_data())
+    return response
 
 
 if __name__ == "__main__":
