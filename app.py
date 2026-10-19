@@ -312,7 +312,7 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
     level["delta"] = level["buy"] - level["sell"]
 
 def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty, old_book_qty, status_str):
-    """Stamps True Institutional Pulls without HFT Flicker Multiplication or Out-of-Range Ghost Rows."""
+    """Stamps ONLY when price actually approaches within 2 ticks of the 10s+ Resting Wall!"""
     step = PRICE_STEP.get(symbol, 1.0)
     try:
         p_float = float(price_str)
@@ -320,43 +320,29 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
         return
     bucket_price = round_price_to_step(p_float, step)
     key = str(bucket_price)
-    max_distance = step * 15  # Only track active battle zone near live price
+    max_distance = step * 2.0  # STRICT: Only count wall pull when live price arrives within 2 ticks of the wall!
 
     with lock:
         live_px = last_trade.get(symbol, {}).get("price")
-        if live_px is not None and abs(bucket_price - float(live_px)) > max_distance:
+        if live_px is None or abs(bucket_price - float(live_px)) > max_distance:
             return
 
         for tf in TIMEFRAMES.keys():
             curr = current_candles[symbol][tf]
             if curr is not None and "footprint" in curr:
-                # Only stamp inside or within 2 steps of actual candle High-Low (No ghost 0|0 rows in sky!)
-                if bucket_price > curr["high"] + step * 2 or bucket_price < curr["low"] - step * 2:
+                if bucket_price > curr["high"] + step or bucket_price < curr["low"] - step:
                     continue
 
                 level = curr["footprint"].get(key)
                 if level is None:
-                    level = {
-                        "price": bucket_price,
-                        "buy": 0.0,
-                        "sell": 0.0,
-                        "delta": 0.0,
-                        "volume": 0.0,
-                        "trades": 0,
-                        "pulled_qty": 0.0,
-                        "bid_pulled": 0.0,
-                        "ask_pulled": 0.0,
-                        "max_book_seen": 0.0,
-                        "status": "NORMAL",
-                    }
-                    curr["footprint"][key] = level
+                    continue  # Only stamp on price levels that actually traded in this candle!
 
                 if pulled_qty > 0.0:
                     p_val = float(pulled_qty)
                     peak_seen = max(float(level.get("max_book_seen", 0.0)), float(old_book_qty), p_val)
                     level["max_book_seen"] = peak_seen
-                    # Anti-Flicker Cap: A single level cannot accumulate more than 2.2x its actual peak resting wall!
-                    max_allowed_pull = max(peak_seen * 2.2, float(level.get("volume", 0.0)) * 1.8, p_val)
+                    # Cap at 1.0x peak resting wall (a wall cannot be pulled more than 100% of its size!)
+                    max_allowed_pull = peak_seen
 
                     if str(side).lower() == "bid":
                         new_bp = min(float(level.get("bid_pulled", 0.0)) + p_val, max_allowed_pull)
@@ -667,9 +653,10 @@ def apply_orderbook_event(symbol, event):
     finalize_liquidity_records(symbol, event_time)
     liquidity_index = state["liquidity_match_index"]
 
-    min_pull_map = {"BTCUSDT": 0.40, "ETHUSDT": 3.0, "SOLUSDT": 25.0, "XRPUSDT": 3000.0}
-    min_track_qty = min_pull_map.get(symbol, 0.2)
-    MIN_WALL_AGE_MS = 10000  # 10 Seconds Minimum Age to qualify as a Resting Heatmap Wall
+    # Minimum single pull event size to care about
+    min_pull_map = {"BTCUSDT": 1.5, "ETHUSDT": 12.0, "SOLUSDT": 80.0, "XRPUSDT": 15000.0}
+    min_track_qty = min_pull_map.get(symbol, 1.0)
+    MIN_WALL_AGE_MS = 10000  # Strict 10 Seconds Minimum Age
 
     def process_side(side, event_levels, book):
         for price, quantity in event_levels:
@@ -687,7 +674,8 @@ def apply_orderbook_event(symbol, event):
 
             lots = state["liquidity_lots"][side][price]
 
-            if added_qty >= min_track_qty:
+            # FIX 1: Track ALL additions (even small ones) so LIFO cancellation NEVER eats old 10s lots by mistake!
+            if added_qty > 1e-8:
                 lots.append({
                     "lot_id": str(uuid.uuid4()),
                     "original_qty": added_qty,
@@ -702,15 +690,14 @@ def apply_orderbook_event(symbol, event):
             aged_executed_qty = 0.0
             aged_unmatched_qty = 0.0
 
-            if reduced_qty >= min_track_qty:
-                # 1. Match genuine market executions FIRST
+            if reduced_qty > 1e-8:
                 executed_qty = match_trade_to_liquidity_reduction(
                     symbol, side, price, reduced_qty, event_time
                 )
                 executed_qty = min(max(float(executed_qty), 0.0), reduced_qty)
                 canceled_qty = max(reduced_qty - executed_qty, 0.0)
 
-                # 2. EXECUTIONS consume from FRONT of queue (True FIFO: Oldest Resting Orders Eat First!)
+                # 1. EXECUTIONS consume from FRONT of queue (FIFO: Oldest Resting Orders Execute First)
                 rem_exec = executed_qty
                 while rem_exec > 1e-12 and lots:
                     oldest_lot = lots[0]
@@ -722,26 +709,17 @@ def apply_orderbook_event(symbol, event):
                     take = min(lot_rem, rem_exec)
                     oldest_lot["remaining_qty"] = max(0.0, lot_rem - take)
                     lot_age = event_time - int(oldest_lot.get("time", event_time))
-                    is_aged = (lot_age >= MIN_WALL_AGE_MS) or (oldest_lot.get("origin") == "snapshot")
+                    is_aged = (lot_age >= MIN_WALL_AGE_MS)
 
                     if is_aged:
                         aged_consumed_qty += take
                         aged_executed_qty += take
 
-                    fifo_consumption.append({
-                        "lot_id": oldest_lot.get("lot_id"),
-                        "origin_time": int(oldest_lot.get("time", event_time)),
-                        "is_aged": is_aged,
-                        "consumed_qty": take,
-                        "execution_qty": take,
-                        "unmatched_qty": 0.0,
-                    })
-
                     rem_exec -= take
                     if oldest_lot["remaining_qty"] <= 1e-12:
                         lots.popleft()
 
-                # 3. CANCELLATIONS (Pulls) remove from BACK of queue FIRST (LIFO: Sub-10s HFT Flickers Stripped First with 0 Spoof Count!)
+                # 2. CANCELLATIONS remove from BACK of queue FIRST (LIFO: All new <10s flickers stripped first!)
                 rem_cancel = canceled_qty
                 while rem_cancel > 1e-12 and lots:
                     newest_lot = lots[-1]
@@ -753,21 +731,13 @@ def apply_orderbook_event(symbol, event):
                     take = min(lot_rem, rem_cancel)
                     newest_lot["remaining_qty"] = max(0.0, lot_rem - take)
                     lot_age = event_time - int(newest_lot.get("time", event_time))
-                    is_aged = (lot_age >= MIN_WALL_AGE_MS) or (newest_lot.get("origin") == "snapshot")
+                    is_aged = (lot_age >= MIN_WALL_AGE_MS)
 
-                    # ONLY count as a Pull/Spoof if this canceled lot was >= 10 seconds old!
-                    if is_aged:
+                    # ONLY count as Pull if this specific canceled lot was resting for >= 10 seconds
+                    # AND the total single pull event was meaningful (>= min_track_qty)!
+                    if is_aged and canceled_qty >= min_track_qty:
                         aged_consumed_qty += take
                         aged_unmatched_qty += take
-
-                    fifo_consumption.append({
-                        "lot_id": newest_lot.get("lot_id"),
-                        "origin_time": int(newest_lot.get("time", event_time)),
-                        "is_aged": is_aged,
-                        "consumed_qty": take,
-                        "execution_qty": 0.0,
-                        "unmatched_qty": take if is_aged else 0.0,
-                    })
 
                     rem_cancel -= take
                     if newest_lot["remaining_qty"] <= 1e-12:
@@ -776,31 +746,32 @@ def apply_orderbook_event(symbol, event):
                 if not lots:
                     state["liquidity_lots"][side].pop(price, None)
 
-                liquidity_record = {
-                    "time": event_time,
-                    "update_id": event_update_id,
-                    "side": side,
-                    "price": price,
-                    "old_qty": old_quantity,
-                    "new_qty": new_quantity,
-                    "added_qty": added_qty,
-                    "reduced_qty": reduced_qty,
-                    "executed_qty": executed_qty,
-                    "unmatched_qty": canceled_qty,
-                    "aged_consumed_qty": aged_consumed_qty,
-                    "aged_executed_qty": aged_executed_qty,
-                    "aged_unmatched_qty": aged_unmatched_qty,
-                    "pulled_qty": 0.0,
-                    "pull_pct": 0.0,
-                    "finalized": False,
-                    "fifo_reduction": True,
-                    "fifo_consumption": fifo_consumption,
-                    "status": "reduction_pending",
-                }
-
-                state["liquidity_history"].append(liquidity_record)
-                price_key = round(float(price), 8)
-                liquidity_index[(side, price_key)].append(liquidity_record)
+                # Only create a pull record if an actual >=10s wall of meaningful size was pulled!
+                if aged_unmatched_qty >= min_track_qty:
+                    liquidity_record = {
+                        "time": event_time,
+                        "update_id": event_update_id,
+                        "side": side,
+                        "price": price,
+                        "old_qty": old_quantity,
+                        "new_qty": new_quantity,
+                        "added_qty": added_qty,
+                        "reduced_qty": reduced_qty,
+                        "executed_qty": executed_qty,
+                        "unmatched_qty": canceled_qty,
+                        "aged_consumed_qty": aged_consumed_qty,
+                        "aged_executed_qty": aged_executed_qty,
+                        "aged_unmatched_qty": aged_unmatched_qty,
+                        "pulled_qty": 0.0,
+                        "pull_pct": 0.0,
+                        "finalized": False,
+                        "fifo_reduction": True,
+                        "fifo_consumption": fifo_consumption,
+                        "status": "reduction_pending",
+                    }
+                    state["liquidity_history"].append(liquidity_record)
+                    price_key = round(float(price), 8)
+                    liquidity_index[(side, price_key)].append(liquidity_record)
             else:
                 if not lots:
                     state["liquidity_lots"][side].pop(price, None)
@@ -2363,10 +2334,10 @@ function drawAll() {
         const effectiveHeavyAbsCut = Math.max(avgV * 1.35, heavyLvlBenchmark * 0.60);
         const effectiveNormAbsCut = Math.max(avgV * 0.70, heavyLvlBenchmark * 0.28);
 
-        // STRICT ORDERFLOW FILTER FOR PULL TAGS: Only show pull tags on levels where active orderflow/resting wall is significant!
-        const baseRestRef = liveRestBench > 0 ? Math.min(avgV, liveRestBench) : avgV;
-        const effectiveHeavyPullQty = Math.max(baseRestRef * 0.55, heavyLvlBenchmark * 0.35);
-        const effectiveNormPullQty = Math.max(baseRestRef * 0.25, avgV * 0.30);
+        // STRICT WALL THRESHOLD: Use MAX (not min!) of RestBook & HeavyLvl so 2-4 BTC small pulls NEVER get tagged as Heavy Wall!
+        const baseRestRef = liveRestBench > 0 ? Math.max(liveRestBench, heavyLvlBenchmark) : heavyLvlBenchmark;
+        const effectiveHeavyPullQty = Math.max(baseRestRef * 1.10, avgV * 1.25);
+        const effectiveNormPullQty = Math.max(baseRestRef * 0.65, avgV * 0.75);
 
         if (c.vah != null && c.val != null) {
             const yVah = pToY(c.vah + effStep * 0.5);
