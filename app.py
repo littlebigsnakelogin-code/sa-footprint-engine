@@ -330,18 +330,30 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
         for tf in TIMEFRAMES.keys():
             curr = current_candles[symbol][tf]
             if curr is not None and "footprint" in curr:
-                if bucket_price > curr["high"] + step or bucket_price < curr["low"] - step:
+                if bucket_price > curr["high"] + step * 2.0 or bucket_price < curr["low"] - step * 2.0:
                     continue
 
                 level = curr["footprint"].get(key)
                 if level is None:
-                    continue  # Only stamp on price levels that actually traded in this candle!
+                    level = {
+                        "price": bucket_price,
+                        "buy": 0.0,
+                        "sell": 0.0,
+                        "delta": 0.0,
+                        "volume": 0.0,
+                        "trades": 0,
+                        "pulled_qty": 0.0,
+                        "bid_pulled": 0.0,
+                        "ask_pulled": 0.0,
+                        "max_book_seen": 0.0,
+                        "status": "NORMAL",
+                    }
+                    curr["footprint"][key] = level
 
                 if pulled_qty > 0.0:
                     p_val = float(pulled_qty)
                     peak_seen = max(float(level.get("max_book_seen", 0.0)), float(old_book_qty), p_val)
                     level["max_book_seen"] = peak_seen
-                    # Cap at 1.0x peak resting wall (a wall cannot be pulled more than 100% of its size!)
                     max_allowed_pull = peak_seen
 
                     if str(side).lower() == "bid":
@@ -432,14 +444,19 @@ def fetch_orderbook_snapshot_ws(symbol):
 # ============================================================
 
 def finalize_liquidity_records(symbol, current_time_ms=None):
+    if symbol not in orderbook:
+        return 0
+
+    has_event_time = current_time_ms is not None
     if current_time_ms is None:
         current_time_ms = now_ms()
 
     state = orderbook[symbol]
     history = state["liquidity_history"]
+    finalized_count = 0
 
     for record in history:
-        if record.get("finalized"):
+        if not isinstance(record, dict) or record.get("finalized"):
             continue
 
         record_time = int(record.get("time", current_time_ms))
@@ -448,17 +465,18 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
 
         reduced_qty = float(record.get("reduced_qty", 0.0))
         executed_qty = min(float(record.get("executed_qty", 0.0)), reduced_qty)
+        total_unmatched_qty = max(0.0, reduced_qty - executed_qty)
 
-        # STRICT 10-SECOND AGED FIFO/LIFO RULE:
-        # Only count pulls that came from >= 10s old Resting Heatmap Walls!
-        aged_unmatched_qty = float(record.get("aged_unmatched_qty", 0.0))
+        # STRICT 10-SECOND AGED FIFO/LIFO RULE + LATE TRADE EXECUTION DEDUCTION:
+        # Subtract any late-arriving trade executions (within 450ms window) so eaten walls are NEVER counted as pulls!
+        aged_unmatched_raw = float(record.get("aged_unmatched_qty", 0.0))
         aged_consumed_qty = float(record.get("aged_consumed_qty", 0.0))
 
-        pulled_qty = max(0.0, aged_unmatched_qty)
+        pulled_qty = min(max(0.0, aged_unmatched_raw), total_unmatched_qty)
         pull_pct = (pulled_qty / aged_consumed_qty) if aged_consumed_qty > 0 else 0.0
 
         record["executed_qty"] = round(executed_qty, 8)
-        record["unmatched_qty"] = round(max(reduced_qty - executed_qty, 0.0), 8)
+        record["unmatched_qty"] = round(total_unmatched_qty, 8)
         record["pulled_qty"] = round(pulled_qty, 8)
         record["pull_pct"] = round(pull_pct, 4)
         record["finalized"] = True
@@ -474,8 +492,8 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         else:
             record["status"] = "UNCONFIRMED_REDUCTION"
 
-        # Stamp ONLY genuine >=10s Aged Resting Wall pulls to the footprint!
-        if pulled_qty > 0.0:
+        # Stamp ONLY genuine >=10s Aged Resting Wall pulls that were NOT executed!
+        if pulled_qty > 0.0 and record["status"] != "HEAVY ABSORPTION":
             stamp_liquidity_event_to_active_candles(
                 symbol,
                 record.get("price"),
@@ -484,6 +502,38 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
                 max(aged_consumed_qty, pulled_qty),
                 record["status"],
             )
+        finalized_count += 1
+
+    # RAM CLEANUP: Prevent index memory leaks over 12H+ sessions
+    liquidity_index = state.get("liquidity_match_index")
+    if isinstance(liquidity_index, dict):
+        history_ids = {id(r) for r in history if isinstance(r, dict)}
+        for key, records in list(liquidity_index.items()):
+            retained = deque(
+                r for r in records
+                if isinstance(r, dict) and id(r) in history_ids and not r.get("finalized")
+            )
+            if retained:
+                liquidity_index[key] = retained
+            else:
+                liquidity_index.pop(key, None)
+
+    trade_index = state.get("trade_match_index")
+    if isinstance(trade_index, dict):
+        trade_cutoff = current_time_ms - 1600 if has_event_time else None
+        for key, trades in list(trade_index.items()):
+            retained_trades = deque(
+                t for t in trades
+                if isinstance(t, dict)
+                and float(t.get("remaining_qty", 0.0)) > 1e-12
+                and (trade_cutoff is None or int(t.get("time", 0)) >= trade_cutoff)
+            )
+            if retained_trades:
+                trade_index[key] = retained_trades
+            else:
+                trade_index.pop(key, None)
+
+    return finalized_count
 
 
 def record_trade_for_execution_matching(symbol, price, quantity, trade_time, is_buyer_maker):
