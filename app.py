@@ -1576,8 +1576,9 @@ def home():
     <div class="legend">
         <span class="lg" style="background:#00e5ff;color:#000;">H-B.ABS(&ge;65%)</span>
         <span class="lg" style="background:#ff9100;color:#000;">H-A.ABS(&ge;65%)</span>
-        <span class="lg" style="background:#ff4081;color:#fff;">P&Delta; (Pull Delta)</span>
-        <span class="lg" style="background:#e040fb;color:#fff;">SPOOF %</span>
+        <span class="lg" style="background:#ff4081;color:#fff;">10s PULL &amp; P&Delta;</span>
+        <span class="lg" style="background:#ffeb3b;color:#000;">🟡 nPOC</span>
+        <span class="lg" style="background:#e040fb;color:#fff;">🎯 UB-HI/LO</span>
         <span class="lg" style="background:#ffd700;color:#000;">◆ WHALE</span>
     </div>
 
@@ -1612,24 +1613,49 @@ def home():
 
 <div id="ruleModal">
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #00e5ff; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
-        <b style="color:#00e5ff; font-size:14px;">⚡ SA FOOTPRINT & PULLING-DELTA ENGINE V4.5 — MASTER RULEBOOK</b>
+        <b style="color:#00e5ff; font-size:14px;">⚡ SA INSTITUTIONAL FOOTPRINT & ORDERFLOW ENGINE — COMPLETE A-TO-Z MASTER RULEBOOK</b>
         <button class="btn" onclick="toggleRules()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
     </div>
-    <div class="rule-sec">
-        <h4>1. PULLING DELTA (P&Delta; = Bid Pulled &minus; Ask Pulled) — FAKE MOVE & SL HUNT DETECTOR</h4>
-        • <b>Formula:</b> <code>P&Delta; = Bid Pull Qty &minus; Ask Pull Qty</code>.<br>
-        • <b>Negative P&Delta; (Ask Pull &gt; Bid Pull):</b> Upar Ask side par bada fake sell order dikha kar pull kiya gaya taaki retail dar ke short kare! Agar price UPAR ja raha hai + P&Delta; Negative hai = <b>100% Institutional Bull Win (Retail Short SLs Hunted!)</b>.<br>
-        • <b>Positive P&Delta; (Bid Pull &gt; Ask Pull):</b> Niche Bid side par fake support dikha kar pull kiya gaya taaki retail long kare! Agar price NEECHE ja raha hai + P&Delta; Positive hai = <b>100% Institutional Bear Win (Retail Long SLs Hunted!)</b>.<br>
-        • <b>Level & Candle Pill Display:</b> Jahan heavy orderflow hai, wahan level par <code>P&Delta;</code> dikhega aur Candle Pill ki Line 3 me <code>BP vs AP (P&Delta;)</code> ka pura hisab dikhega!
-    </div>
+
     <div class="rule-sec" style="border-color:#00e5ff;">
-        <h4 style="color:#00e5ff;">2. NEW SPINE-SPLIT BATTLE DOM (AUTO-CROPPED TO ACTIVE ORDERS ONLY)</h4>
-        • <b>Zero Empty Rows:</b> DOM me infinity tak khali rows hata di gayi hain—sirf active orders + 4 buffer levels tak hi rows dikhengi!<br>
-        • <b>Center Spine + Right-End Price Scale:</b> Bich me Spine hai (Left = Bid Side, Right = Ask Side) aur Price Scale sabse Right End me hai.<br>
-        • <b>Dual Split Bars (Genuine Executed vs Spoof Pulled):</b> Har row me <b>Upper Green/Red Bar = Genuine Executed Volume</b> dikhata hai, aur <b>Lower Pink/Purple Bar = Pulled Spoof Qty &amp; %</b> (`BID SPOOF xx%` / `ASK SPOOF xx%`) + Clear Winner (`🟢BUY WIN` / `🔴SELL WIN`) dikhata hai!
+        <h4 style="color:#00e5ff;">1. 10-SECOND AGED RESTING WALL PULLS (H-BP / bp / H-AP / ap) &amp; LIFO NOISE FILTER</h4>
+        • <b>10-Second Heatmap Wall Gate:</b> Orderbook me har millisecond aane-jane wale HFT flickers ko LIFO (Last-In-First-Out) queue se 0% spoof count karke filter kiya jata hai. Sirf wahi limit orders jo <b>&ge; 10 Seconds</b> se orderbook me resting the aur jab price unke <b>2 ticks</b> ke andar aaya tab pull huye, unhe genuine <b>Institutional Wall Pull</b> maana jata hai.<br>
+        • <b>Price Level Tags:</b> Left (Bid) side par <code>H-BP:Qty(%)</code> (Heavy Bid Pull) ya <code>bp:Qty(%)</code> aur Right (Ask) side par <code>H-AP:Qty(%)</code> (Heavy Ask Pull) ya <code>ap:Qty(%)</code> dikhta hai. Price levels par Pulling Delta nahi dikhaya jata taaki chart 100% clean rahe.
+    </div>
+
+    <div class="rule-sec">
+        <h4>2. CANDLE PILL PULLING DELTA (P&Delta; = Total 10s+ Bid Pulled &minus; Total 10s+ Ask Pulled)</h4>
+        • <b>Formula (Candle Pill Line 3):</b> <code>P&Delta; = Total Bid Pull (BP) &minus; Total Ask Pull (AP)</code>.<br>
+        • <b>Negative P&Delta; (AP &gt; BP) + Bullish Close:</b> Upar Ask side par bada fake sell wall dikha kar retail ko short karwaya gaya, aur price aate hi wall pull kar li gayi! (<b>⚠️ FAKE-ASK WALL PULLED &rarr; BULL BREAK!</b>).<br>
+        • <b>Positive P&Delta; (BP &gt; AP) + Bearish Close:</b> Niche Bid side par fake support wall dikha kar retail ko long karwaya gaya, aur price aate hi wall kheench li gayi! (<b>⚠️ FAKE-BID WALL PULLED &rarr; BEAR DUMP!</b>).
+    </div>
+
+    <div class="rule-sec" style="border-color:#ff9100;">
+        <h4 style="color:#ff9100;">3. TRUE INSTITUTIONAL ABSORPTION (H-B.ABS / H-A.ABS) vs SOLID WALLS</h4>
+        • <b>Bid Absorption (<code>H-B.ABS &ge; 65%</code> — Cyan):</b> Jab candle ke lower/bid zone me bhari Market Sell orders maare jayein (<code>Sell Vol &ge; Heavy Cut</code>), lekin Resting Limit Buyers saara maal absorb kar lein aur price level ke niche close na hone dein (<code>🛡️ SOLID-BID WALL: Absorbed &amp; Held!</code>).<br>
+        • <b>Ask Absorption (<code>H-A.ABS &ge; 65%</code> — Orange):</b> Jab candle ke upper/ask zone me bhari Market Buy orders maare jayein, lekin Resting Limit Sellers saara maal absorb karke price ko cap kar dein (<code>🛡️ SOLID-ASK WALL: Absorbed &amp; Capped!</code>).
+    </div>
+
+    <div class="rule-sec" style="border-color:#ffd700;">
+        <h4 style="color:#ffd700;">4. WHALE BLOCKS (◆), RETAIL SL-SWEEPS (🎯) &amp; CANDLE PILL 5-LINE DECODER</h4>
+        • <b>◆ Whale Lot Detector (Gold Diamond):</b> Jab kisi price level par average trade size (<code>Volume / Trades</code>) normal baseline lot se <b>2.8x se 4.5x+ bada</b> ho aur heavy volume ho, toh wahan <code>◆</code> (Institutional Block Execution) lagta hai.<br>
+        • <b>🎯 BSL-SWEEP / SSL-SWEEP:</b> Jab price pichli candles ka Swing High ya Swing Low tode, chote-chote retail stop-loss lots trigger hon (high trade count, small avg lot, low wall pull), aur candle wapas range ke andar close ho jaye = <b>100% Retail Stop-Hunt Reversal!</b><br>
+        • <b>5-Line Candle Pill:</b> Line 1: <code>Delta | Vol (RVOL)</code> &bull; Line 2: <code>CVD | Market Buy vs Sell</code> &bull; Line 3: <code>BP vs AP &amp; P&Delta;</code> &bull; Line 4: <code>Mechanism (SL-Sweep / Fake-Wall / Solid-Wall)</code> &bull; Line 5: <code>Final Winner &amp; Conviction %</code>.
+    </div>
+
+    <div class="rule-sec" style="border-color:#e040fb;">
+        <h4 style="color:#e040fb;">5. NAKED POC (nPOC) &amp; UNFINISHED BUSINESS (UB-HIGH / UB-LOW) MAGNETS</h4>
+        • <b>🟡 Naked POC (<code>nPOC</code>):</b> Pichli kisi bhi candle ka Point of Control (sabse jyada volume wala price) jisko baad ki kisi bhi candle ne abhi tak touch/test nahi kiya hai. Ye high-volume nodes <b>Price Magnets</b> ka kaam karte hain.<br>
+        • <b>🎯 Unfinished Business (<code>UB-HIGH</code> / <code>UB-LOW</code>):</b> Normal candle ke exact High par Bid (`Sell`) `0` hona chahiye aur exact Low par Ask (`Buy`) `0` hona chahiye (Completed Auction). Agar kisi candle ke exact High ya Low extreme par <b>Bid aur Ask DONO side Significant Volume (&gt;0)</b> trade hua hai aur baad me price ne us extreme ko sweep nahi kiya, toh wo <b>Unfinished Auction (Adhura Business)</b> hai—market us level ko revisit karke sweep karne zaroor aata hai!
+    </div>
+
+    <div class="rule-sec" style="border-color:#00e676;">
+        <h4 style="color:#00e676;">6. TOP BENCHMARK BAR, SMT RADAR &amp; SPINE-SPLIT BATTLE DOM</h4>
+        • <b>Flow Benchmarks:</b> <code>Avg</code> = Average Candle Vol | <code>HeavyL</code> = Heavy Footprint Cell Cutoff | <code>RestBook</code> = Live Nearby Orderbook Average Wall Size | <code>Cur</code> = Current Candle Volume &amp; RVOL.<br>
+        • <b>🔗 SMT Divergence Radar:</b> BTC aur ETH ke Swing Highs/Lows ko real-time compare karta hai. Agar ek asset Low sweep kare aur dusra Hold kare = <code>🚨 BULL SMT</code>. Agar ek High sweep kare aur dusra Fail kare = <code>🚨 BEAR SMT</code>.<br>
+        • <b>⚔️ Spine-Split Battle DOM:</b> Auto-cropped active ladder jahan Center Spine ke Left me Bid Battle (Upper Red Bar = Genuine Executed Sell, Lower Pink Bar = Pulled Bid Spoof) aur Right me Ask Battle (Upper Green Bar = Genuine Executed Buy, Lower Purple Bar = Pulled Ask Spoof) + Right-End Price Scale par clear Winner dikhta hai.
     </div>
 </div>
-
 <script>
 const wrap = document.getElementById('wrap');
 const cv = document.getElementById('cv');
@@ -2218,14 +2244,52 @@ function drawAll() {
     const baselineLotSize = Math.max(totalHistVol / Math.max(1, totalHistTrades), 0.0001);
 
     const nakedPocs = [];
+    const unfinishedLevels = [];
     for (let i = 0; i < candles.length - 1; i++) {
         const c = candles[i];
+        // 1. Track Untouched Naked POCs (nPOC)
         if (c.poc != null) {
             let touched = false;
             for (let j = i + 1; j < candles.length; j++) {
                 if (candles[j].low <= c.poc && candles[j].high >= c.poc) { touched = true; break; }
             }
-            if (!touched) nakedPocs.push(c.poc);
+            if (!touched) nakedPocs.push({ price: c.poc, startIdx: i, vol: c.poc_volume || 0 });
+        }
+
+        // 2. Track Untouched Unfinished Business (UB-HIGH & UB-LOW where BOTH Buy > 0 AND Sell > 0 at extreme!)
+        const fpArr = Array.isArray(c.footprint) ? c.footprint : Object.values(c.footprint || {});
+        if (fpArr.length > 0) {
+            let hiLvl = null, loLvl = null;
+            fpArr.forEach(l => {
+                if ((l.volume || 0) <= 0) return;
+                if (!hiLvl || l.price > hiLvl.price) hiLvl = l;
+                if (!loLvl || l.price < loLvl.price) loLvl = l;
+            });
+            const minUbSideVol = Math.max(baselineLotSize * 0.8, 0.05);
+            if (hiLvl && (hiLvl.buy || 0) >= minUbSideVol && (hiLvl.sell || 0) >= minUbSideVol) {
+                let sweptHi = false;
+                for (let j = i + 1; j < candles.length; j++) {
+                    if (candles[j].high > hiLvl.price + rawStep * 0.2) { sweptHi = true; break; }
+                }
+                if (!sweptHi) {
+                    unfinishedLevels.push({
+                        price: hiLvl.price, startIdx: i, type: 'UB-HIGH',
+                        buy: hiLvl.buy, sell: hiLvl.sell
+                    });
+                }
+            }
+            if (loLvl && (loLvl.buy || 0) >= minUbSideVol && (loLvl.sell || 0) >= minUbSideVol) {
+                let sweptLo = false;
+                for (let j = i + 1; j < candles.length; j++) {
+                    if (candles[j].low < loLvl.price - rawStep * 0.2) { sweptLo = true; break; }
+                }
+                if (!sweptLo) {
+                    unfinishedLevels.push({
+                        price: loLvl.price, startIdx: i, type: 'UB-LOW',
+                        buy: loLvl.buy, sell: loLvl.sell
+                    });
+                }
+            }
         }
     }
 
@@ -2295,6 +2359,65 @@ function drawAll() {
         ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(chartW, gy); ctx.stroke();
     }
 
+    // DRAW NAKED POCs (nPOC) & UNFINISHED BUSINESS (UB-HIGH / UB-LOW) MAGNET LINES
+    const candleIdxToX = idx => rightStart - (candles.length - 1 - idx) * candleW;
+
+    nakedPocs.slice(-8).forEach(np => {
+        if (np.price < minP || np.price > maxP) return;
+        const py = pToY(np.price + effStep * 0.5);
+        if (py < 14 || py > chartH - 14) return;
+        const startX = Math.max(0, candleIdxToX(np.startIdx));
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 235, 59, 0.65)';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(startX, py);
+        ctx.lineTo(chartW, py);
+        ctx.stroke();
+        ctx.restore();
+
+        const lbl = `🟡 nPOC ${np.price.toFixed(dec)} (${fmt(np.vol)})`;
+        ctx.font = 'bold 8.5px monospace';
+        const tw = ctx.measureText(lbl).width + 8;
+        ctx.fillStyle = 'rgba(255, 235, 59, 0.92)';
+        ctx.fillRect(chartW - tw - 4, py - 7, tw, 14);
+        ctx.fillStyle = '#000';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(lbl, chartW - 8, py);
+    });
+
+    unfinishedLevels.slice(-8).forEach(ub => {
+        if (ub.price < minP || ub.price > maxP) return;
+        const py = pToY(ub.price + effStep * 0.5);
+        if (py < 14 || py > chartH - 14) return;
+        const startX = Math.max(0, candleIdxToX(ub.startIdx));
+        const isHi = ub.type === 'UB-HIGH';
+        const col = isHi ? '#e040fb' : '#00e5ff';
+
+        ctx.save();
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath();
+        ctx.moveTo(startX, py);
+        ctx.lineTo(chartW, py);
+        ctx.stroke();
+        ctx.restore();
+
+        const lbl = `🎯 ${ub.type} ${ub.price.toFixed(dec)} (${fmt(ub.sell)}x${fmt(ub.buy)})`;
+        ctx.font = 'bold 8.5px monospace';
+        const tw = ctx.measureText(lbl).width + 8;
+        ctx.fillStyle = isHi ? 'rgba(224, 64, 251, 0.92)' : 'rgba(0, 229, 255, 0.92)';
+        ctx.fillRect(chartW - tw - 4, py - 7, tw, 14);
+        ctx.fillStyle = '#000';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(lbl, chartW - 8, py);
+    });
+    
     const timeBarTop = H - TIME_H;
     ctx.fillStyle = '#11151f';
     ctx.fillRect(0, timeBarTop, chartW, TIME_H);
