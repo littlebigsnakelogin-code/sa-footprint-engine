@@ -1502,17 +1502,30 @@ def home():
     }
     .verdict-box {
         flex: 1;
-        min-width: 300px;
-        padding: 3px 10px;
-        border-radius: 3px;
-        font-weight: bold;
-        font-size: 11px;
+        min-width: 260px;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 10.5px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        border: 1px solid #2c3347;
+        background: #141926;
+    }
+    .verdict-top {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        gap: 10px;
-        border: 1px solid #2c3347;
-        background: #161b26;
+        font-weight: bold;
+        font-size: 11px;
+    }
+    .verdict-sub {
+        font-size: 9.5px;
+        color: #cfd8dc;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
     .brand { color: #00e676; font-weight: bold; margin-right: 4px; font-size: 12px; flex-shrink: 0; }
     select, .btn {
@@ -1557,7 +1570,7 @@ def home():
     }
     .dom-slide-tab:hover { background: #00e5ff; color: #000; }
 
-    #ruleModal {
+    #ruleModal, #aiModal {
         display: none;
         position: fixed;
         inset: 36px 4%;
@@ -1581,12 +1594,36 @@ def home():
         margin-bottom: 10px;
     }
     .rule-sec h4 { color: #ffeb3b; margin-bottom: 6px; font-size: 13px; border-bottom: 1px solid #232a3d; padding-bottom: 4px; }
+    .ai-input {
+        width: 100%;
+        background: #131824;
+        color: #fff;
+        border: 1px solid #2962ff;
+        border-radius: 4px;
+        padding: 8px 10px;
+        font-family: monospace;
+        font-size: 12px;
+        margin-top: 6px;
+    }
+    .ai-reply-box {
+        background: #0f1420;
+        border: 1px solid #263147;
+        border-radius: 4px;
+        padding: 12px;
+        margin-top: 10px;
+        white-space: pre-wrap;
+        font-size: 12px;
+        line-height: 1.6;
+        color: #e0f7fa;
+        max-height: 52vh;
+        overflow-y: auto;
+    }
 </style>
 </head>
 <body>
 
 <div class="topbar">
-    <span class="brand">⚡ SA V4.5</span>
+    <span class="brand">⚡ SA V4.6</span>
     <select id="symSel" onchange="setSym(this.value)">
         <option value="BTCUSDT" selected>BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
@@ -1621,6 +1658,7 @@ def home():
     <button class="btn" onclick="resetCamera()">Fit</button>
     <button class="btn active" id="viewModeBtn" onclick="toggleViewMode()">👁️ PRO</button>
     <button class="btn" id="domToggleBtn" onclick="toggleDOM()">DOM</button>
+    <button class="btn" onclick="toggleAI()" style="background:#00bfa5;color:#000;border-color:#00e5ff;font-weight:bold;">🤖 AI MENTOR</button>
     <button class="btn" onclick="toggleRules()" style="border-color:#ffeb3b;color:#ffeb3b;font-weight:bold;">📖 RULES</button>
 
     <div class="legend">
@@ -1650,15 +1688,49 @@ def home():
         <span id="bmCur" style="color:#fff;">Cur:--</span>
     </div>
     <div class="smt-box" id="smtRadarBox">🔗 SMT: SCANNING...</div>
-    <div class="verdict-box" id="masterVerdictBox">
-        <span id="masterVerdictTitle">SCANNING MACRO MARKET ORDERFLOW...</span>
-        <span id="masterVerdictReasons" style="font-size:10px;font-weight:normal;color:#cfd8dc;">Calculating structure...</span>
+
+    <!-- FINAL BOX 1: DEDICATED SCALPING VERDICT & SCENARIO -->
+    <div class="verdict-box" id="scalpFinalBox">
+        <div class="verdict-top">
+            <span id="scalpFinalTitle">⚡ SCALP: SCANNING...</span>
+            <span id="scalpFinalTarget" style="font-size:10px;color:#ffeb3b;">Target: --</span>
+        </div>
+        <div class="verdict-sub" id="scalpFinalReason">Analyzing live DOM walls, absorption &amp; 10s pulls...</div>
+    </div>
+
+    <!-- FINAL BOX 2: DEDICATED INTRADAY VERDICT & SCENARIO -->
+    <div class="verdict-box" id="intraFinalBox">
+        <div class="verdict-top">
+            <span id="intraFinalTitle">🌊 INTRADAY: SCANNING...</span>
+            <span id="intraFinalTarget" style="font-size:10px;color:#00e5ff;">HTF Tgt: --</span>
+        </div>
+        <div class="verdict-sub" id="intraFinalReason">Analyzing session CVD, whale blocks &amp;POC migration...</div>
     </div>
 </div>
 
 <div id="wrap">
     <canvas id="cv"></canvas>
     <div id="domSlideTab" class="dom-slide-tab" onclick="toggleDOM()">❮ BATTLE DOM</div>
+</div>
+
+<div id="aiModal">
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #00e5ff; padding-bottom:8px; margin-bottom:10px; position:sticky; top:0; background:#0b0e16; z-index:2;">
+        <b style="color:#00e5ff; font-size:14px;">🤖 SA ENGINE + TRADINGVIEW AI MENTOR (Powered by GEMINI_API_KEY)</b>
+        <button class="btn" onclick="toggleAI()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
+    </div>
+    <div style="font-size:11px; color:#b0bec5; margin-bottom:8px;">
+        Apna TradingView structure/observation niche likh (jaise: <i>"5m low sweep hua hai aur FVG par hai, Long lu ya wait karu?"</i>) ya seedha Quick Button daba. AI tere SA Engine ke live DOM, Absorption, 10s Pulls, UB/nPOC aur Whale data ko tere view se mila kar sachcha jawab dega:
+    </div>
+    <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
+        <button class="btn" style="background:#1e88e5;color:#fff;border:none;padding:5px 10px;" onclick="askAI('Abhi live SA Engine data ke hisab se Scalp aur Intraday dono ka exact trade decision bata: Buying Ready hai, Selling Ready hai, ya Wait karna hai aur kyu?')">🔍 Verify Live Setup (Scalp + Intraday)</button>
+        <button class="btn" style="background:#00897b;color:#fff;border:none;padding:5px 10px;" onclick="askAI('Main LONG trade dekh raha hu. Check karke bata ki humara DOM, Bid Absorption, 10s Pulling Delta aur UB/nPOC magnets Long ko support kar rahe hain ya koi trap hai?')">🟢 Check LONG Alignment</button>
+        <button class="btn" style="background:#e53935;color:#fff;border:none;padding:5px 10px;" onclick="askAI('Main SHORT trade dekh raha hu. Check karke bata ki humara DOM, Ask Absorption, 10s Pulling Delta aur UB/nPOC magnets Short ko support kar rahe hain ya koi trap hai?')">🔴 Check SHORT Alignment</button>
+    </div>
+    <div style="display:flex; gap:6px;">
+        <input type="text" id="aiUserPrompt" class="ai-input" placeholder="Yahan likh: TradingView par kya dikh raha hai ya kya poochna hai..." onkeydown="if(event.key==='Enter') askAI()">
+        <button class="btn" onclick="askAI()" style="background:#00e676;color:#000;font-weight:bold;padding:6px 16px;margin-top:6px;">🚀 ASK AI</button>
+    </div>
+    <div class="ai-reply-box" id="aiReplyBox">🤖 Ready! Upar koi button daba ya apna TradingView observation likh kar ASK AI par click kar.</div>
 </div>
 
 <div id="ruleModal">
@@ -1700,10 +1772,10 @@ def home():
     </div>
 
     <div class="rule-sec" style="border-color:#00e676;">
-        <h4 style="color:#00e676;">6. TOP BENCHMARK BAR, SMT RADAR &amp; SPINE-SPLIT BATTLE DOM</h4>
-        • <b>Flow Benchmarks:</b> <code>Avg</code> = Average Candle Vol | <code>HeavyL</code> = Heavy Footprint Cell Cutoff | <code>RestBook</code> = Live Nearby Orderbook Average Wall Size | <code>Cur</code> = Current Candle Volume &amp; RVOL.<br>
-        • <b>🔗 SMT Divergence Radar:</b> BTC aur ETH ke Swing Highs/Lows ko real-time compare karta hai. Agar ek asset Low sweep kare aur dusra Hold kare = <code>🚨 BULL SMT</code>. Agar ek High sweep kare aur dusra Fail kare = <code>🚨 BEAR SMT</code>.<br>
-        • <b>⚔️ Spine-Split Battle DOM:</b> Auto-cropped active ladder jahan Center Spine ke Left me Bid Battle (Upper Red Bar = Genuine Executed Sell, Lower Pink Bar = Pulled Bid Spoof) aur Right me Ask Battle (Upper Green Bar = Genuine Executed Buy, Lower Purple Bar = Pulled Ask Spoof) + Right-End Price Scale par clear Winner dikhta hai.
+        <h4 style="color:#00e676;">6. 2 FINAL DECISION BOXES (SCALP vs INTRADAY), SMART DOM &amp; AI MENTOR</h4>
+        • <b>⚡ Box 1 (SCALP VERDICT):</b> Last 3 candles ke DOM Execution, Bid/Ask Absorption, Resting Wall aur 10s Pull ko mila kar seedha batata hai: <code>🟢 BUYING READY</code>, <code>🔴 SELLING READY</code>, ya <code>⏳ WAIT (BUYING/SELLING BUILDING)</code> + exact reason aur target!<br>
+        • <b>🌊 Box 2 (INTRADAY VERDICT):</b> Rolling 20-candle session CVD, Whale Blocks, Multi-Candle Absorption aur POC stepping se bada intraday direction aur HTF Magnet Target batata hai.<br>
+        • <b>🤖 AI Mentor:</b> Render ke <code>GEMINI_API_KEY</code> se juda hua Zero-Load Co-Pilot jo TradingView structure aur SA Engine data ko cross-verify karta hai.
     </div>
 </div>
 <script>
@@ -1712,9 +1784,42 @@ const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d', { alpha: false });
 const slideTab = document.getElementById('domSlideTab');
 const ruleModal = document.getElementById('ruleModal');
+const aiModal = document.getElementById('aiModal');
+let latestEngineSummary = {};
 
 function toggleRules() {
     ruleModal.style.display = (ruleModal.style.display === 'block') ? 'none' : 'block';
+}
+function toggleAI() {
+    aiModal.style.display = (aiModal.style.display === 'block') ? 'none' : 'block';
+}
+
+async function askAI(customPrompt) {
+    const inp = document.getElementById('aiUserPrompt');
+    const q = customPrompt || inp.value.trim();
+    if (!q) return;
+    const box = document.getElementById('aiReplyBox');
+    box.innerText = '🧠 AI Mentor analyzing live SA Engine DOM, Absorptions, 10s Pulls & Magnets...';
+    try {
+        const res = await fetch('/api/ai-mentor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                symbol,
+                timeframe: tf,
+                question: q,
+                engine_data: latestEngineSummary
+            })
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            box.innerText = data.reply;
+        } else {
+            box.innerText = '⚠️ AI Error: ' + (data.message || 'Check GEMINI_API_KEY in Render Environment.');
+        }
+    } catch (e) {
+        box.innerText = '⚠️ Network error connecting to AI Mentor: ' + e.message;
+    }
 }
 
 const STEP_MAP = { BTCUSDT: 1.0, ETHUSDT: 0.1, SOLUSDT: 0.01, XRPUSDT: 0.0001 };
@@ -2143,10 +2248,11 @@ function getLiveRestingBenchmark(effStep, lastClose) {
     return vals.reduce((a, b) => a + b, 0) / vals.length;
 }
 
-function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, heavyLvlBenchmark, liveRestBench) {
-    if (!candles || candles.length < 3) return;
+function updateDualHorizonDecisions(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLevels, heavyLvlBenchmark, liveRestBench) {
+    if (!candles || candles.length < 3) return null;
 
-    const sample = candles.slice(-20);
+    const dec = rawStep < 0.01 ? 4 : (rawStep < 1 ? 2 : 1);
+    const sample = candles.slice(-18);
     const last = sample[sample.length - 1];
     const first = sample[0];
     const curRvol = (last.volume || 0) / avgFlowVol;
@@ -2157,6 +2263,134 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
     document.getElementById('bmCur').innerText = `Cur:${fmt(last.volume)}(${curRvol.toFixed(1)}x)`;
     document.getElementById('bmCur').style.color = curRvol >= 1.3 ? '#00e676' : '#d1d4dc';
 
+    // 1. FIND NEAREST UPPER & LOWER TARGET MAGNETS (UB-HIGH / UB-LOW / nPOC)
+    let upperMag = null, lowerMag = null;
+    const allMags = [
+        ...unfinishedLevels.map(u => ({ price: u.price, tag: u.type })),
+        ...nakedPocs.map(n => ({ price: n.price, tag: 'nPOC' }))
+    ];
+    allMags.forEach(m => {
+        if (m.price > last.close + effStep * 0.5) {
+            if (!upperMag || (m.price - last.close) < (upperMag.price - last.close)) upperMag = m;
+        } else if (m.price < last.close - effStep * 0.5) {
+            if (!lowerMag || (last.close - m.price) < (last.close - lowerMag.price)) lowerMag = m;
+        }
+    });
+
+    // 2. SCAN LIVE ORDERBOOK WALLS & LAST 3 CANDLES FOR SCALP HORIZON
+    const bidsArr = obData.bids || [];
+    const asksArr = obData.asks || [];
+    let nearBidWall = { price: 0, val: 0 }, nearAskWall = { price: 0, val: 0 };
+    let nearBidSum = 0, nearAskSum = 0;
+
+    bidsArr.forEach(b => {
+        if (last.close - b.price <= effStep * 12) {
+            nearBidSum += b.quantity;
+            if (b.quantity > nearBidWall.val) nearBidWall = { price: b.price, val: b.quantity };
+        }
+    });
+    asksArr.forEach(a => {
+        if (a.price - last.close <= effStep * 12) {
+            nearAskSum += a.quantity;
+            if (a.quantity > nearAskWall.val) nearAskWall = { price: a.price, val: a.quantity };
+        }
+    });
+
+    const recent3 = candles.slice(-3);
+    let rBuyExec = 0, rSellExec = 0, rBidPull = 0, rAskPull = 0;
+    let rBidAbsCount = 0, rAskAbsCount = 0, rBestBidAbsPx = null, rBestAskAbsPx = null;
+
+    recent3.forEach(rc => {
+        rBuyExec += (rc.buy_volume || 0);
+        rSellExec += (rc.sell_volume || 0);
+        const rfp = groupFootprint(rc.footprint, rc.low, rc.high, effStep, rc.close, liveRestBench);
+        const rCells = rfp.filter(x => x.volume > 0);
+        const rAvgV = rCells.length > 0 ? (rc.volume || 1) / rCells.length : 1;
+        const rHeavyCut = Math.max(rAvgV * 1.35, heavyLvlBenchmark * 0.55);
+
+        rfp.forEach(l => {
+            rBidPull += (l.bid_pulled || 0);
+            rAskPull += (l.ask_pulled || 0);
+            const tot = l.volume || 0;
+            if (tot > 0) {
+                const bAbsPct = (l.sell / tot) * 100;
+                const aAbsPct = (l.buy / tot) * 100;
+                if (l.sell >= rHeavyCut && bAbsPct >= 65 && rc.close >= l.price) {
+                    rBidAbsCount++;
+                    rBestBidAbsPx = l.price;
+                }
+                if (l.buy >= rHeavyCut && aAbsPct >= 65 && rc.close <= l.price) {
+                    rAskAbsCount++;
+                    rBestAskAbsPx = l.price;
+                }
+            }
+        });
+    });
+
+    const rPullDelta = rBidPull - rAskPull;
+    const upTgtStr = upperMag ? `${upperMag.price.toFixed(dec)} (${upperMag.tag})` : (nearAskWall.val > 0 ? `${nearAskWall.price.toFixed(dec)} (ASK-WALL)` : `${(last.close + effStep * 6).toFixed(dec)}`);
+    const dnTgtStr = lowerMag ? `${lowerMag.price.toFixed(dec)} (${lowerMag.tag})` : (nearBidWall.val > 0 ? `${nearBidWall.price.toFixed(dec)} (BID-WALL)` : `${(last.close - effStep * 6).toFixed(dec)}`);
+
+    // DETERMINE SCALP FINAL VERDICT & CLEAR SCENARIO REASON
+    let scalpStatus = '⏳ WAIT — NEUTRAL CHOP';
+    let scalpCol = '#ffca28';
+    let scalpBg = 'rgba(255, 193, 7, 0.14)';
+    let scalpReason = '';
+    let scalpTarget = `Range: ${dnTgtStr} ⟷ ${upTgtStr}`;
+
+    const hasStrongBidWall = nearBidWall.val >= (liveRestBench || 1) * 1.4;
+    const hasStrongAskWall = nearAskWall.val >= (liveRestBench || 1) * 1.4;
+
+    if (rBidAbsCount > 0 && last.delta > 0 && last.close >= last.open) {
+        scalpStatus = '🟢 SCALP: BUYING READY!';
+        scalpCol = '#00e676';
+        scalpBg = 'rgba(0, 230, 118, 0.20)';
+        scalpTarget = `🎯 Tgt: ${upTgtStr}`;
+        scalpReason = `Why: Bid Absorbed (${rBidAbsCount}x @ ${rBestBidAbsPx?.toFixed(dec)}) + Buyers Stepped In (Δ+${fmt(last.delta)})`;
+    } else if (rAskAbsCount > 0 && last.delta < 0 && last.close <= last.open) {
+        scalpStatus = '🔴 SCALP: SELLING READY!';
+        scalpCol = '#ff5252';
+        scalpBg = 'rgba(255, 23, 68, 0.20)';
+        scalpTarget = `🎯 Tgt: ${dnTgtStr}`;
+        scalpReason = `Why: Ask Absorbed (${rAskAbsCount}x @ ${rBestAskAbsPx?.toFixed(dec)}) + Sellers Stepped In (Δ${fmt(last.delta)})`;
+    } else if (rBuyExec > rSellExec * 1.25 && last.delta > 0 && curRvol >= 0.85 && rPullDelta <= 0) {
+        scalpStatus = '🟢 SCALP: BUYING READY (MOMENTUM)';
+        scalpCol = '#00e676';
+        scalpBg = 'rgba(0, 230, 118, 0.20)';
+        scalpTarget = `🎯 Tgt: ${upTgtStr}`;
+        scalpReason = `Why: Aggressive Buy Exec (${fmt(rBuyExec)} vs ${fmt(rSellExec)}) + Ask Spoof Pulled (PΔ:${fmt(rPullDelta)})`;
+    } else if (rSellExec > rBuyExec * 1.25 && last.delta < 0 && curRvol >= 0.85 && rPullDelta >= 0 && rBidAbsCount === 0) {
+        scalpStatus = '🔴 SCALP: SELLING READY (MOMENTUM)';
+        scalpCol = '#ff5252';
+        scalpBg = 'rgba(255, 23, 68, 0.20)';
+        scalpTarget = `🎯 Tgt: ${dnTgtStr}`;
+        scalpReason = `Why: Aggressive Sell Exec (${fmt(rSellExec)} vs ${fmt(rBuyExec)}) + Zero Bid Absorption`;
+    } else if (rBidAbsCount > 0 || (rSellExec > rBuyExec && hasStrongBidWall && last.close >= nearBidWall.price)) {
+        // THIS SOLVES THE EXACT SCREENSHOT SCENARIO: Heavy Selling being Absorbed into Bid Wall!
+        scalpStatus = '⏳ WAIT — BUYING BUILDING (BID ABSORBING)';
+        scalpCol = '#00e5ff';
+        scalpBg = 'rgba(0, 229, 255, 0.16)';
+        scalpTarget = `Watch Trigger ➔ 🎯 ${upTgtStr}`;
+        scalpReason = `Why: Sellers (${fmt(rSellExec)}) Absorbed at Bid (${rBidAbsCount}x Abs | Wall:${fmt(nearBidWall.val)} @ ${nearBidWall.price.toFixed(dec)}). Wait for Green Δ!`;
+    } else if (rAskAbsCount > 0 || (rBuyExec > rSellExec && hasStrongAskWall && last.close <= nearAskWall.price)) {
+        scalpStatus = '⏳ WAIT — SELLING BUILDING (ASK CAPPING)';
+        scalpCol = '#ff9100';
+        scalpBg = 'rgba(255, 145, 0, 0.16)';
+        scalpTarget = `Watch Trigger ➔ 🎯 ${dnTgtStr}`;
+        scalpReason = `Why: Buyers (${fmt(rBuyExec)}) Capped at Ask (${rAskAbsCount}x Abs | Wall:${fmt(nearAskWall.val)} @ ${nearAskWall.price.toFixed(dec)}). Wait for Red Δ!`;
+    } else if (curRvol < 0.65) {
+        scalpStatus = '⏳ WAIT — LOW FLOW / NO MOMENTUM';
+        scalpCol = '#90a4ae';
+        scalpBg = 'rgba(55, 71, 79, 0.35)';
+        scalpReason = `Why: Volume Dry (${curRvol.toFixed(1)}x Avg) | B:${fmt(rBuyExec)} vs S:${fmt(rSellExec)} — Let Wall/Sweep Form`;
+    } else {
+        scalpStatus = '⏳ WAIT — TWO-WAY FIGHT';
+        scalpCol = '#ffca28';
+        scalpBg = 'rgba(255, 193, 7, 0.14)';
+        scalpReason = `Why: Balanced Exec (B:${fmt(rBuyExec)} vs S:${fmt(rSellExec)}) | Book B:${fmt(nearBidSum)} vs A:${fmt(nearAskSum)}`;
+    }
+
+    // 3. SCAN 18-CANDLE SESSION FOR INTRADAY HORIZON
     let macroHigh = -Infinity, macroLow = Infinity, sumCandleRanges = 0;
     let totalCvd = 0, pocUpSteps = 0, pocDownSteps = 0;
     let macroBidAbsorbs = 0, macroAskAbsorbs = 0;
@@ -2201,60 +2435,87 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
 
     const macroSpan = Math.max(macroHigh - macroLow, rawStep);
     const netPriceMove = last.close - first.open;
-    const efficiency = Math.abs(netPriceMove) / Math.max(sumCandleRanges, rawStep);
     const macroPullDelta = macroBidPulled - macroAskPulled;
 
     let bullPts = 0, bearPts = 0, macroNotes = [];
+    if (netPriceMove > macroSpan * 0.15 && pocUpSteps >= pocDownSteps) { bullPts += 24; macroNotes.push(`POC Up(${pocUpSteps}↑)`); }
+    else if (netPriceMove < -macroSpan * 0.15 && pocDownSteps >= pocUpSteps) { bearPts += 24; macroNotes.push(`POC Down(${pocDownSteps}↓)`); }
 
-    if (netPriceMove > macroSpan * 0.20 && pocUpSteps > pocDownSteps) { bullPts += 24; macroNotes.push(`POC Up(${pocUpSteps}↑)`); }
-    else if (netPriceMove < -macroSpan * 0.20 && pocDownSteps > pocUpSteps) { bearPts += 24; macroNotes.push(`POC Down(${pocDownSteps}↓)`); }
+    if (totalCvd > 0) { bullPts += 22; macroNotes.push(`CVD +${fmt(totalCvd)}`); }
+    else if (totalCvd < 0) { bearPts += 22; macroNotes.push(`CVD ${fmt(totalCvd)}`); }
 
-    if (totalCvd > 0 && netPriceMove > 0) { bullPts += 20; macroNotes.push(`CVD +${fmt(totalCvd)}`); }
-    else if (totalCvd < 0 && netPriceMove < 0) { bearPts += 20; macroNotes.push(`CVD ${fmt(totalCvd)}`); }
+    if (macroBidAbsorbs > macroAskAbsorbs) { bullPts += 20; macroNotes.push(`BidAbs:${macroBidAbsorbs}x`); }
+    else if (macroAskAbsorbs > macroBidAbsorbs) { bearPts += 20; macroNotes.push(`AskAbs:${macroAskAbsorbs}x`); }
 
-    if (macroPullDelta < 0 && netPriceMove > 0) {
-        bullPts += 22;
-        macroNotes.push(`PΔ:${fmt(macroPullDelta)} (Ask Spoof Swept UP)`);
-    } else if (macroPullDelta > 0 && netPriceMove < 0) {
-        bearPts += 22;
-        macroNotes.push(`PΔ:+${fmt(macroPullDelta)} (Bid Spoof Swept DN)`);
-    }
+    if (macroPullDelta < 0 && totalCvd > 0) { bullPts += 18; macroNotes.push(`PΔ:${fmt(macroPullDelta)}(AskPulled)`); }
+    else if (macroPullDelta > 0 && totalCvd < 0) { bearPts += 18; macroNotes.push(`PΔ:+${fmt(macroPullDelta)}(BidPulled)`); }
 
-    if (whaleBuyLots > whaleSellLots) { bullPts += 18; macroNotes.push(`◆Whale(${whaleBuyLots}B/${whaleSellLots}S)`); }
-    else if (whaleSellLots > whaleBuyLots) { bearPts += 18; macroNotes.push(`◆Whale(${whaleSellLots}S/${whaleBuyLots}B)`); }
+    if (whaleBuyLots > whaleSellLots) { bullPts += 16; macroNotes.push(`◆Whale:${whaleBuyLots}B/${whaleSellLots}S`); }
+    else if (whaleSellLots > whaleBuyLots) { bearPts += 16; macroNotes.push(`◆Whale:${whaleSellLots}S/${whaleBuyLots}B`); }
 
-    const vBox = document.getElementById('masterVerdictBox');
-    const vTitle = document.getElementById('masterVerdictTitle');
-    const vReasons = document.getElementById('masterVerdictReasons');
     const netMacro = bullPts - bearPts;
+    let intraStatus = '⏳ INTRADAY: WAIT (BALANCED)';
+    let intraCol = '#ffca28';
+    let intraBg = 'rgba(255, 193, 7, 0.14)';
+    let intraTarget = `Range: ${macroLow.toFixed(dec)}–${macroHigh.toFixed(dec)}`;
+    let intraReason = `Why: ${macroNotes.join(' | ') || 'Balanced session flow'}`;
 
-    if (efficiency < 0.15 && Math.abs(netMacro) < 25) {
-        vBox.style.background = 'rgba(255, 193, 7, 0.15)';
-        vBox.style.borderColor = '#ffca28';
-        vTitle.style.color = '#ffca28';
-        vTitle.innerText = `🟡 MACRO: SIDEWAYS ROTATIONAL CHOP — FADE EXTREMES`;
-        vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
-    } else if (netMacro >= 18) {
-        const conf = Math.min(97, Math.round(52 + (netMacro / 100) * 45));
-        vBox.style.background = 'rgba(0, 200, 83, 0.18)';
-        vBox.style.borderColor = '#00e676';
-        vTitle.style.color = '#00e676';
-        vTitle.innerText = `🟢 MACRO: BULLISH ORDERFLOW DOMINANCE (${conf}%) — LONG BIAS`;
-        vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
-    } else if (netMacro <= -18) {
-        const conf = Math.min(97, Math.round(52 + (Math.abs(netMacro) / 100) * 45));
-        vBox.style.background = 'rgba(255, 23, 68, 0.18)';
-        vBox.style.borderColor = '#ff5252';
-        vTitle.style.color = '#ff5252';
-        vTitle.innerText = `🔴 MACRO: BEARISH ORDERFLOW DOMINANCE (${conf}%) — SHORT BIAS`;
-        vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
-    } else {
-        vBox.style.background = 'rgba(38, 50, 56, 0.85)';
-        vBox.style.borderColor = '#90a4ae';
-        vTitle.style.color = '#eceff1';
-        vTitle.innerText = `⚖️ MACRO: BALANCED TWO-WAY AUCTION — WAIT FOR DISPLACEMENT`;
-        vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
+    if (netMacro >= 22) {
+        if (last.delta < 0 && rBidAbsCount > 0) {
+            intraStatus = '⏳ INTRADAY BULL: PULLBACK ABSORBING (GET READY TO BUY)';
+            intraCol = '#00e5ff';
+            intraBg = 'rgba(0, 229, 255, 0.18)';
+        } else {
+            intraStatus = '🟢 INTRADAY: BUYING READY (BULL CAMPAIGN)';
+            intraCol = '#00e676';
+            intraBg = 'rgba(0, 200, 83, 0.20)';
+        }
+        intraTarget = `HTF Tgt: ${upTgtStr}`;
+        intraReason = `Why: ${macroNotes.slice(0, 4).join(' | ')}`;
+    } else if (netMacro <= -22) {
+        if (last.delta > 0 && rAskAbsCount > 0) {
+            intraStatus = '⏳ INTRADAY BEAR: BOUNCE CAPPING (GET READY TO SELL)';
+            intraCol = '#ff9100';
+            intraBg = 'rgba(255, 145, 0, 0.18)';
+        } else {
+            intraStatus = '🔴 INTRADAY: SELLING READY (BEAR CAMPAIGN)';
+            intraCol = '#ff5252';
+            intraBg = 'rgba(255, 23, 68, 0.20)';
+        }
+        intraTarget = `HTF Tgt: ${dnTgtStr}`;
+        intraReason = `Why: ${macroNotes.slice(0, 4).join(' | ')}`;
     }
+
+    // UPDATE TOP BAR FINAL BOX 1 (SCALP) & FINAL BOX 2 (INTRADAY)
+    const sBox = document.getElementById('scalpFinalBox');
+    sBox.style.background = scalpBg;
+    sBox.style.borderColor = scalpCol;
+    document.getElementById('scalpFinalTitle').style.color = scalpCol;
+    document.getElementById('scalpFinalTitle').innerText = scalpStatus;
+    document.getElementById('scalpFinalTarget').innerText = scalpTarget;
+    document.getElementById('scalpFinalReason').innerText = scalpReason;
+
+    const iBox = document.getElementById('intraFinalBox');
+    iBox.style.background = intraBg;
+    iBox.style.borderColor = intraCol;
+    document.getElementById('intraFinalTitle').style.color = intraCol;
+    document.getElementById('intraFinalTitle').innerText = intraStatus;
+    document.getElementById('intraFinalTarget').innerText = intraTarget;
+    document.getElementById('intraFinalReason').innerText = intraReason;
+
+    // Save snapshot for AI Mentor
+    latestEngineSummary = {
+        live_price: last.close,
+        rvol: Number(curRvol.toFixed(2)),
+        smt: smtState.text,
+        scalp_box: { status: scalpStatus, target: scalpTarget, reason: scalpReason },
+        intraday_box: { status: intraStatus, target: intraTarget, reason: intraReason },
+        recent_3m_flow: { buy_exec: rBuyExec, sell_exec: rSellExec, bid_pull_10s: rBidPull, ask_pull_10s: rAskPull, pull_delta: rPullDelta, bid_absorptions: rBidAbsCount, ask_absorptions: rAskAbsCount },
+        dom_walls: { best_bid_wall: nearBidWall, best_ask_wall: nearAskWall, near_bid_sum: nearBidSum, near_ask_sum: nearAskSum },
+        magnets: { upper: upperMag, lower: lowerMag, all_ub: unfinishedLevels.slice(-5), all_npoc: nakedPocs.slice(-5) }
+    };
+
+    return { scalpStatus, scalpCol, scalpTarget, scalpReason, intraStatus, intraCol, intraTarget, intraReason };
 }
 
 function drawLoop() {
@@ -2297,7 +2558,6 @@ function drawAll() {
     const unfinishedLevels = [];
     for (let i = 0; i < candles.length - 1; i++) {
         const c = candles[i];
-        // 1. Track Untouched Naked POCs (nPOC)
         if (c.poc != null) {
             let touched = false;
             for (let j = i + 1; j < candles.length; j++) {
@@ -2306,7 +2566,6 @@ function drawAll() {
             if (!touched) nakedPocs.push({ price: c.poc, startIdx: i, vol: c.poc_volume || 0 });
         }
 
-        // 2. Track Untouched Unfinished Business (UB-HIGH & UB-LOW where BOTH Buy > 0 AND Sell > 0 at extreme!)
         const fpArr = Array.isArray(c.footprint) ? c.footprint : Object.values(c.footprint || {});
         if (fpArr.length > 0) {
             let hiLvl = null, loLvl = null;
@@ -2395,7 +2654,7 @@ function drawAll() {
         ? Math.max(tfAvgCellVol * 1.40, Math.min(tfAvgCellVol * 2.1, liveRestBench * 1.20))
         : tfAvgCellVol * 1.60;
 
-    updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, heavyLvlBenchmark, liveRestBench);
+    const dualVerdicts = updateDualHorizonDecisions(avgFlowVol, effStep, baselineLotSize, nakedPocs, unfinishedLevels, heavyLvlBenchmark, liveRestBench);
 
     const pToY = p => chartH - ((p - minP) / pSpan) * chartH;
     const yToP = y => minP + ((chartH - y) / chartH) * pSpan;
@@ -2507,7 +2766,6 @@ function drawAll() {
         const effectiveHeavyAbsCut = Math.max(avgV * 1.35, heavyLvlBenchmark * 0.60);
         const effectiveNormAbsCut = Math.max(avgV * 0.70, heavyLvlBenchmark * 0.28);
 
-        // STRICT WALL THRESHOLD: Use MAX (not min!) of RestBook & HeavyLvl so 2-4 BTC small pulls NEVER get tagged as Heavy Wall!
         const baseRestRef = liveRestBench > 0 ? Math.max(liveRestBench, heavyLvlBenchmark) : heavyLvlBenchmark;
         const effectiveHeavyPullQty = Math.max(baseRestRef * 1.10, avgV * 1.25);
         const effectiveNormPullQty = Math.max(baseRestRef * 0.65, avgV * 0.75);
@@ -2550,7 +2808,6 @@ function drawAll() {
             const sellV = l.sell || 0;
             const buyV = l.buy || 0;
             const totV = l.volume || 0;
-            // Do not render rows with 0 executed volume (Eliminates fake 100% pull rows on empty ticks!)
             if (totV <= 0) return;
 
             const trd = Math.max(l.trades || 1, 1);
@@ -2565,7 +2822,7 @@ function drawAll() {
 
             const bPull = l.bid_pulled || 0;
             const aPull = l.ask_pulled || 0;
-            const lvlPullDelta = bPull - aPull; // Level Pulling Delta (BP - AP)
+            const lvlPullDelta = bPull - aPull;
             cBidPullSum += bPull;
             cAskPullSum += aPull;
 
@@ -2592,7 +2849,6 @@ function drawAll() {
                 askAbsType = 'norm';
             }
 
-            // ONLY show Pull Tags where executed volume is meaningful (totV >= avgV * 0.35) so every row isn't spammed!
             const isSignificantOrderflowLvl = totV >= avgV * 0.35;
             let bidPullType = null;
             if (isSignificantOrderflowLvl && bPull >= effectiveHeavyPullQty && bPullPct >= 60) {
@@ -2675,7 +2931,6 @@ function drawAll() {
                 ctx.textAlign = 'left';
                 ctx.fillText(`${fmt(buyV)}${whaleBuyMark}`, spineX + 4, py);
 
-                // LEVEL TAGS: Pure 10s+ Resting Wall Pull Qty & Pull % (H-BP / bp / H-AP / ap) + Absorption % (NO P-Delta on price levels!)
                 if (proViewMode && candleW >= 135) {
                     let bParts = [];
                     let leftCol = '#84ffff';
@@ -2743,7 +2998,6 @@ function drawAll() {
         const lowerWick = Math.min(c.open, c.close) - c.low;
         const closePos = (c.close - c.low) / cRange;
 
-        // 1. SWING HIGH / SWING LOW RETAIL SL-SWEEP vs INSTITUTIONAL FAKE-WALL vs SOLID-WALL DETECTOR
         let prevSwingHigh = -Infinity, prevSwingLow = Infinity;
         for (let k = Math.max(0, idx - 5); k < idx; k++) {
             if (candles[k].high > prevSwingHigh) prevSwingHigh = candles[k].high;
@@ -2754,7 +3008,6 @@ function drawAll() {
         const candleAvgLot = cVol / Math.max(c.trades || 1, 1);
         const isRetailLotBurst = (candleAvgLot < baselineLotSize * 1.15) && (rvol >= 0.85);
 
-        // 2. CANDLE-LEVEL PULLING DELTA (PΔ = Total 10s+ Bid Pull - Total 10s+ Ask Pull) -> Stays ONLY in Candle Pill!
         const candlePullDelta = cBidPullSum - cAskPullSum;
         const cBpPct = cBidPullSum > 0 ? Math.round((cBidPullSum / (cBidPullSum + (c.sell_volume || 1))) * 100) : 0;
         const cApPct = cAskPullSum > 0 ? Math.round((cAskPullSum / (cAskPullSum + (c.buy_volume || 1))) * 100) : 0;
@@ -2762,9 +3015,9 @@ function drawAll() {
         let pullDeltaLine = `BP:${fmt(cBidPullSum)}(${cBpPct}%) AP:${fmt(cAskPullSum)}(${cApPct}%) PΔ:${candlePullDelta >= 0 ? '+' : ''}${fmt(candlePullDelta)}`;
         let pullDeltaCol = '#b0bec5';
         if (candlePullDelta < -avgV * 0.4 && c.close > c.open) {
-            pullDeltaCol = '#00e5ff'; // Ask Spoof pulled + Price UP = Bull Win!
+            pullDeltaCol = '#00e5ff';
         } else if (candlePullDelta > avgV * 0.4 && c.close < c.open) {
-            pullDeltaCol = '#ff4081'; // Bid Spoof pulled + Price DOWN = Bear Win!
+            pullDeltaCol = '#ff4081';
         }
 
         let flowVerdict = `MB:${mktBuyPct}%|MS:${mktSellPct}%`;
@@ -2789,7 +3042,6 @@ function drawAll() {
             if (whaleBuyCount > whaleSellCount) cBull += 22;
             else if (whaleSellCount > whaleBuyCount) cBear += 22;
 
-            // Priority Classification: Retail SL-Sweep vs Institutional Fake-Wall vs Solid-Wall
             if (sweptSwingLow && c.close > prevSwingLow && isRetailLotBurst && cBidPullSum < cVol * 0.25) {
                 flowVerdict = `🎯SSL-SWEEP: Retail SLs Eaten ➔ Reversal!`; verdictCol = '#00e5ff'; isHighConviction = true; cBull += 25;
             } else if (sweptSwingHigh && c.close < prevSwingHigh && isRetailLotBurst && cAskPullSum < cVol * 0.25) {
@@ -2841,7 +3093,6 @@ function drawAll() {
             }
         }
 
-        // 5-LINE CANDLE PILL (With Candle-Level Pulling Delta & SL-Sweep / Wall Verdict)
         if (candleW >= 65) {
             const pillW = Math.min(candleW * 0.96, 198);
             const pillH = 64;
@@ -2864,17 +3115,14 @@ function drawAll() {
             ctx.fillStyle = '#b0b8c8';
             ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} | B:${fmt(c.buy_volume)} S:${fmt(c.sell_volume)}`, cx, pillY + 19);
 
-            // Line 3: Candle Pulling Delta (10s+ Old Resting Walls Only)
             ctx.font = 'bold 8.5px monospace';
             ctx.fillStyle = pullDeltaCol;
             ctx.fillText(pullDeltaLine, cx, pillY + 31);
 
-            // Line 4: Retail SL-Sweep / Fake-Wall / Solid-Wall Verdict
             ctx.font = '8.5px monospace';
             ctx.fillStyle = verdictCol;
             ctx.fillText(flowVerdict, cx, pillY + 43);
 
-            // Line 5: Final Winner
             ctx.fillStyle = decisionCol;
             ctx.font = 'bold 9px monospace';
             ctx.fillText(candleDecision, cx, pillY + 55);
@@ -2932,7 +3180,7 @@ function drawAll() {
     }
 
     // =========================================================================
-    // SMART PREDICTIVE DUAL-HORIZON DOM (SCALP PATH A➔B➔C + INTRADAY CAMPAIGN)
+    // SMART BATTLE DOM WITH 2 SEPARATE TOP DECISION CARDS (SCALP vs INTRADAY)
     // =========================================================================
     if (!showDOM || domW <= 0) return;
 
@@ -2943,7 +3191,7 @@ function drawAll() {
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(domX, 0); ctx.lineTo(domX, H); ctx.stroke();
 
-    const headerH = 88; // Expanded 4-Tier Predictive Intelligence Header
+    const headerH = 102; // 2 Distinct Bordered Decision Cards + Column Header
     const domStep = effStep;
     const bidsArr = obData.bids || [];
     const asksArr = obData.asks || [];
@@ -2962,23 +3210,16 @@ function drawAll() {
         askMap.set(k, (askMap.get(k) || 0) + a.quantity);
     });
 
-    // Map Untouched Magnets (UB-HIGH, UB-LOW, nPOC) directly onto DOM price buckets
     const domMagnetMap = new Map();
     nakedPocs.forEach(np => {
         const b = Math.floor(np.price / domStep + 1e-9) * domStep;
-        domMagnetMap.set(b.toFixed(6), { type: 'nPOC', lbl: '🟡nPOC', price: b, vol: np.vol });
+        domMagnetMap.set(b.toFixed(6), { type: 'nPOC', lbl: '🟡nPOC' });
     });
     unfinishedLevels.forEach(ub => {
         const b = Math.floor(ub.price / domStep + 1e-9) * domStep;
-        domMagnetMap.set(b.toFixed(6), {
-            type: ub.type,
-            lbl: ub.type === 'UB-HIGH' ? '🎯UB-HI' : '🎯UB-LO',
-            price: b,
-            vol: (ub.buy || 0) + (ub.sell || 0)
-        });
+        domMagnetMap.set(b.toFixed(6), { type: ub.type, lbl: ub.type === 'UB-HIGH' ? '🎯UB-HI' : '🎯UB-LO' });
     });
 
-    // Aggregate last 3 candles for genuine executed vs pulled battle + Iceberg detection in active zone
     const stickyMap = new Map();
     let minActivePrice = lastC.low;
     let maxActivePrice = lastC.high;
@@ -2998,8 +3239,8 @@ function drawAll() {
         });
     });
 
-    const minVisibleBucket = Math.floor((minActivePrice - domStep * 6) / domStep) * domStep;
-    const maxVisibleBucket = Math.ceil((maxActivePrice + domStep * 6) / domStep) * domStep;
+    const minVisibleBucket = Math.floor((minActivePrice - domStep * 5) / domStep) * domStep;
+    const maxVisibleBucket = Math.ceil((maxActivePrice + domStep * 5) / domStep) * domStep;
 
     const activeDomRows = [];
     for (let p = maxVisibleBucket; p >= minVisibleBucket; p -= domStep) {
@@ -3010,160 +3251,54 @@ function drawAll() {
         const mag = domMagnetMap.get(k) || null;
         const distTicks = Math.round(Math.abs(p - liveCenterP) / domStep);
 
-        if (st.buy > 0 || st.sell > 0 || mag !== null || distTicks <= 5 || ((bRest > 0 || aRest > 0) && distTicks <= 16)) {
+        if (st.buy > 0 || st.sell > 0 || mag !== null || distTicks <= 4 || ((bRest > 0 || aRest > 0) && distTicks <= 15)) {
             activeDomRows.push({ p, k, bRest, aRest, st, mag });
         }
     }
 
     let maxRowVal = 1;
-    let totExecBuy = 0, totExecSell = 0, totPullB = 0, totPullA = 0;
-    let nearAskRestSum = 0, nearBidRestSum = 0;
-    let strongestBidOrigin = null, strongestAskOrigin = null;
-    let upperWallTarget = null, lowerWallTarget = null;
-
-    const icebergCut = Math.max(tfAvgCellVol * 1.15, (liveRestBench || 1) * 0.85);
-
     activeDomRows.forEach(r => {
-        totExecBuy += r.st.buy;
-        totExecSell += r.st.sell;
-        totPullB += r.st.bp;
-        totPullA += r.st.ap;
         maxRowVal = Math.max(maxRowVal, r.st.buy, r.st.sell, r.st.bp, r.st.ap, r.bRest, r.aRest);
-
-        // Near-price Vacuum / Imbalance check (within 6 steps above & below)
-        if (r.p > liveCenterP && r.p <= liveCenterP + domStep * 6) nearAskRestSum += r.aRest;
-        if (r.p < liveCenterP && r.p >= liveCenterP - domStep * 6) nearBidRestSum += r.bRest;
-
-        // Detect Hidden Iceberg / Heavy Absorption Origin zones
-        const isBidIceberg = r.p <= lastC.close + domStep && r.st.sell >= icebergCut && (r.st.sell > r.bRest * 1.35 || r.st.sell > r.st.buy * 1.5);
-        const isAskIceberg = r.p >= lastC.close - domStep && r.st.buy >= icebergCut && (r.st.buy > r.aRest * 1.35 || r.st.buy > r.st.sell * 1.5);
-        r.isBidIceberg = isBidIceberg;
-        r.isAskIceberg = isAskIceberg;
-
-        if (isBidIceberg && (!strongestBidOrigin || r.st.sell > strongestBidOrigin.val)) {
-            strongestBidOrigin = { price: r.p, val: r.st.sell };
-        }
-        if (isAskIceberg && (!strongestAskOrigin || r.st.buy > strongestAskOrigin.val)) {
-            strongestAskOrigin = { price: r.p, val: r.st.buy };
-        }
-
-        // Detect Major Resting Wall Targets above and below live price
-        if (r.p > lastC.close + domStep && r.aRest >= (liveRestBench || 1) * 1.3) {
-            if (!upperWallTarget || r.aRest > upperWallTarget.val) upperWallTarget = { price: r.p, val: r.aRest, type: 'ASK-WALL' };
-        }
-        if (r.p < lastC.close - domStep && r.bRest >= (liveRestBench || 1) * 1.3) {
-            if (!lowerWallTarget || r.bRest > lowerWallTarget.val) lowerWallTarget = { price: r.p, val: r.bRest, type: 'BID-WALL' };
-        }
     });
 
-    // Find Nearest Upper & Lower Structural Magnets (UB-HIGH / UB-LOW / nPOC / Wall)
-    let upperMagnet = null, lowerMagnet = null;
-    const allMagnets = [
-        ...unfinishedLevels.map(u => ({ price: u.price, tag: u.type })),
-        ...nakedPocs.map(n => ({ price: n.price, tag: 'nPOC' }))
-    ];
-    allMagnets.forEach(m => {
-        if (m.price > lastC.close + domStep * 0.5) {
-            if (!upperMagnet || Math.abs(m.price - lastC.close) < Math.abs(upperMagnet.price - lastC.close)) upperMagnet = m;
-        } else if (m.price < lastC.close - domStep * 0.5) {
-            if (!lowerMagnet || Math.abs(m.price - lastC.close) < Math.abs(lowerMagnet.price - lastC.close)) lowerMagnet = m;
-        }
-    });
-    if (!upperMagnet && upperWallTarget) upperMagnet = { price: upperWallTarget.price, tag: 'ASK-WALL' };
-    if (!lowerMagnet && lowerWallTarget) lowerMagnet = { price: lowerWallTarget.price, tag: 'BID-WALL' };
-
-    // 1. COMPUTE SCALP PATH (A ➔ B ➔ C)
-    const domPullDelta = totPullB - totPullA;
-    const askVacuum = nearBidRestSum > nearAskRestSum * 1.45;
-    const bidVacuum = nearAskRestSum > nearBidRestSum * 1.45;
-
-    let scalpScore = 0;
-    if (totExecBuy > totExecSell * 1.12) scalpScore += 25;
-    else if (totExecSell > totExecBuy * 1.12) scalpScore -= 25;
-    if (domPullDelta < -tfAvgCellVol * 0.4) scalpScore += 25; // Ask spoof pulled = Bullish
-    else if (domPullDelta > tfAvgCellVol * 0.4) scalpScore -= 25; // Bid spoof pulled = Bearish
-    if (strongestBidOrigin) scalpScore += 22;
-    if (strongestAskOrigin) scalpScore -= 22;
-    if (askVacuum) scalpScore += 18;
-    else if (bidVacuum) scalpScore -= 18;
-
-    const upTgtPx = upperMagnet ? upperMagnet.price.toFixed(dec) : (lastC.close + domStep * 6).toFixed(dec);
-    const upTgtTag = upperMagnet ? upperMagnet.tag : 'VACUUM';
-    const dnTgtPx = lowerMagnet ? lowerMagnet.price.toFixed(dec) : (lastC.close - domStep * 6).toFixed(dec);
-    const dnTgtTag = lowerMagnet ? lowerMagnet.tag : 'VACUUM';
-
-    let scalpPathLine = '';
-    let scalpPathCol = '#ffd700';
-    if (scalpScore >= 20) {
-        const origPx = strongestBidOrigin ? strongestBidOrigin.price.toFixed(dec) : lastC.close.toFixed(dec);
-        scalpPathLine = `🟢SCALP LONG: Hold ${origPx} ➔ 🎯${upTgtPx}(${upTgtTag}) ➔ ↩️Watch Cap`;
-        scalpPathCol = '#00e676';
-    } else if (scalpScore <= -20) {
-        const origPx = strongestAskOrigin ? strongestAskOrigin.price.toFixed(dec) : lastC.close.toFixed(dec);
-        scalpPathLine = `🔴SCALP SHORT: Cap ${origPx} ➔ 🎯${dnTgtPx}(${dnTgtTag}) ➔ ↩️Watch Bounce`;
-        scalpPathCol = '#ff5252';
-    } else {
-        scalpPathLine = `⚖️PING-PONG RANGE: Fade ${upTgtPx}(${upTgtTag}) ⟷ ${dnTgtPx}(${dnTgtTag})`;
-        scalpPathCol = '#ffca28';
-    }
-
-    // 2. COMPUTE INTRADAY CAMPAIGN HORIZON (Rolling Session Accumulation vs Distribution)
-    const intraSample = candles.slice(-18);
-    let intraCvd = 0, intraBp = 0, intraAp = 0, intraWhaleB = 0, intraWhaleS = 0;
-    intraSample.forEach(ic => {
-        intraCvd += (ic.delta || 0);
-        const ifp = groupFootprint(ic.footprint, ic.low, ic.high, domStep, ic.close, liveRestBench);
-        ifp.forEach(il => {
-            intraBp += (il.bid_pulled || 0);
-            intraAp += (il.ask_pulled || 0);
-            const lt = Math.max(il.trades || 1, 1);
-            if (((il.volume || 0) / lt) / baselineLotSize >= 2.8 && il.volume >= tfAvgCellVol) {
-                if (il.buy > il.sell) intraWhaleB++;
-                else intraWhaleS++;
-            }
-        });
-    });
-    const intraPDelta = intraBp - intraAp;
-    let intraLine = '';
-    let intraCol = '#b0bec5';
-    if (intraCvd > 0 && (intraPDelta <= 0 || intraWhaleB >= intraWhaleS)) {
-        const htfTgt = upperMagnet ? `${upperMagnet.price.toFixed(dec)}(${upperMagnet.tag})` : `${(lastC.close + domStep * 15).toFixed(dec)}`;
-        intraLine = `🌊INTRADAY: 🟢BULL ACCUM (CVD+${fmt(intraCvd)}|◆${intraWhaleB}B) ➔ Tgt:${htfTgt}`;
-        intraCol = '#00e5ff';
-    } else if (intraCvd < 0 && (intraPDelta >= 0 || intraWhaleS >= intraWhaleB)) {
-        const htfTgt = lowerMagnet ? `${lowerMagnet.price.toFixed(dec)}(${lowerMagnet.tag})` : `${(lastC.close - domStep * 15).toFixed(dec)}`;
-        intraLine = `🌊INTRADAY: 🔴BEAR DISTRIB (CVD${fmt(intraCvd)}|◆${intraWhaleS}S) ➔ Tgt:${htfTgt}`;
-        intraCol = '#ff9100';
-    } else {
-        intraLine = `🌊INTRADAY: 🟡ROTATIONAL BALANCE (CVD:${fmt(intraCvd)} | PΔ:${fmt(intraPDelta)})`;
-        intraCol = '#ffca28';
-    }
-
-    // Draw 4-Tier Top Predictive DOM Header
-    ctx.fillStyle = '#141926';
+    // DRAW 2 DISTINCT DECISION CARDS AT TOP OF DOM
+    ctx.fillStyle = '#111622';
     ctx.fillRect(domX + 1, 0, domW - 1, headerH);
-    ctx.strokeStyle = '#263147';
-    ctx.beginPath(); ctx.moveTo(domX, headerH); ctx.lineTo(domX + domW, headerH); ctx.stroke();
 
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.font = 'bold 9.5px monospace';
-    ctx.fillStyle = '#00e5ff';
-    const vacTag = askVacuum ? '⚡ASK-VACUUM' : (bidVacuum ? '⚡BID-VACUUM' : '⚖️BAL-BOOK');
-    ctx.fillText(`⚔️EXEC B:${fmt(totExecBuy)} S:${fmt(totExecSell)} | PΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)} | ${vacTag}`, domX + 6, 12);
+    if (dualVerdicts) {
+        // CARD 1: SCALP FINAL BOX (Top 40px)
+        ctx.fillStyle = '#161d2b';
+        ctx.fillRect(domX + 4, 3, domW - 8, 38);
+        ctx.strokeStyle = dualVerdicts.scalpCol;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(domX + 4, 3, domW - 8, 38);
 
-    // Line 2: Live Scalp Roadmap (A ➔ B ➔ C)
-    ctx.font = 'bold 9.5px monospace';
-    ctx.fillStyle = scalpPathCol;
-    ctx.fillText(scalpPathLine, domX + 6, 30);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.font = 'bold 9.5px monospace';
+        ctx.fillStyle = dualVerdicts.scalpCol;
+        ctx.fillText(`${dualVerdicts.scalpStatus} | ${dualVerdicts.scalpTarget}`, domX + 8, 13);
 
-    // Line 3: Intraday Campaign Horizon
-    ctx.font = 'bold 9px monospace';
-    ctx.fillStyle = intraCol;
-    ctx.fillText(intraLine, domX + 6, 48);
+        ctx.font = '8.5px monospace';
+        ctx.fillStyle = '#cfd8dc';
+        ctx.fillText(dualVerdicts.scalpReason.slice(0, 68), domX + 8, 29);
 
-    // Layout: [BID SIDE (Left of Spine)] | SPINE | [ASK SIDE (Right of Spine)] | [PRICE SCALE (Right End)]
-    const pxScaleW = isMobile ? 68 : 84;
+        // CARD 2: INTRADAY FINAL BOX (Next 40px)
+        ctx.fillStyle = '#161d2b';
+        ctx.fillRect(domX + 4, 44, domW - 8, 38);
+        ctx.strokeStyle = dualVerdicts.intraCol;
+        ctx.strokeRect(domX + 4, 44, domW - 8, 38);
+
+        ctx.font = 'bold 9.5px monospace';
+        ctx.fillStyle = dualVerdicts.intraCol;
+        ctx.fillText(`${dualVerdicts.intraStatus} | ${dualVerdicts.intraTarget}`, domX + 8, 54);
+
+        ctx.font = '8.5px monospace';
+        ctx.fillStyle = '#cfd8dc';
+        ctx.fillText(dualVerdicts.intraReason.slice(0, 68), domX + 8, 70);
+    }
+
+    const pxScaleW = isMobile ? 68 : 82;
     const battleAreaW = domW - pxScaleW;
     const halfBattleW = battleAreaW * 0.5;
     const domSpineX = domX + halfBattleW;
@@ -3172,10 +3307,10 @@ function drawAll() {
     ctx.fillStyle = '#90a4ae';
     ctx.font = 'bold 8.5px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('◀ BID [EXEC SELL | 10s SPOOF | 🧊ICE]', domX + halfBattleW * 0.5, 74);
-    ctx.fillText('ASK [EXEC BUY | 10s SPOOF | 🧊ICE] ▶', domSpineX + halfBattleW * 0.5, 74);
+    ctx.fillText('◀ BID [SELL EXEC vs 10s SPOOF]', domX + halfBattleW * 0.5, 92);
+    ctx.fillText('ASK [BUY EXEC vs 10s SPOOF] ▶', domSpineX + halfBattleW * 0.5, 92);
     ctx.fillStyle = '#ffeb3b';
-    ctx.fillText('PRICE / MAG', domPxScaleX + pxScaleW * 0.5, 74);
+    ctx.fillText('PRICE/MAG', domPxScaleX + pxScaleW * 0.5, 92);
 
     const rH = 24;
     const maxVisDomRows = Math.floor((H - headerH - 6) / rH);
@@ -3185,7 +3320,7 @@ function drawAll() {
     let ry = headerH + 2;
 
     visibleSlice.forEach((row, idx) => {
-        const { p, bRest, aRest, st, mag, isBidIceberg, isAskIceberg } = row;
+        const { p, bRest, aRest, st, mag } = row;
         const isCurrentRow = Math.abs(p - liveCenterP) < domStep * 0.4;
 
         ctx.fillStyle = isCurrentRow ? 'rgba(255, 235, 59, 0.16)' : (idx % 2 === 0 ? '#0c1018' : '#101520');
@@ -3195,10 +3330,9 @@ function drawAll() {
         const aSpoofPct = (st.ap + st.buy) > 0 ? Math.round((st.ap / (st.ap + st.buy)) * 100) : 0;
         const rowPDelta = st.bp - st.ap;
 
-        // 1. LEFT SIDE OF SPINE (BID SIDE):
         const execSellRatio = Math.min(1, st.sell / maxRowVal);
         if (st.sell > 0) {
-            ctx.fillStyle = isBidIceberg ? 'rgba(0, 229, 255, 0.45)' : 'rgba(255, 23, 68, 0.55)';
+            ctx.fillStyle = 'rgba(255, 23, 68, 0.55)';
             ctx.fillRect(domSpineX - halfBattleW * execSellRatio, ry + 2, halfBattleW * execSellRatio, 10);
         }
         const pullBidRatio = Math.min(1, st.bp / maxRowVal);
@@ -3210,8 +3344,8 @@ function drawAll() {
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
         ctx.font = 'bold 8.5px monospace';
-        ctx.fillStyle = isBidIceberg ? '#00e5ff' : '#ff8a80';
-        const winBidTag = isBidIceberg ? '🧊ICE-ABS ' : ((st.sell > st.buy * 1.4 && lastC.close >= p) ? '🛡️ABS ' : '');
+        ctx.fillStyle = '#ff8a80';
+        const winBidTag = (st.sell > st.buy * 1.4 && lastC.close >= p) ? '🛡️ABS ' : '';
         ctx.fillText(`${winBidTag}Ex:${fmt(st.sell)} (R:${fmt(bRest)})`, domSpineX - 4, ry + 7);
 
         if (st.bp > 0) {
@@ -3220,10 +3354,9 @@ function drawAll() {
             ctx.fillText(`10s-BP:${fmt(st.bp)} (${bSpoofPct}%)`, domSpineX - 4, ry + 18);
         }
 
-        // 2. RIGHT SIDE OF SPINE (ASK SIDE):
         const execBuyRatio = Math.min(1, st.buy / maxRowVal);
         if (st.buy > 0) {
-            ctx.fillStyle = isAskIceberg ? 'rgba(255, 145, 0, 0.50)' : 'rgba(0, 230, 118, 0.55)';
+            ctx.fillStyle = 'rgba(0, 230, 118, 0.55)';
             ctx.fillRect(domSpineX, ry + 2, halfBattleW * execBuyRatio, 10);
         }
         const pullAskRatio = Math.min(1, st.ap / maxRowVal);
@@ -3234,8 +3367,8 @@ function drawAll() {
 
         ctx.textAlign = 'left';
         ctx.font = 'bold 8.5px monospace';
-        ctx.fillStyle = isAskIceberg ? '#ffab00' : '#69f0ae';
-        const winAskTag = isAskIceberg ? ' 🧊ICE-CAP' : ((st.buy > st.sell * 1.4 && lastC.close <= p) ? ' 🛡️CAP' : '');
+        ctx.fillStyle = '#69f0ae';
+        const winAskTag = (st.buy > st.sell * 1.4 && lastC.close <= p) ? ' 🛡️CAP' : '';
         ctx.fillText(`Ex:${fmt(st.buy)} (R:${fmt(aRest)})${winAskTag}`, domSpineX + 4, ry + 7);
 
         if (st.ap > 0) {
@@ -3244,8 +3377,7 @@ function drawAll() {
             ctx.fillText(`10s-AP:${fmt(st.ap)} (${aSpoofPct}%)`, domSpineX + 4, ry + 18);
         }
 
-        // 3. RIGHT-END PRICE SCALE + MAGNET / WINNER TAG
-        ctx.fillStyle = isCurrentRow ? '#ffeb3b' : (mag ? 'rgba(224, 64, 251, 0.18)' : '#161c2b');
+        ctx.fillStyle = isCurrentRow ? '#ffeb3b' : (mag ? 'rgba(224, 64, 251, 0.22)' : '#161c2b');
         ctx.fillRect(domPxScaleX, ry, pxScaleW, rH);
 
         ctx.textAlign = 'center';
@@ -3256,12 +3388,7 @@ function drawAll() {
         let subLbl = '';
         let subCol = isCurrentRow ? '#000' : '#ffd700';
         if (mag) {
-            subLbl = mag.lbl;
-            subCol = isCurrentRow ? '#000' : (mag.type === 'nPOC' ? '#ffeb3b' : '#ea80fc');
-        } else if (isBidIceberg) {
-            subLbl = '🧊BID-HOLD'; subCol = isCurrentRow ? '#004d40' : '#00e5ff';
-        } else if (isAskIceberg) {
-            subLbl = '🧊ASK-CAP'; subCol = isCurrentRow ? '#b71c1c' : '#ff9100';
+            subLbl = mag.lbl; subCol = isCurrentRow ? '#000' : '#ffeb3b';
         } else if (st.buy > st.sell * 1.3) {
             subLbl = '🟢BUY WIN'; subCol = isCurrentRow ? '#004d40' : '#00e676';
         } else if (st.sell > st.buy * 1.3) {
@@ -3282,7 +3409,6 @@ function drawAll() {
         ry += rH;
     });
 
-    // Draw Center Spine & Right Price Scale Divider
     ctx.strokeStyle = '#00e5ff';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -3294,6 +3420,7 @@ function drawAll() {
     ctx.beginPath();
     ctx.moveTo(domPxScaleX, headerH); ctx.lineTo(domPxScaleX, H);
     ctx.stroke();
+}
 
 setInterval(fetchData, 2500);
 setInterval(fetchSmtPeer, 10000);
@@ -3604,6 +3731,50 @@ def api_scan():
         "bids_zone": bids_out,
         "asks_zone": asks_out,
     })
+
+
+@app.route("/api/ai-mentor", methods=["POST"])
+def api_ai_mentor():
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return jsonify({"status": "error", "message": "GEMINI_API_KEY environment variable not set in Render."}), 400
+
+    data = request.get_json(silent=True) or {}
+    symbol = data.get("symbol", "BTCUSDT")
+    timeframe = data.get("timeframe", "1m")
+    question = data.get("question", "")
+    engine_data = data.get("engine_data", {})
+
+    prompt = f"""You are a ruthless, accurate Institutional Orderflow & ICT Mentor speaking in clear Hinglish.
+The user is trading {symbol} on the {timeframe} chart.
+User's Question / TradingView Observation: "{question}"
+
+Here is the LIVE SA Footprint & DOM Engine Data right now:
+{json.dumps(engine_data, indent=2)}
+
+Give a direct, practical Hinglish response in 4 short bullet points:
+1. ALIGNMENT VERDICT: Does the SA Engine data support the user's idea? (🟢 YES / 🔴 NO TRAP / ⏳ WAIT FOR TRIGGER)
+2. DOM & ABSORPTION REALITY: What are Institutional Bid/Ask Absorptions, Resting Walls, and 10s Spoof Pulls (PΔ) doing right now?
+3. SCALP PLAN: Exact Entry Zone, Invalidation, and Immediate Target (UB-HIGH/LOW or nPOC).
+4. INTRADAY BIAS: What is the bigger session flow doing?"""
+
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        resp = requests.post(
+            url,
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=12
+        )
+        rjson = resp.json()
+        reply_text = (
+            rjson.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "No response generated.")
+        )
+        return jsonify({"status": "ok", "reply": reply_text})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 import gzip
