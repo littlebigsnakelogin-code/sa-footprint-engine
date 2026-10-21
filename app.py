@@ -3949,6 +3949,30 @@ Analyze ALL 10 parameters (DOM Buy/Sell Executions, 10s+ Spoof Pulling Delta PΔ
     return jsonify({"status": "ok", "reply": "\n\n" + ("\n" + "="*55 + "\n\n").join(sections)})
 
 
+@app.route("/api/test-groq")
+def test_groq():
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip().strip('"').strip("'")
+    if not groq_key:
+        return jsonify({"status": "error", "message": "GROQ_API_KEY not found in env!"})
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {groq_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": "Hello Groq, reply in one word."}],
+                "temperature": 0.1
+            },
+            timeout=10
+        )
+        return jsonify({"status": "ok", "code": r.status_code, "response": r.json()})
+    except Exception as e:
+        return jsonify({"status": "error", "exception": str(e)})
+
+
 import gzip
 @app.after_request
 def compress_response(response):
