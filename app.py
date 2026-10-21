@@ -168,6 +168,84 @@ collector_thread = None
 # STARTUP HYDRATION (LOAD PAST 48H FROM TURSO TO RAM)
 # ============================================================
 
+def heal_recent_candles_via_ws():
+    """Runs ONLY ONCE on server startup to heal any deploy OHLC gaps from Binance Futures WS!"""
+    ws = None
+    try:
+        ws = websocket.create_connection("wss://ws-fapi.binance.com/ws-fapi/v1", timeout=6)
+        ws.settimeout(4)
+        req_id = 100
+        for sym in SYMBOLS:
+            for tf, sec in TIMEFRAMES.items():
+                req_id += 1
+                ws.send(json.dumps({
+                    "id": req_id,
+                    "method": "klines",
+                    "params": {"symbol": sym, "interval": tf, "limit": 8}
+                }))
+                raw = ws.recv()
+                if not raw:
+                    continue
+                resp = json.loads(raw)
+                klines = resp.get("result")
+                if not isinstance(klines, list):
+                    continue
+
+                now_bucket = floor_timestamp(now_ms(), sec)
+                with lock:
+                    existing_map = {c["start"]: c for c in candles[sym][tf]}
+                    if current_candles[sym][tf] is not None:
+                        existing_map[current_candles[sym][tf]["start"]] = current_candles[sym][tf]
+
+                    for k in klines:
+                        k_start = int(k[0])
+                        k_o, k_h, k_l, k_c = float(k[1]), float(k[2]), float(k[3]), float(k[4])
+                        k_vol = float(k[5])
+                        k_trades = int(k[8])
+                        k_buy = float(k[9])
+                        k_sell = max(0.0, k_vol - k_buy)
+                        k_delta = k_buy - k_sell
+
+                        if k_start in existing_map:
+                            c_obj = existing_map[k_start]
+                            c_obj["open"] = k_o
+                            c_obj["high"] = max(float(c_obj.get("high", k_h)), k_h)
+                            c_obj["low"] = min(float(c_obj.get("low", k_l)), k_l)
+                            c_obj["close"] = k_c
+                            if k_vol > float(c_obj.get("volume", 0.0)):
+                                c_obj["volume"] = k_vol
+                                c_obj["buy_volume"] = k_buy
+                                c_obj["sell_volume"] = k_sell
+                                c_obj["delta"] = k_delta
+                                c_obj["trades"] = max(int(c_obj.get("trades", 0)), k_trades)
+                        elif k_start == now_bucket and current_candles[sym][tf] is None:
+                            current_candles[sym][tf] = {
+                                "symbol": sym,
+                                "timeframe": tf,
+                                "start": k_start,
+                                "end": k_start + sec * 1000,
+                                "open": k_o,
+                                "high": k_h,
+                                "low": k_l,
+                                "close": k_c,
+                                "volume": k_vol,
+                                "buy_volume": k_buy,
+                                "sell_volume": k_sell,
+                                "delta": k_delta,
+                                "trades": k_trades,
+                                "footprint": {},
+                            }
+        print("[HEALER] Boot OHLC sync complete (Zero extra Turso writes).")
+    except Exception as e:
+        print(f"[HEALER] WS Kline sync skipped: {e}")
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+
 def load_historical_candles_from_turso():
     if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return
@@ -188,7 +266,6 @@ def load_historical_candles_from_turso():
                         fp_list = json.loads(fp_json) if fp_json else []
                         step = PRICE_STEP.get(sym, 1.0)
                         margin = step * 30
-                        # Filter out old garbage far-away price levels from RAM
                         fp_dict = {
                             str(item["price"]): item
                             for item in fp_list
@@ -221,6 +298,7 @@ def load_historical_candles_from_turso():
                     candles[sym][tf].append(candle_obj)
                     loaded_count += 1
             print(f"[TURSO] Successfully hydrated {loaded_count} historical candles into RAM.")
+        threading.Thread(target=heal_recent_candles_via_ws, name="ws-kline-healer", daemon=True).start()
     except Exception as e:
         print(f"[TURSO] Hydration failed: {e}")
 
@@ -1239,11 +1317,14 @@ def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
             current = current_candles[symbol][timeframe]
 
             if current is None:
-                current = create_empty_candle(symbol, timeframe, start, price)
+                prev_list = candles[symbol][timeframe]
+                open_px = prev_list[-1]["close"] if prev_list and (start - prev_list[-1]["start"] == seconds * 1000) else price
+                current = create_empty_candle(symbol, timeframe, start, open_px)
                 current_candles[symbol][timeframe] = current
             elif start != current["start"]:
+                prev_close = current["close"]
                 store_finished_candle(current)
-                current = create_empty_candle(symbol, timeframe, start, price)
+                current = create_empty_candle(symbol, timeframe, start, prev_close)
                 current_candles[symbol][timeframe] = current
 
             add_trade_to_candle(current, price, quantity, is_buyer_maker)
