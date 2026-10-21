@@ -3690,12 +3690,30 @@ Give a direct, practical Hinglish response in 4 short bullet points:
 3. SCALP PLAN: Exact Entry Zone, Invalidation, and Immediate Target (UB-HIGH/LOW or nPOC).
 4. INTRADAY BIAS: What is the bigger session flow doing?"""
 
-    # Safe modern models list (strictly avoiding deprecated 2.5-flash)
-    safe_models = ["models/gemini-2.0-flash", "models/gemini-3.8-flash", "models/gemini-1.5-pro"]
-    last_err = "Unknown error"
+    try:
+        # Step 1: Live fetch available models from Google API
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        list_resp = requests.get(list_url, timeout=10)
+        if list_resp.status_code != 200:
+            return jsonify({"status": "error", "message": f"Model list error: {list_resp.text}"}), 400
 
-    for model_path in safe_models:
-        try:
+        models_json = list_resp.json()
+        available_models = []
+        for m in models_json.get("models", []):
+            name = m.get("name", "") # e.g., "models/gemini-1.5-flash"
+            methods = m.get("supportedGenerationMethods", [])
+            if "generateContent" in methods:
+                if "2.5" not in name:  # Skip deprecated 2.5
+                    available_models.append(name)
+
+        # Prioritize flash models first
+        available_models.sort(key=lambda x: 0 if "flash" in x.lower() else 1)
+
+        if not available_models:
+            return jsonify({"status": "error", "message": "Koi bhi generateContent support karne wala model nahi mila."}), 400
+
+        last_err = "Unknown error"
+        for model_path in available_models[:5]:  # Try top 5 discovered models
             url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
             resp = requests.post(
                 url,
@@ -3710,10 +3728,11 @@ Give a direct, practical Hinglish response in 4 short bullet points:
             
             err_msg = rjson.get("error", {}).get("message", f"HTTP {resp.status_code}")
             last_err = f"[{model_path}] {err_msg}"
-        except Exception as e:
-            last_err = str(e)
 
-    return jsonify({"status": "error", "message": f"Sabhi models fail ho gaye. Last error: {last_err}"}), 500
+        return jsonify({"status": "error", "message": f"Discovered models failed. Last error: {last_err}"}), 500
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 import gzip
