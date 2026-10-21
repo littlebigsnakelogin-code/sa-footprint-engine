@@ -3690,7 +3690,8 @@ Give a direct, practical Hinglish response in 4 short bullet points:
 3. SCALP PLAN: Exact Entry Zone, Invalidation, and Immediate Target (UB-HIGH/LOW or nPOC).
 4. INTRADAY BIAS: What is the bigger session flow doing?"""
 
-    models = ["gemini-3.8-flash", "gemini-3.1-pro", "gemini-2.5-flash"]
+    # Try standard available models in current public API
+    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-3.1-pro"]
     last_err = "Unknown API error"
 
     for model_name in models:
@@ -3705,13 +3706,15 @@ Give a direct, practical Hinglish response in 4 short bullet points:
             if resp.status_code == 200 and "candidates" in rjson:
                 parts = rjson["candidates"][0].get("content", {}).get("parts", [])
                 if parts and "text" in parts[0]:
-                    return jsonify({"status": "ok", "reply": parts[0]["text"]})
+                    return jsonify({"status": "ok", "reply": f"[{model_name}]\n" + parts[0]["text"]})
+            
+            # Capture exact error message from google
             err_msg = rjson.get("error", {}).get("message", f"HTTP {resp.status_code}")
             last_err = f"[{model_name}] {err_msg}"
         except Exception as e:
             last_err = str(e)
 
-    return jsonify({"status": "error", "message": last_err}), 500
+    return jsonify({"status": "error", "message": f"All models failed. Last error: {last_err}"}), 500
 
 
 import gzip
