@@ -3124,7 +3124,6 @@ function drawAll() {
     const cRange = Math.max(lastC.high - lastC.low, rawStep * 0.5);
     const closePos = (lastC.close - lastC.low) / cRange;
 
-    // Count recent 3-candle Whales & SL-Sweeps
     let recentWhaleB = 0, recentWhaleS = 0;
     candles.slice(-3).forEach(rc => {
         const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
@@ -3149,45 +3148,35 @@ function drawAll() {
     let scalpPts = 0;
     let scalpFactors = [];
 
-    // 1. Live DOM Executed Volume Ratio
     if (totExecBuy > totExecSell * 1.30) { scalpPts += 25; scalpFactors.push(`ExecBuy+30%`); }
     else if (totExecBuy > totExecSell * 1.10) { scalpPts += 12; scalpFactors.push(`ExecBuy>Sell`); }
     else if (totExecSell > totExecBuy * 1.30) { scalpPts -= 25; scalpFactors.push(`ExecSell+30%`); }
     else if (totExecSell > totExecBuy * 1.10) { scalpPts -= 12; scalpFactors.push(`ExecSell>Buy`); }
 
-    // 2. 10s+ Aged Resting Wall Pulling Delta (PΔ)
     if (domPullDelta < -tfAvgCellVol * 0.35 && lastC.close >= lastC.open) { scalpPts += 20; scalpFactors.push(`AskSpoofPulled(PΔ${fmt(domPullDelta)})`); }
     else if (domPullDelta > tfAvgCellVol * 0.35 && lastC.close <= lastC.open) { scalpPts -= 20; scalpFactors.push(`BidSpoofPulled(PΔ+${fmt(domPullDelta)})`); }
 
-    // 3. Multi-Level Bid vs Ask Absorption
     if (rBidAbs > rAskAbs) { scalpPts += 22; scalpFactors.push(`BidAbs(${rBidAbs}x)`); }
     else if (rAskAbs > rBidAbs) { scalpPts -= 22; scalpFactors.push(`AskAbs(${rAskAbs}x)`); }
 
-    // 4. Live Resting Orderbook Depth Imbalance (Near 6 Steps)
     if (nearBidRest > nearAskRest * 1.35) { scalpPts += 14; scalpFactors.push(`BidBookWall(${fmt(nearBidRest)}v${fmt(nearAskRest)})`); }
     else if (nearAskRest > nearBidRest * 1.35) { scalpPts -= 14; scalpFactors.push(`AskBookWall(${fmt(nearAskRest)}v${fmt(nearBidRest)})`); }
 
-    // 5. Current Candle Delta & Close Position
     if (lastC.delta > 0 && closePos >= 0.60) { scalpPts += 14; scalpFactors.push(`Δ+${fmt(lastC.delta)}&HighClose`); }
     else if (lastC.delta < 0 && closePos <= 0.40) { scalpPts -= 14; scalpFactors.push(`Δ${fmt(lastC.delta)}&LowClose`); }
 
-    // 6. Whale Block Execution (Last 3 Candles)
     if (recentWhaleB > recentWhaleS) { scalpPts += 15; scalpFactors.push(`◆WhaleBuy(${recentWhaleB})`); }
     else if (recentWhaleS > recentWhaleB) { scalpPts -= 15; scalpFactors.push(`◆WhaleSell(${recentWhaleS})`); }
 
-    // 7. Value Area Position (VAH / VAL / POC)
     if (lastC.vah != null && lastC.close > lastC.vah) { scalpPts += 10; scalpFactors.push(`AboveVAH`); }
     else if (lastC.val != null && lastC.close < lastC.val) { scalpPts -= 10; scalpFactors.push(`BelowVAL`); }
 
-    // 8. Retail SL-Sweep Reversal
     if (bullSweepReject) { scalpPts += 18; scalpFactors.push(`SSL-SweepBounce`); }
     else if (bearSweepReject) { scalpPts -= 18; scalpFactors.push(`BSL-SweepReject`); }
 
-    // 9. SMT Divergence Bonus
     if (smtState.bias === 1) { scalpPts += 10; scalpFactors.push(`BullSMT`); }
     else if (smtState.bias === -1) { scalpPts -= 10; scalpFactors.push(`BearSMT`); }
 
-    // 10. Low-Volume Noise Dampener (RVOL Gate)
     if (curRvol < 0.60 && recentWhaleB === 0 && recentWhaleS === 0) {
         scalpPts = Math.round(scalpPts * 0.55);
         scalpFactors.push(`LowRVOL(${curRvol.toFixed(1)}x)`);
@@ -3205,15 +3194,12 @@ function drawAll() {
     // --- B. INTRADAY 10-PARAMETER SCORING MATRIX ---
     let intraPts = macroInfo ? macroInfo.netMacro : 0;
     if (macroInfo) {
-        // Add Multi-Candle Absorption weight
         if (macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) intraPts += 18;
         else if (macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) intraPts -= 18;
 
-        // Add SMT Divergence weight
         if (smtState.bias === 1) intraPts += 14;
         else if (smtState.bias === -1) intraPts -= 14;
 
-        // Add Session POC / Value Area Hold weight
         const sessionPocs = candles.slice(-15).map(x => x.poc).filter(x => x != null);
         if (sessionPocs.length > 0) {
             const avgSessionPoc = sessionPocs.reduce((a, b) => a + b, 0) / sessionPocs.length;
@@ -3221,7 +3207,6 @@ function drawAll() {
             else if (lastC.close < avgSessionPoc - domStep) intraPts -= 12;
         }
 
-        // Add Live Orderbook Depth alignment
         if (nearBidRest > nearAskRest * 1.3) intraPts += 8;
         else if (nearAskRest > nearBidRest * 1.3) intraPts -= 8;
     }
@@ -3235,7 +3220,7 @@ function drawAll() {
     else if (intraPts <= -28) { intraFinalTxt = '🔴 SELL'; intraFinalCol = '#ff5252'; }
     else if (intraPts <= -12) { intraFinalTxt = '🟠 WEAK SELL'; intraFinalCol = '#ff9100'; }
 
-    // --- C. COMPLETE X-RAY PAYLOAD FOR GEMINI AI (100% ENGINE TELEMETRY) ---
+    // --- C. COMPLETE X-RAY PAYLOAD FOR GROQ & GEMINI AI ---
     const last5CandlesSummary = candles.slice(-5).map(kc => ({
         time: new Date(kc.start).toTimeString().slice(0, 5),
         open: kc.open, high: kc.high, low: kc.low, close: kc.close,
@@ -3786,12 +3771,54 @@ def api_scan():
     })
 
 
+import concurrent.futures
+
+_news_cache = {"time": 0, "data": []}
+_working_gemini_model = None
+
+def fetch_live_crypto_news(symbol="BTCUSDT"):
+    """Fetches latest breaking crypto headlines & Fear/Greed Index (Cached for 60s, Zero Mobile Data!)."""
+    now = time.time()
+    if now - _news_cache["time"] < 60 and _news_cache["data"]:
+        return _news_cache["data"]
+
+    headlines = []
+    coin = symbol.replace("USDT", "")
+    try:
+        url = f"https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories={coin},BTC,Market,Regulation"
+        r = requests.get(url, timeout=4)
+        if r.status_code == 200:
+            items = r.json().get("Data", [])[:5]
+            for it in items:
+                title = it.get("title", "")
+                src = it.get("source_info", {}).get("name", "News")
+                mins_ago = max(1, int((now - int(it.get("published_on", now))) / 60))
+                headlines.append(f"[{mins_ago}m ago | {src}] {title}")
+    except Exception:
+        pass
+
+    try:
+        fng_r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3)
+        if fng_r.status_code == 200:
+            fd = fng_r.json().get("data", [{}])[0]
+            headlines.insert(0, f"[MACRO SENTIMENT] Crypto Fear & Greed Index: {fd.get('value')} ({fd.get('value_classification')})")
+    except Exception:
+        pass
+
+    if headlines:
+        _news_cache["time"] = now
+        _news_cache["data"] = headlines
+    return headlines or ["No major breaking news in the last hour."]
+
+
 @app.route("/api/ai-mentor", methods=["POST"])
 def api_ai_mentor():
-    raw_key = os.environ.get("GEMINI_API_KEY", "")
-    api_key = raw_key.strip().strip('"').strip("'")
-    if not api_key:
-        return jsonify({"status": "error", "message": "GEMINI_API_KEY Render Environment me nahi mili!"}), 400
+    global _working_gemini_model
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip().strip('"').strip("'")
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip().strip('"').strip("'")
+
+    if not gemini_key and not groq_key:
+        return jsonify({"status": "error", "message": "Render Environment me GEMINI_API_KEY ya GROQ_API_KEY nahi mili!"}), 400
 
     data = request.get_json(silent=True) or {}
     symbol = data.get("symbol", "BTCUSDT")
@@ -3799,81 +3826,127 @@ def api_ai_mentor():
     question = data.get("question", "")
     engine_data = data.get("engine_data", {})
 
-    prompt = f"""You are a ruthless, mathematically precise Institutional Orderflow & ICT Quant Mentor speaking in clear Hinglish.
-STRICT RULE: DO NOT hallucinate or guess any numbers. Base 100% of your analysis strictly on the JSON telemetry provided below.
+    live_news = fetch_live_crypto_news(symbol)
+    news_block = "\n".join(live_news)
 
-User is trading {symbol} on the {timeframe} chart.
-User's Question / TradingView Observation: "{question}"
+    prompt = f"""You are an Institutional Crypto Quant & ICT Orderflow Mentor speaking in sharp, practical Hinglish.
+STRICT RULE: DO NOT hallucinate any numbers. Base 100% of your analysis strictly on the JSON telemetry and Live News Headlines below.
+
+Asset: {symbol} ({timeframe})
+Trader's Question / TradingView Observation: "{question}"
+
+LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT:
+{news_block}
 
 COMPLETE 10-PARAMETER SA ENGINE & DOM TELEMETRY:
 {json.dumps(engine_data, indent=2)}
 
-Analyze ALL parameters (DOM Executed Buy/Sell, 10s+ Aged Spoof Pulling Delta PΔ, Bid/Ask Absorptions, Resting Book Walls, Whale Blocks, Value Area VAH/VAL/POC, Last 5 Candles Delta/CVD, SMT Divergence, and Untouched UB-HIGH/LOW & nPOC Magnets) and reply in 4 sharp Hinglish sections:
-1. FINAL VERDICT & ALIGNMENT: State both Scalp Bias ({engine_data.get('scalp_10factor_verdict', {}).get('final_bias')}) and Intraday Bias ({engine_data.get('intraday_10factor_verdict', {}).get('final_bias')}) with their Quant Scores, and tell the user if their idea is 🟢 100% ALIGNED, 🔴 TRAP / OPPOSITE FLOW, or ⏳ WAIT FOR TRIGGER.
-2. COMPLETE ORDERFLOW X-RAY: Cite exact numbers from DOM Executions, 10s Pull Delta (PΔ), Resting Walls, Absorptions, Whale Lots, and Last 5 Candles CVD/Delta.
-3. EXACT EXECUTION PLAN (SCALP): Give exact Entry Zone, Stop-Loss / Invalidation level, and Target 1 / Target 2 using the active UB-HIGH/LOW or nPOC magnets.
-4. INTRADAY CAMPAIGN ROADMAP: Explain what big players are building over the session and where the HTF magnet lies."""
+Analyze ALL 10 parameters (DOM Buy/Sell Executions, 10s+ Spoof Pulling Delta PΔ, Bid/Ask Absorptions, Resting Book Walls, Whale Blocks, Value Area VAH/VAL/POC, Last 5 Candles CVD/Delta, SMT Divergence, and Untouched UB-HIGH/LOW & nPOC Magnets) and reply in 5 short Hinglish points:
+1. ⚖️ FINAL VERDICT & ALIGNMENT: State Scalp Bias ({engine_data.get('scalp_10factor_verdict', {}).get('final_bias')}) & Intraday Bias ({engine_data.get('intraday_10factor_verdict', {}).get('final_bias')}) with Quant Scores. Is the trader's view 🟢 100% ALIGNED, 🔴 TRAP, or ⏳ WAIT FOR TRIGGER?
+2. 📰 LIVE NEWS & SENTIMENT IMPACT: Any breaking news risk/tailwind, or pure technical orderflow?
+3. ⚔️ DOM & ABSORPTION X-RAY: Exact numbers from Buy/Sell Executions, 10s Pull Delta (PΔ), Resting Walls, Absorptions, and Whale Lots.
+4. 🎯 EXACT SCALP PLAN: Entry Zone, Invalidation/SL level, and Target (UB-HIGH/LOW or nPOC).
+5. 🌊 INTRADAY ROADMAP: Session CVD & Big Player campaign direction."""
 
-    try:
-        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        list_resp = requests.get(list_url, timeout=10)
-        if list_resp.status_code != 200:
-            return jsonify({"status": "error", "message": f"Model list error: {list_resp.text}"}), 400
-
-        models_json = list_resp.json()
-        available_models = []
-        for m in models_json.get("models", []):
-            name = m.get("name", "")
-            methods = m.get("supportedGenerationMethods", [])
-            if "generateContent" in methods and "2.5" not in name and "tts" not in name and "image" not in name:
-                available_models.append(name)
-
-        # Smart Sort: Prefer FULL Flash/Pro models FIRST, keep 'lite' only as backup!
-        def model_priority(m_name):
-            n = m_name.lower()
-            if "flash" in n and "lite" not in n:
-                return 0  # Best: Full Flash model (fast + deep reasoning)
-            if "pro" in n:
-                return 1  # Second: Pro model (deepest reasoning)
-            if "lite" in n:
-                return 2  # Backup: Lite model
-            return 3
-
-        available_models.sort(key=model_priority)
-
-        if not available_models:
-            return jsonify({"status": "error", "message": "Koi active generateContent model nahi mila."}), 400
-
-        last_err = "Unknown error"
-        for model_path in available_models[:5]:
-            url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
-            resp = requests.post(
-                url,
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
+    def call_groq():
+        if not groq_key:
+            return None
+        for gm in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+            try:
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {groq_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": gm,
+                        "messages": [
+                            {"role": "system", "content": "You are a ruthless, mathematically precise Institutional Orderflow Quant Mentor."},
+                            {"role": "user", "content": prompt}
+                        ],
                         "temperature": 0.1,
-                        "topP": 0.8
-                    }
-                },
-                timeout=15
-            )
-            rjson = resp.json()
-            if resp.status_code == 200 and "candidates" in rjson:
-                parts = rjson["candidates"][0].get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    return jsonify({"status": "ok", "reply": f"[{model_path.replace('models/','')} | Quant Mode T=0.1]\n" + parts[0]["text"]})
+                        "max_tokens": 700
+                    },
+                    timeout=12
+                )
+                rj = r.json()
+                if r.status_code == 200 and "choices" in rj:
+                    txt = rj["choices"][0]["message"]["content"]
+                    return f"⚡ === GROQ QUANT AI ({gm}) ===\n{txt}"
+            except Exception:
+                pass
+        return None
 
-            err_msg = rjson.get("error", {}).get("message", f"HTTP {resp.status_code}")
-            last_err = f"[{model_path}] {err_msg}"
+    def call_gemini():
+        global _working_gemini_model
+        if not gemini_key:
+            return None
+        try:
+            list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
+            list_resp = requests.get(list_url, timeout=8)
+            if list_resp.status_code != 200:
+                return None
 
-        return jsonify({"status": "error", "message": f"Models failed. Last error: {last_err}"}), 500
+            models_json = list_resp.json()
+            available_models = []
+            for m in models_json.get("models", []):
+                name = m.get("name", "")
+                methods = m.get("supportedGenerationMethods", [])
+                # Skip deprecated 2.5 and 0-quota 'omni' models!
+                if "generateContent" in methods and "2.5" not in name and "omni" not in name.lower():
+                    available_models.append(name)
 
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+            # Original Working Auto-Select Priority: Keep proven free-tier 'gemini-flash-lite-latest' FIRST!
+            def orig_priority(x):
+                xl = x.lower()
+                if _working_gemini_model and x == _working_gemini_model:
+                    return -1
+                if "gemini-flash-lite-latest" in xl or "flash-lite" in xl:
+                    return 0
+                if "flash" in xl:
+                    return 1
+                return 2
 
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+            available_models.sort(key=orig_priority)
+
+            for model_path in available_models[:6]:
+                url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={gemini_key}"
+                resp = requests.post(
+                    url,
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"temperature": 0.1}
+                    },
+                    timeout=14
+                )
+                rjson = resp.json()
+                if resp.status_code == 200 and "candidates" in rjson:
+                    parts = rjson["candidates"][0].get("content", {}).get("parts", [])
+                    if parts and "text" in parts[0]:
+                        _working_gemini_model = model_path
+                        return f"🧠 === GEMINI MENTOR AI ({model_path.replace('models/','')}) ===\n{parts[0]['text']}"
+        except Exception:
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f_groq = executor.submit(call_groq)
+        f_gem = executor.submit(call_gemini)
+        groq_reply = f_groq.result()
+        gem_reply = f_gem.result()
+
+    news_header = "📰 === LIVE CRYPTO NEWS & SENTIMENT DESK ===\n" + "\n".join(f"• {h}" for h in live_news[:4])
+    sections = [news_header]
+    if groq_reply:
+        sections.append(groq_reply)
+    if gem_reply:
+        sections.append(gem_reply)
+
+    if not groq_reply and not gem_reply:
+        return jsonify({"status": "error", "message": "Groq ya Gemini se response nahi aaya. Check API Keys in Render!"}), 500
+
+    return jsonify({"status": "ok", "reply": "\n\n" + ("\n" + "="*55 + "\n\n").join(sections)})
 
 
 import gzip
