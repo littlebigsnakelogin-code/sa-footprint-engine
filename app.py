@@ -3690,31 +3690,51 @@ Give a direct, practical Hinglish response in 4 short bullet points:
 3. SCALP PLAN: Exact Entry Zone, Invalidation, and Immediate Target (UB-HIGH/LOW or nPOC).
 4. INTRADAY BIAS: What is the bigger session flow doing?"""
 
-    # Try standard available models in current public API
-    models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-3.1-pro"]
-    last_err = "Unknown API error"
+    try:
+        # Step 1: Google se live model discover karo jo generateContent support karta ho
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        list_resp = requests.get(list_url, timeout=10)
+        if list_resp.status_code != 200:
+            return jsonify({"status": "error", "message": f"Model list fetch fail ho gayi: {list_resp.text}"}), 400
 
-    for model_name in models:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-            resp = requests.post(
-                url,
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-                timeout=15
-            )
-            rjson = resp.json()
-            if resp.status_code == 200 and "candidates" in rjson:
-                parts = rjson["candidates"][0].get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    return jsonify({"status": "ok", "reply": f"[{model_name}]\n" + parts[0]["text"]})
-            
-            # Capture exact error message from google
-            err_msg = rjson.get("error", {}).get("message", f"HTTP {resp.status_code}")
-            last_err = f"[{model_name}] {err_msg}"
-        except Exception as e:
-            last_err = str(e)
+        models_json = list_resp.json()
+        valid_model = None
+        
+        # Pehle flash model dhoondo
+        for m in models_json.get("models", []):
+            if "generateContent" in m.get("supportedGenerationMethods", []):
+                name = m.get("name", "") # e.g., "models/gemini-2.0-flash"
+                if "flash" in name.lower():
+                    valid_model = name
+                    break
+        
+        # Agar flash nahi mila toh koi bhi valid pro/other model utha lo
+        if not valid_model:
+            for m in models_json.get("models", []):
+                if "generateContent" in m.get("supportedGenerationMethods", []):
+                    valid_model = m.get("name")
+                    break
 
-    return jsonify({"status": "error", "message": f"All models failed. Last error: {last_err}"}), 500
+        if not valid_model:
+            return jsonify({"status": "error", "message": "Tumhari API key par koi bhi active generateContent model nahi mila."}), 400
+
+        # Step 2: Jo model mila, usko request bhej do
+        url = f"https://generativelanguage.googleapis.com/v1beta/{valid_model}:generateContent?key={api_key}"
+        resp = requests.post(
+            url,
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=15
+        )
+        rjson = resp.json()
+        if resp.status_code == 200 and "candidates" in rjson:
+            parts = rjson["candidates"][0].get("content", {}).get("parts", [])
+            if parts and "text" in parts[0]:
+                return jsonify({"status": "ok", "reply": f"[{valid_model}]\n" + parts[0]["text"]})
+        
+        return jsonify({"status": "error", "message": f"API Error ({valid_model}): {str(rjson)}"}), 500
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 import gzip
