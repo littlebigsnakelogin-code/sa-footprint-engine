@@ -3119,51 +3119,173 @@ function drawAll() {
         bwCol = '#ff5252';
     }
 
-    // 2. COMPUTE 2 FINAL BIAS WINDOWS (STRONG BUY / BUY / WEAK BUY / STRONG SELL / SELL / WEAK SELL / SIDEWAYS)
+    // 2. FULL 10-PARAMETER QUANT ENGINE FOR SCALP FINAL BIAS & INTRADAY FINAL BIAS
+    const curRvol = (lastC.volume || 0) / avgFlowVol;
+    const cRange = Math.max(lastC.high - lastC.low, rawStep * 0.5);
+    const closePos = (lastC.close - lastC.low) / cRange;
+
+    // Count recent 3-candle Whales & SL-Sweeps
+    let recentWhaleB = 0, recentWhaleS = 0;
+    candles.slice(-3).forEach(rc => {
+        const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
+        gList.forEach(gl => {
+            const trd = Math.max(gl.trades || 1, 1);
+            if (gl.volume >= tfAvgCellVol * 1.15 && ((gl.volume / trd) / baselineLotSize) >= 2.8) {
+                if (gl.buy > gl.sell) recentWhaleB++;
+                else recentWhaleS++;
+            }
+        });
+    });
+
+    let prev5High = -Infinity, prev5Low = Infinity;
+    for (let k = Math.max(0, candles.length - 6); k < candles.length - 1; k++) {
+        if (candles[k].high > prev5High) prev5High = candles[k].high;
+        if (candles[k].low < prev5Low) prev5Low = candles[k].low;
+    }
+    const bullSweepReject = lastC.low < prev5Low && lastC.close > prev5Low && closePos >= 0.55;
+    const bearSweepReject = lastC.high > prev5High && lastC.close < prev5High && closePos <= 0.45;
+
+    // --- A. SCALP 10-PARAMETER SCORING MATRIX ---
     let scalpPts = 0;
-    if (totExecBuy > totExecSell * 1.25) scalpPts += 2;
-    else if (totExecBuy > totExecSell * 1.08) scalpPts += 1;
-    else if (totExecSell > totExecBuy * 1.25) scalpPts -= 2;
-    else if (totExecSell > totExecBuy * 1.08) scalpPts -= 1;
+    let scalpFactors = [];
 
-    if (domPullDelta < -tfAvgCellVol * 0.3) scalpPts += 1;
-    else if (domPullDelta > tfAvgCellVol * 0.3) scalpPts -= 1;
+    // 1. Live DOM Executed Volume Ratio
+    if (totExecBuy > totExecSell * 1.30) { scalpPts += 25; scalpFactors.push(`ExecBuy+30%`); }
+    else if (totExecBuy > totExecSell * 1.10) { scalpPts += 12; scalpFactors.push(`ExecBuy>Sell`); }
+    else if (totExecSell > totExecBuy * 1.30) { scalpPts -= 25; scalpFactors.push(`ExecSell+30%`); }
+    else if (totExecSell > totExecBuy * 1.10) { scalpPts -= 12; scalpFactors.push(`ExecSell>Buy`); }
 
-    if (rBidAbs > rAskAbs) scalpPts += 1;
-    else if (rAskAbs > rBidAbs) scalpPts -= 1;
+    // 2. 10s+ Aged Resting Wall Pulling Delta (PΔ)
+    if (domPullDelta < -tfAvgCellVol * 0.35 && lastC.close >= lastC.open) { scalpPts += 20; scalpFactors.push(`AskSpoofPulled(PΔ${fmt(domPullDelta)})`); }
+    else if (domPullDelta > tfAvgCellVol * 0.35 && lastC.close <= lastC.open) { scalpPts -= 20; scalpFactors.push(`BidSpoofPulled(PΔ+${fmt(domPullDelta)})`); }
 
-    if (lastC.delta > 0 && lastC.close >= lastC.open) scalpPts += 1;
-    else if (lastC.delta < 0 && lastC.close <= lastC.open) scalpPts -= 1;
+    // 3. Multi-Level Bid vs Ask Absorption
+    if (rBidAbs > rAskAbs) { scalpPts += 22; scalpFactors.push(`BidAbs(${rBidAbs}x)`); }
+    else if (rAskAbs > rBidAbs) { scalpPts -= 22; scalpFactors.push(`AskAbs(${rAskAbs}x)`); }
+
+    // 4. Live Resting Orderbook Depth Imbalance (Near 6 Steps)
+    if (nearBidRest > nearAskRest * 1.35) { scalpPts += 14; scalpFactors.push(`BidBookWall(${fmt(nearBidRest)}v${fmt(nearAskRest)})`); }
+    else if (nearAskRest > nearBidRest * 1.35) { scalpPts -= 14; scalpFactors.push(`AskBookWall(${fmt(nearAskRest)}v${fmt(nearBidRest)})`); }
+
+    // 5. Current Candle Delta & Close Position
+    if (lastC.delta > 0 && closePos >= 0.60) { scalpPts += 14; scalpFactors.push(`Δ+${fmt(lastC.delta)}&HighClose`); }
+    else if (lastC.delta < 0 && closePos <= 0.40) { scalpPts -= 14; scalpFactors.push(`Δ${fmt(lastC.delta)}&LowClose`); }
+
+    // 6. Whale Block Execution (Last 3 Candles)
+    if (recentWhaleB > recentWhaleS) { scalpPts += 15; scalpFactors.push(`◆WhaleBuy(${recentWhaleB})`); }
+    else if (recentWhaleS > recentWhaleB) { scalpPts -= 15; scalpFactors.push(`◆WhaleSell(${recentWhaleS})`); }
+
+    // 7. Value Area Position (VAH / VAL / POC)
+    if (lastC.vah != null && lastC.close > lastC.vah) { scalpPts += 10; scalpFactors.push(`AboveVAH`); }
+    else if (lastC.val != null && lastC.close < lastC.val) { scalpPts -= 10; scalpFactors.push(`BelowVAL`); }
+
+    // 8. Retail SL-Sweep Reversal
+    if (bullSweepReject) { scalpPts += 18; scalpFactors.push(`SSL-SweepBounce`); }
+    else if (bearSweepReject) { scalpPts -= 18; scalpFactors.push(`BSL-SweepReject`); }
+
+    // 9. SMT Divergence Bonus
+    if (smtState.bias === 1) { scalpPts += 10; scalpFactors.push(`BullSMT`); }
+    else if (smtState.bias === -1) { scalpPts -= 10; scalpFactors.push(`BearSMT`); }
+
+    // 10. Low-Volume Noise Dampener (RVOL Gate)
+    if (curRvol < 0.60 && recentWhaleB === 0 && recentWhaleS === 0) {
+        scalpPts = Math.round(scalpPts * 0.55);
+        scalpFactors.push(`LowRVOL(${curRvol.toFixed(1)}x)`);
+    }
 
     let scalpFinalTxt = '⚪ SIDEWAYS';
     let scalpFinalCol = '#ffca28';
-    if (scalpPts >= 4) { scalpFinalTxt = '🟢 STRONG BUY'; scalpFinalCol = '#00e676'; }
-    else if (scalpPts >= 2) { scalpFinalTxt = '🟢 BUY'; scalpFinalCol = '#69f0ae'; }
-    else if (scalpPts === 1) { scalpFinalTxt = '🟡 WEAK BUY'; scalpFinalCol = '#00e5ff'; }
-    else if (scalpPts <= -4) { scalpFinalTxt = '🔴 STRONG SELL'; scalpFinalCol = '#ff1744'; }
-    else if (scalpPts <= -2) { scalpFinalTxt = '🔴 SELL'; scalpFinalCol = '#ff5252'; }
-    else if (scalpPts === -1) { scalpFinalTxt = '🟠 WEAK SELL'; scalpFinalCol = '#ff9100'; }
+    if (scalpPts >= 55) { scalpFinalTxt = '🟢 STRONG BUY'; scalpFinalCol = '#00e676'; }
+    else if (scalpPts >= 30) { scalpFinalTxt = '🟢 BUY'; scalpFinalCol = '#69f0ae'; }
+    else if (scalpPts >= 14) { scalpFinalTxt = '🟡 WEAK BUY'; scalpFinalCol = '#00e5ff'; }
+    else if (scalpPts <= -55) { scalpFinalTxt = '🔴 STRONG SELL'; scalpFinalCol = '#ff1744'; }
+    else if (scalpPts <= -30) { scalpFinalTxt = '🔴 SELL'; scalpFinalCol = '#ff5252'; }
+    else if (scalpPts <= -14) { scalpFinalTxt = '🟠 WEAK SELL'; scalpFinalCol = '#ff9100'; }
 
-    const netM = macroInfo ? macroInfo.netMacro : 0;
+    // --- B. INTRADAY 10-PARAMETER SCORING MATRIX ---
+    let intraPts = macroInfo ? macroInfo.netMacro : 0;
+    if (macroInfo) {
+        // Add Multi-Candle Absorption weight
+        if (macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) intraPts += 18;
+        else if (macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) intraPts -= 18;
+
+        // Add SMT Divergence weight
+        if (smtState.bias === 1) intraPts += 14;
+        else if (smtState.bias === -1) intraPts -= 14;
+
+        // Add Session POC / Value Area Hold weight
+        const sessionPocs = candles.slice(-15).map(x => x.poc).filter(x => x != null);
+        if (sessionPocs.length > 0) {
+            const avgSessionPoc = sessionPocs.reduce((a, b) => a + b, 0) / sessionPocs.length;
+            if (lastC.close > avgSessionPoc + domStep) intraPts += 12;
+            else if (lastC.close < avgSessionPoc - domStep) intraPts -= 12;
+        }
+
+        // Add Live Orderbook Depth alignment
+        if (nearBidRest > nearAskRest * 1.3) intraPts += 8;
+        else if (nearAskRest > nearBidRest * 1.3) intraPts -= 8;
+    }
+
     let intraFinalTxt = '⚪ SIDEWAYS';
     let intraFinalCol = '#ffca28';
-    if (netM >= 42) { intraFinalTxt = '🟢 STRONG BUY'; intraFinalCol = '#00e676'; }
-    else if (netM >= 22) { intraFinalTxt = '🟢 BUY'; intraFinalCol = '#69f0ae'; }
-    else if (netM >= 10) { intraFinalTxt = '🟡 WEAK BUY'; intraFinalCol = '#00e5ff'; }
-    else if (netM <= -42) { intraFinalTxt = '🔴 STRONG SELL'; intraFinalCol = '#ff1744'; }
-    else if (netM <= -22) { intraFinalTxt = '🔴 SELL'; intraFinalCol = '#ff5252'; }
-    else if (netM <= -10) { intraFinalTxt = '🟠 WEAK SELL'; intraFinalCol = '#ff9100'; }
+    if (intraPts >= 55) { intraFinalTxt = '🟢 STRONG BUY'; intraFinalCol = '#00e676'; }
+    else if (intraPts >= 28) { intraFinalTxt = '🟢 BUY'; intraFinalCol = '#69f0ae'; }
+    else if (intraPts >= 12) { intraFinalTxt = '🟡 WEAK BUY'; intraFinalCol = '#00e5ff'; }
+    else if (intraPts <= -55) { intraFinalTxt = '🔴 STRONG SELL'; intraFinalCol = '#ff1744'; }
+    else if (intraPts <= -28) { intraFinalTxt = '🔴 SELL'; intraFinalCol = '#ff5252'; }
+    else if (intraPts <= -12) { intraFinalTxt = '🟠 WEAK SELL'; intraFinalCol = '#ff9100'; }
 
-    // Save clean summary for AI Mentor (works even when DOM is hidden!)
+    // --- C. COMPLETE X-RAY PAYLOAD FOR GEMINI AI (100% ENGINE TELEMETRY) ---
+    const last5CandlesSummary = candles.slice(-5).map(kc => ({
+        time: new Date(kc.start).toTimeString().slice(0, 5),
+        open: kc.open, high: kc.high, low: kc.low, close: kc.close,
+        vol: Math.round(kc.volume || 0),
+        buy_vol: Math.round(kc.buy_volume || 0),
+        sell_vol: Math.round(kc.sell_volume || 0),
+        delta: Math.round(kc.delta || 0),
+        poc: kc.poc, vah: kc.vah, val: kc.val
+    }));
+
     latestEngineSummary = {
+        symbol,
+        timeframe: tf,
         live_price: lastC.close,
-        smt: smtState.text,
-        scalp_final_bias: scalpFinalTxt,
-        intraday_final_bias: intraFinalTxt,
-        dom_battle_reason: battleWinner,
-        dom_exec: { buy_exec: totExecBuy, sell_exec: totExecSell, bid_pull_10s: totPullB, ask_pull_10s: totPullA, pull_delta: domPullDelta, bid_rest: nearBidRest, ask_rest: nearAskRest },
-        macro_notes: macroInfo ? macroInfo.macroNotes : [],
-        magnets: { ub: unfinishedLevels.slice(-4), npoc: nakedPocs.slice(-4) }
+        rvol: Number(curRvol.toFixed(2)),
+        smt_divergence: smtState.text,
+        scalp_10factor_verdict: {
+            final_bias: scalpFinalTxt,
+            quant_score: scalpPts,
+            active_factors: scalpFactors,
+            dom_battle_status: battleWinner
+        },
+        intraday_10factor_verdict: {
+            final_bias: intraFinalTxt,
+            quant_score: intraPts,
+            session_cvd: macroInfo ? Math.round(macroInfo.totalCvd) : 0,
+            session_pull_delta: macroInfo ? Math.round(macroInfo.macroPullDelta) : 0,
+            session_bid_absorptions: macroInfo ? macroInfo.macroBidAbsorbs : 0,
+            session_ask_absorptions: macroInfo ? macroInfo.macroAskAbsorbs : 0,
+            session_whale_blocks: macroInfo ? `${macroInfo.whaleBuyLots} Buy vs ${macroInfo.whaleSellLots} Sell` : '0',
+            macro_notes: macroInfo ? macroInfo.macroNotes : []
+        },
+        dom_orderflow_matrix: {
+            active_buy_executed: Number(totExecBuy.toFixed(2)),
+            active_sell_executed: Number(totExecSell.toFixed(2)),
+            aged_10s_bid_pulled: Number(totPullB.toFixed(2)),
+            aged_10s_ask_pulled: Number(totPullA.toFixed(2)),
+            net_pulling_delta_PDelta: Number(domPullDelta.toFixed(2)),
+            near_6step_bid_resting_wall: Number(nearBidRest.toFixed(2)),
+            near_6step_ask_resting_wall: Number(nearAskRest.toFixed(2)),
+            recent_3candle_bid_absorptions: rBidAbs,
+            recent_3candle_ask_absorptions: rAskAbs,
+            recent_3candle_whale_buys: recentWhaleB,
+            recent_3candle_whale_sells: recentWhaleS
+        },
+        untouched_magnets: {
+            unfinished_business_high_low: unfinishedLevels.slice(-5),
+            naked_pocs: nakedPocs.slice(-5)
+        },
+        last_5_candles_ohlcv_delta_va: last5CandlesSummary
     };
 
     if (!showDOM || domW <= 0) return;
@@ -3677,21 +3799,22 @@ def api_ai_mentor():
     question = data.get("question", "")
     engine_data = data.get("engine_data", {})
 
-    prompt = f"""You are a ruthless, accurate Institutional Orderflow & ICT Mentor speaking in clear Hinglish.
-The user is trading {symbol} on the {timeframe} chart.
+    prompt = f"""You are a ruthless, mathematically precise Institutional Orderflow & ICT Quant Mentor speaking in clear Hinglish.
+STRICT RULE: DO NOT hallucinate or guess any numbers. Base 100% of your analysis strictly on the JSON telemetry provided below.
+
+User is trading {symbol} on the {timeframe} chart.
 User's Question / TradingView Observation: "{question}"
 
-Here is the LIVE SA Footprint & DOM Engine Data right now:
+COMPLETE 10-PARAMETER SA ENGINE & DOM TELEMETRY:
 {json.dumps(engine_data, indent=2)}
 
-Give a direct, practical Hinglish response in 4 short bullet points:
-1. ALIGNMENT VERDICT: Does the SA Engine data support the user's idea? (🟢 STRONG BUY / BUY / 🔴 STRONG SELL / SELL / ⚪ SIDEWAYS WAIT)
-2. DOM & ABSORPTION REALITY: What are Institutional Bid/Ask Executions, Absorptions, Resting Walls, and 10s Spoof Pulls (PΔ) doing right now?
-3. SCALP PLAN: Exact Entry Zone, Invalidation, and Immediate Target (UB-HIGH/LOW or nPOC).
-4. INTRADAY BIAS: What is the bigger session flow doing?"""
+Analyze ALL parameters (DOM Executed Buy/Sell, 10s+ Aged Spoof Pulling Delta PΔ, Bid/Ask Absorptions, Resting Book Walls, Whale Blocks, Value Area VAH/VAL/POC, Last 5 Candles Delta/CVD, SMT Divergence, and Untouched UB-HIGH/LOW & nPOC Magnets) and reply in 4 sharp Hinglish sections:
+1. FINAL VERDICT & ALIGNMENT: State both Scalp Bias ({engine_data.get('scalp_10factor_verdict', {}).get('final_bias')}) and Intraday Bias ({engine_data.get('intraday_10factor_verdict', {}).get('final_bias')}) with their Quant Scores, and tell the user if their idea is 🟢 100% ALIGNED, 🔴 TRAP / OPPOSITE FLOW, or ⏳ WAIT FOR TRIGGER.
+2. COMPLETE ORDERFLOW X-RAY: Cite exact numbers from DOM Executions, 10s Pull Delta (PΔ), Resting Walls, Absorptions, Whale Lots, and Last 5 Candles CVD/Delta.
+3. EXACT EXECUTION PLAN (SCALP): Give exact Entry Zone, Stop-Loss / Invalidation level, and Target 1 / Target 2 using the active UB-HIGH/LOW or nPOC magnets.
+4. INTRADAY CAMPAIGN ROADMAP: Explain what big players are building over the session and where the HTF magnet lies."""
 
     try:
-        # Step 1: Live fetch available models from Google API
         list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
         list_resp = requests.get(list_url, timeout=10)
         if list_resp.status_code != 200:
@@ -3700,36 +3823,54 @@ Give a direct, practical Hinglish response in 4 short bullet points:
         models_json = list_resp.json()
         available_models = []
         for m in models_json.get("models", []):
-            name = m.get("name", "") # e.g., "models/gemini-1.5-flash"
+            name = m.get("name", "")
             methods = m.get("supportedGenerationMethods", [])
-            if "generateContent" in methods:
-                if "2.5" not in name:  # Skip deprecated 2.5
-                    available_models.append(name)
+            if "generateContent" in methods and "2.5" not in name and "tts" not in name and "image" not in name:
+                available_models.append(name)
 
-        # Prioritize flash models first
-        available_models.sort(key=lambda x: 0 if "flash" in x.lower() else 1)
+        # Smart Sort: Prefer FULL Flash/Pro models FIRST, keep 'lite' only as backup!
+        def model_priority(m_name):
+            n = m_name.lower()
+            if "flash" in n and "lite" not in n:
+                return 0  # Best: Full Flash model (fast + deep reasoning)
+            if "pro" in n:
+                return 1  # Second: Pro model (deepest reasoning)
+            if "lite" in n:
+                return 2  # Backup: Lite model
+            return 3
+
+        available_models.sort(key=model_priority)
 
         if not available_models:
-            return jsonify({"status": "error", "message": "Koi bhi generateContent support karne wala model nahi mila."}), 400
+            return jsonify({"status": "error", "message": "Koi active generateContent model nahi mila."}), 400
 
         last_err = "Unknown error"
-        for model_path in available_models[:5]:  # Try top 5 discovered models
+        for model_path in available_models[:5]:
             url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
             resp = requests.post(
                 url,
-                json={"contents": [{"parts": [{"text": prompt}]}]},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "topP": 0.8
+                    }
+                },
                 timeout=15
             )
             rjson = resp.json()
             if resp.status_code == 200 and "candidates" in rjson:
                 parts = rjson["candidates"][0].get("content", {}).get("parts", [])
                 if parts and "text" in parts[0]:
-                    return jsonify({"status": "ok", "reply": f"[{model_path.replace('models/','')}]\n" + parts[0]["text"]})
-            
+                    return jsonify({"status": "ok", "reply": f"[{model_path.replace('models/','')} | Quant Mode T=0.1]\n" + parts[0]["text"]})
+
             err_msg = rjson.get("error", {}).get("message", f"HTTP {resp.status_code}")
             last_err = f"[{model_path}] {err_msg}"
 
-        return jsonify({"status": "error", "message": f"Discovered models failed. Last error: {last_err}"}), 500
+        return jsonify({"status": "error", "message": f"Models failed. Last error: {last_err}"}), 500
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
