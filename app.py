@@ -3690,7 +3690,7 @@ Give a direct, practical Hinglish response in 4 short bullet points:
 3. SCALP PLAN: Exact Entry Zone, Invalidation, and Immediate Target (UB-HIGH/LOW or nPOC).
 4. INTRADAY BIAS: What is the bigger session flow doing?"""
 
-    models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    models = ["gemini-3.8-flash", "gemini-3.1-pro", "gemini-2.5-flash"]
     last_err = "Unknown API error"
 
     for model_name in models:
