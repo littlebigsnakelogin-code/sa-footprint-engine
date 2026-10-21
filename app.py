@@ -168,6 +168,84 @@ collector_thread = None
 # STARTUP HYDRATION (LOAD PAST 48H FROM TURSO TO RAM)
 # ============================================================
 
+def heal_recent_candles_via_ws():
+    """Runs ONLY ONCE on server startup to heal any deploy OHLC gaps from Binance Futures WS!"""
+    ws = None
+    try:
+        ws = websocket.create_connection("wss://ws-fapi.binance.com/ws-fapi/v1", timeout=6)
+        ws.settimeout(4)
+        req_id = 100
+        for sym in SYMBOLS:
+            for tf, sec in TIMEFRAMES.items():
+                req_id += 1
+                ws.send(json.dumps({
+                    "id": req_id,
+                    "method": "klines",
+                    "params": {"symbol": sym, "interval": tf, "limit": 8}
+                }))
+                raw = ws.recv()
+                if not raw:
+                    continue
+                resp = json.loads(raw)
+                klines = resp.get("result")
+                if not isinstance(klines, list):
+                    continue
+
+                now_bucket = floor_timestamp(now_ms(), sec)
+                with lock:
+                    existing_map = {c["start"]: c for c in candles[sym][tf]}
+                    if current_candles[sym][tf] is not None:
+                        existing_map[current_candles[sym][tf]["start"]] = current_candles[sym][tf]
+
+                    for k in klines:
+                        k_start = int(k[0])
+                        k_o, k_h, k_l, k_c = float(k[1]), float(k[2]), float(k[3]), float(k[4])
+                        k_vol = float(k[5])
+                        k_trades = int(k[8])
+                        k_buy = float(k[9])
+                        k_sell = max(0.0, k_vol - k_buy)
+                        k_delta = k_buy - k_sell
+
+                        if k_start in existing_map:
+                            c_obj = existing_map[k_start]
+                            c_obj["open"] = k_o
+                            c_obj["high"] = max(float(c_obj.get("high", k_h)), k_h)
+                            c_obj["low"] = min(float(c_obj.get("low", k_l)), k_l)
+                            c_obj["close"] = k_c
+                            if k_vol > float(c_obj.get("volume", 0.0)):
+                                c_obj["volume"] = k_vol
+                                c_obj["buy_volume"] = k_buy
+                                c_obj["sell_volume"] = k_sell
+                                c_obj["delta"] = k_delta
+                                c_obj["trades"] = max(int(c_obj.get("trades", 0)), k_trades)
+                        elif k_start == now_bucket and current_candles[sym][tf] is None:
+                            current_candles[sym][tf] = {
+                                "symbol": sym,
+                                "timeframe": tf,
+                                "start": k_start,
+                                "end": k_start + sec * 1000,
+                                "open": k_o,
+                                "high": k_h,
+                                "low": k_l,
+                                "close": k_c,
+                                "volume": k_vol,
+                                "buy_volume": k_buy,
+                                "sell_volume": k_sell,
+                                "delta": k_delta,
+                                "trades": k_trades,
+                                "footprint": {},
+                            }
+        print("[HEALER] Boot OHLC sync complete (Zero extra Turso writes).")
+    except Exception as e:
+        print(f"[HEALER] WS Kline sync skipped: {e}")
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+
 def load_historical_candles_from_turso():
     if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return
@@ -188,7 +266,6 @@ def load_historical_candles_from_turso():
                         fp_list = json.loads(fp_json) if fp_json else []
                         step = PRICE_STEP.get(sym, 1.0)
                         margin = step * 30
-                        # Filter out old garbage far-away price levels from RAM
                         fp_dict = {
                             str(item["price"]): item
                             for item in fp_list
@@ -221,6 +298,7 @@ def load_historical_candles_from_turso():
                     candles[sym][tf].append(candle_obj)
                     loaded_count += 1
             print(f"[TURSO] Successfully hydrated {loaded_count} historical candles into RAM.")
+        threading.Thread(target=heal_recent_candles_via_ws, name="ws-kline-healer", daemon=True).start()
     except Exception as e:
         print(f"[TURSO] Hydration failed: {e}")
 
@@ -1239,11 +1317,14 @@ def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
             current = current_candles[symbol][timeframe]
 
             if current is None:
-                current = create_empty_candle(symbol, timeframe, start, price)
+                prev_list = candles[symbol][timeframe]
+                open_px = prev_list[-1]["close"] if prev_list and (start - prev_list[-1]["start"] == seconds * 1000) else price
+                current = create_empty_candle(symbol, timeframe, start, open_px)
                 current_candles[symbol][timeframe] = current
             elif start != current["start"]:
+                prev_close = current["close"]
                 store_finished_candle(current)
-                current = create_empty_candle(symbol, timeframe, start, price)
+                current = create_empty_candle(symbol, timeframe, start, prev_close)
                 current_candles[symbol][timeframe] = current
 
             add_trade_to_candle(current, price, quantity, is_buyer_maker)
@@ -1656,6 +1737,7 @@ def home():
     <button class="btn" onclick="scaleX(1.18)">X+</button>
     <button class="btn" onclick="scaleX(0.84)">X-</button>
     <button class="btn" onclick="resetCamera()">Fit</button>
+    <button class="btn" id="crosshairBtn" onclick="toggleCrosshair()">➕ CROSS</button>
     <button class="btn active" id="viewModeBtn" onclick="toggleViewMode()">👁️ PRO</button>
     <button class="btn" id="domToggleBtn" onclick="toggleDOM()">DOM</button>
     <button class="btn" onclick="toggleAI()" style="background:#00bfa5;color:#000;border-color:#00e5ff;font-weight:bold;">🤖 AI MENTOR</button>
@@ -1837,6 +1919,18 @@ let needsRender = true;
 const TIME_H = 26;
 const PILL_SAFE_H = 78;
 
+
+let crosshairMode = false;
+let selectedCandle = null;
+
+function toggleCrosshair() {
+    crosshairMode = !crosshairMode;
+    const btn = document.getElementById('crosshairBtn');
+    btn.innerText = crosshairMode ? '➕ CROSS: ON' : '➕ CROSS';
+    btn.classList.toggle('active', crosshairMode);
+    needsRender = true;
+}
+
 function toggleViewMode() {
     proViewMode = !proViewMode;
     const btn = document.getElementById('viewModeBtn');
@@ -1969,21 +2063,23 @@ cv.addEventListener('mousedown', e => {
     lastX = e.clientX - r.left;
     lastY = e.clientY - r.top;
     dragMode = detectZone(lastX, lastY);
-});
 
-window.addEventListener('mousemove', e => {
-    const r = cv.getBoundingClientRect();
-    curX = e.clientX - r.left;
-    curY = e.clientY - r.top;
-    const z = detectZone(curX, curY);
-    cv.style.cursor = (z === 'xaxis') ? 'ew-resize' : ((z === 'yaxis') ? 'ns-resize' : ((z === 'dom') ? 'ns-resize' : 'crosshair'));
-
-    if (dragMode) {
-        applyDrag(curX - lastX, curY - lastY);
-        lastX = curX;
-        lastY = curY;
-    } else {
-        needsRender = true;
+    // Click on a candle to lock/unlock its OHLC in the Top-Left Box!
+    if (dragMode === 'chart' && candles.length > 0) {
+        const { chartW } = getLayout();
+        const rightStart = chartW - candleW * 0.62 + panX;
+        let clickedC = null;
+        for (let i = candles.length - 1; i >= 0; i--) {
+            const cx = rightStart - (candles.length - 1 - i) * candleW;
+            if (Math.abs(lastX - cx) <= candleW * 0.48) {
+                clickedC = candles[i];
+                break;
+            }
+        }
+        if (clickedC) {
+            selectedCandle = (selectedCandle && selectedCandle.start === clickedC.start) ? null : clickedC;
+            needsRender = true;
+        }
     }
 });
 
@@ -2969,25 +3065,50 @@ function drawAll() {
         }
     });
 
-    const hudW = Math.min(chartW - 12, 480);
-    ctx.fillStyle = 'rgba(17, 21, 31, 0.92)';
-    ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
-    ctx.strokeStyle = '#2962ff';
-    ctx.strokeRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
+    // Check which candle cursor is currently over (or use clicked/locked candle)
+    let activeOhlcCandle = selectedCandle;
+    if (!activeOhlcCandle && curX >= 0 && curX <= chartW) {
+        for (let i = 0; i < vis.length; i++) {
+            if (Math.abs(curX - vis[i].cx) <= candleW * 0.48) {
+                activeOhlcCandle = vis[i].c;
+                break;
+            }
+        }
+    }
+    if (!activeOhlcCandle) activeOhlcCandle = lastC;
+
+    const hudW = Math.min(chartW - 12, 540);
+    const hudH = hoveredCellInfo ? 82 : 40;
+    ctx.fillStyle = 'rgba(17, 21, 31, 0.94)';
+    ctx.fillRect(6, 6, hudW, hudH);
+    ctx.strokeStyle = selectedCandle ? '#ffeb3b' : '#2962ff';
+    ctx.strokeRect(6, 6, hudW, hudH);
+
     ctx.fillStyle = '#00e5ff';
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | HeavyL:>${fmt(heavyLvlBenchmark)} | RestBook:${fmt(liveRestBench)}`, 12, 17);
+    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | HeavyL:>${fmt(heavyLvlBenchmark)} | RestBook:${fmt(liveRestBench)}`, 12, 16);
+
+    // Line 2: Always show Selected (Clicked) or Hovered Candle's Exact OHLC, Delta & Volume!
+    const cTimeStr = new Date(activeOhlcCandle.start).toTimeString().slice(0, 5);
+    const lockIcon = selectedCandle ? '📌LOCKED ' : '🕯️';
+    const isBullC = activeOhlcCandle.close >= activeOhlcCandle.open;
+    ctx.fillStyle = isBullC ? '#00e676' : '#ff5252';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText(
+        `${lockIcon}[${cTimeStr}] O:${activeOhlcCandle.open.toFixed(dec)} H:${activeOhlcCandle.high.toFixed(dec)} L:${activeOhlcCandle.low.toFixed(dec)} C:${activeOhlcCandle.close.toFixed(dec)} | Δ:${activeOhlcCandle.delta >= 0 ? '+' : ''}${fmt(activeOhlcCandle.delta)} V:${fmt(activeOhlcCandle.volume)}`,
+        12, 31
+    );
 
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
         ctx.fillStyle = '#ffeb3b';
-        ctx.fillText(`Px:${h.price.toFixed(dec)} | MS:${fmt(h.sellV)}(${h.bAbsPct}%) | MB:${fmt(h.buyV)}(${h.aAbsPct}%)`, 12, 33);
+        ctx.fillText(`Px:${h.price.toFixed(dec)} | MS:${fmt(h.sellV)}(${h.bAbsPct}%) | MB:${fmt(h.buyV)}(${h.aAbsPct}%)`, 12, 47);
         ctx.fillStyle = '#ff80ab';
-        ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%) | PΔ:${h.lvlPullDelta >= 0 ? '+' : ''}${fmt(h.lvlPullDelta)}`, 12, 47);
+        ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%) | PΔ:${h.lvlPullDelta >= 0 ? '+' : ''}${fmt(h.lvlPullDelta)}`, 12, 61);
         ctx.fillStyle = h.isWhaleLot ? '#ffd700' : '#b0bec5';
         const playerTag = h.isWhaleLot ? '🐋 WHALE BLOCK!' : (h.lotRatio < 1.2 ? '🐑 RETAIL / BOT SPLIT' : '⚡ STANDARD FLOW');
-        ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 61);
+        ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 75);
     }
 
     const yAxisX = chartW;
@@ -3009,6 +3130,41 @@ function drawAll() {
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 10px monospace';
         ctx.fillText(lastC.close.toFixed(dec), yAxisX + 4, curPy);
+    }
+
+    // TOGGLEABLE CROSSHAIR (Horizontal + Vertical Dashed Line + Exact Cursor Price Badge)
+    if (crosshairMode && curX >= 0 && curX <= chartW && curY >= 0 && curY <= chartH) {
+        const crossPrice = yToP(curY);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(0, 229, 255, 0.75)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, curY); ctx.lineTo(chartW, curY);
+        ctx.moveTo(curX, 0); ctx.lineTo(curX, chartH);
+        ctx.stroke();
+        ctx.restore();
+
+        // Exact Price Badge on Y-Axis
+        ctx.fillStyle = '#00e5ff';
+        ctx.fillRect(yAxisX, curY - 10, yAxisW, 20);
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(crossPrice.toFixed(dec), yAxisX + 4, curY);
+
+        // Floating Price + Candle Time Tag near Cursor
+        const crossLbl = `🎯 ${crossPrice.toFixed(dec)} [${cTimeStr}]`;
+        ctx.font = 'bold 9.5px monospace';
+        const cw = ctx.measureText(crossLbl).width + 10;
+        const tagX = Math.min(curX + 10, chartW - cw - 4);
+        const tagY = Math.max(22, curY - 18);
+        ctx.fillStyle = 'rgba(11, 14, 22, 0.92)';
+        ctx.fillRect(tagX, tagY - 9, cw, 18);
+        ctx.strokeStyle = '#00e5ff';
+        ctx.strokeRect(tagX, tagY - 9, cw, 18);
+        ctx.fillStyle = '#00e5ff';
+        ctx.fillText(crossLbl, tagX + 5, tagY);
     }
 
     // =========================================================================
