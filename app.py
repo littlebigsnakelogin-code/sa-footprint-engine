@@ -1737,7 +1737,6 @@ def home():
     <button class="btn" onclick="scaleX(1.18)">X+</button>
     <button class="btn" onclick="scaleX(0.84)">X-</button>
     <button class="btn" onclick="resetCamera()">Fit</button>
-    <button class="btn" id="crosshairBtn" onclick="toggleCrosshair()">➕ CROSS</button>
     <button class="btn active" id="viewModeBtn" onclick="toggleViewMode()">👁️ PRO</button>
     <button class="btn" id="domToggleBtn" onclick="toggleDOM()">DOM</button>
     <button class="btn" onclick="toggleAI()" style="background:#00bfa5;color:#000;border-color:#00e5ff;font-weight:bold;">🤖 AI MENTOR</button>
@@ -1920,17 +1919,6 @@ const TIME_H = 26;
 const PILL_SAFE_H = 78;
 
 
-let crosshairMode = false;
-let selectedCandle = null;
-
-function toggleCrosshair() {
-    crosshairMode = !crosshairMode;
-    const btn = document.getElementById('crosshairBtn');
-    btn.innerText = crosshairMode ? '➕ CROSS: ON' : '➕ CROSS';
-    btn.classList.toggle('active', crosshairMode);
-    needsRender = true;
-}
-
 function toggleViewMode() {
     proViewMode = !proViewMode;
     const btn = document.getElementById('viewModeBtn');
@@ -2063,6 +2051,7 @@ cv.addEventListener('mousedown', e => {
     lastX = e.clientX - r.left;
     lastY = e.clientY - r.top;
     dragMode = detectZone(lastX, lastY);
+});
 
     // Click on a candle to lock/unlock its OHLC in the Top-Left Box!
     if (dragMode === 'chart' && candles.length > 0) {
@@ -3066,49 +3055,25 @@ function drawAll() {
     });
 
     // Check which candle cursor is currently over (or use clicked/locked candle)
-    let activeOhlcCandle = selectedCandle;
-    if (!activeOhlcCandle && curX >= 0 && curX <= chartW) {
-        for (let i = 0; i < vis.length; i++) {
-            if (Math.abs(curX - vis[i].cx) <= candleW * 0.48) {
-                activeOhlcCandle = vis[i].c;
-                break;
-            }
-        }
-    }
-    if (!activeOhlcCandle) activeOhlcCandle = lastC;
-
-    const hudW = Math.min(chartW - 12, 540);
-    const hudH = hoveredCellInfo ? 82 : 40;
-    ctx.fillStyle = 'rgba(17, 21, 31, 0.94)';
-    ctx.fillRect(6, 6, hudW, hudH);
-    ctx.strokeStyle = selectedCandle ? '#ffeb3b' : '#2962ff';
-    ctx.strokeRect(6, 6, hudW, hudH);
-
+    const hudW = Math.min(chartW - 12, 480);
+    ctx.fillStyle = 'rgba(17, 21, 31, 0.92)';
+    ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
+    ctx.strokeStyle = '#2962ff';
+    ctx.strokeRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
     ctx.fillStyle = '#00e5ff';
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | HeavyL:>${fmt(heavyLvlBenchmark)} | RestBook:${fmt(liveRestBench)}`, 12, 16);
-
-    // Line 2: Always show Selected (Clicked) or Hovered Candle's Exact OHLC, Delta & Volume!
-    const cTimeStr = new Date(activeOhlcCandle.start).toTimeString().slice(0, 5);
-    const lockIcon = selectedCandle ? '📌LOCKED ' : '🕯️';
-    const isBullC = activeOhlcCandle.close >= activeOhlcCandle.open;
-    ctx.fillStyle = isBullC ? '#00e676' : '#ff5252';
-    ctx.font = 'bold 10px monospace';
-    ctx.fillText(
-        `${lockIcon}[${cTimeStr}] O:${activeOhlcCandle.open.toFixed(dec)} H:${activeOhlcCandle.high.toFixed(dec)} L:${activeOhlcCandle.low.toFixed(dec)} C:${activeOhlcCandle.close.toFixed(dec)} | Δ:${activeOhlcCandle.delta >= 0 ? '+' : ''}${fmt(activeOhlcCandle.delta)} V:${fmt(activeOhlcCandle.volume)}`,
-        12, 31
-    );
+    ctx.fillText(`Scale:${mult}x (${effStep.toFixed(dec)}) | HeavyL:>${fmt(heavyLvlBenchmark)} | RestBook:${fmt(liveRestBench)}`, 12, 17);
 
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
         ctx.fillStyle = '#ffeb3b';
-        ctx.fillText(`Px:${h.price.toFixed(dec)} | MS:${fmt(h.sellV)}(${h.bAbsPct}%) | MB:${fmt(h.buyV)}(${h.aAbsPct}%)`, 12, 47);
+        ctx.fillText(`Px:${h.price.toFixed(dec)} | MS:${fmt(h.sellV)}(${h.bAbsPct}%) | MB:${fmt(h.buyV)}(${h.aAbsPct}%)`, 12, 33);
         ctx.fillStyle = '#ff80ab';
-        ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%) | PΔ:${h.lvlPullDelta >= 0 ? '+' : ''}${fmt(h.lvlPullDelta)}`, 12, 61);
+        ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%) | PΔ:${h.lvlPullDelta >= 0 ? '+' : ''}${fmt(h.lvlPullDelta)}`, 12, 47);
         ctx.fillStyle = h.isWhaleLot ? '#ffd700' : '#b0bec5';
         const playerTag = h.isWhaleLot ? '🐋 WHALE BLOCK!' : (h.lotRatio < 1.2 ? '🐑 RETAIL / BOT SPLIT' : '⚡ STANDARD FLOW');
-        ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 75);
+        ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 61);
     }
 
     const yAxisX = chartW;
@@ -3130,41 +3095,6 @@ function drawAll() {
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 10px monospace';
         ctx.fillText(lastC.close.toFixed(dec), yAxisX + 4, curPy);
-    }
-
-    // TOGGLEABLE CROSSHAIR (Horizontal + Vertical Dashed Line + Exact Cursor Price Badge)
-    if (crosshairMode && curX >= 0 && curX <= chartW && curY >= 0 && curY <= chartH) {
-        const crossPrice = yToP(curY);
-        ctx.save();
-        ctx.strokeStyle = 'rgba(0, 229, 255, 0.75)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.moveTo(0, curY); ctx.lineTo(chartW, curY);
-        ctx.moveTo(curX, 0); ctx.lineTo(curX, chartH);
-        ctx.stroke();
-        ctx.restore();
-
-        // Exact Price Badge on Y-Axis
-        ctx.fillStyle = '#00e5ff';
-        ctx.fillRect(yAxisX, curY - 10, yAxisW, 20);
-        ctx.fillStyle = '#000';
-        ctx.font = 'bold 10px monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText(crossPrice.toFixed(dec), yAxisX + 4, curY);
-
-        // Floating Price + Candle Time Tag near Cursor
-        const crossLbl = `🎯 ${crossPrice.toFixed(dec)} [${cTimeStr}]`;
-        ctx.font = 'bold 9.5px monospace';
-        const cw = ctx.measureText(crossLbl).width + 10;
-        const tagX = Math.min(curX + 10, chartW - cw - 4);
-        const tagY = Math.max(22, curY - 18);
-        ctx.fillStyle = 'rgba(11, 14, 22, 0.92)';
-        ctx.fillRect(tagX, tagY - 9, cw, 18);
-        ctx.strokeStyle = '#00e5ff';
-        ctx.strokeRect(tagX, tagY - 9, cw, 18);
-        ctx.fillStyle = '#00e5ff';
-        ctx.fillText(crossLbl, tagX + 5, tagY);
     }
 
     // =========================================================================
