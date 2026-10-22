@@ -1533,20 +1533,28 @@ def home():
         touch-action: none;
     }
     .topbar {
-        min-height: 36px;
+        min-height: 38px;
         background: #11151f;
         border-bottom: 1px solid #232838;
         display: flex;
         align-items: center;
         padding: 2px 8px;
-        gap: 5px;
+        gap: 6px;
         font-size: 11px;
         overflow-x: auto;
         white-space: nowrap;
-        scrollbar-width: none;
+        scrollbar-width: thin;
+        scrollbar-color: #2962ff #11151f;
         flex-shrink: 0;
     }
-    .topbar::-webkit-scrollbar, .decision-bar::-webkit-scrollbar { display: none; }
+    .topbar::-webkit-scrollbar {
+        height: 4px;
+    }
+    .topbar::-webkit-scrollbar-thumb {
+        background: #2962ff;
+        border-radius: 2px;
+    }
+
     .decision-bar {
         min-height: 34px;
         background: #0d111a;
@@ -1558,8 +1566,16 @@ def home():
         font-size: 11px;
         overflow-x: auto;
         white-space: nowrap;
-        scrollbar-width: none;
+        scrollbar-width: thin;
+        scrollbar-color: #2962ff #0d111a;
         flex-shrink: 0;
+    }
+    .decision-bar::-webkit-scrollbar {
+        height: 4px;
+    }
+    .decision-bar::-webkit-scrollbar-thumb {
+        background: #2962ff;
+        border-radius: 2px;
     }
     .bench-box {
         background: #151a28;
