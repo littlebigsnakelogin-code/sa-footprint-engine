@@ -3895,8 +3895,10 @@ def fetch_live_crypto_news(symbol="BTCUSDT"):
 @app.route("/api/ai-mentor", methods=["POST"])
 def api_ai_mentor():
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip().strip('"').strip("'")
-    if not gemini_key:
-        return jsonify({"status": "error", "message": "Render Environment me GEMINI_API_KEY nahi mili!"}), 400
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip().strip('"').strip("'")
+
+    if not gemini_key and not groq_key:
+        return jsonify({"status": "error", "message": "Render Environment me GEMINI_API_KEY ya GROQ_API_KEY nahi mili!"}), 400
 
     data = request.get_json(silent=True) or {}
     symbol = data.get("symbol", "BTCUSDT")
@@ -3926,59 +3928,129 @@ Analyze ALL 10 parameters and reply in 5 short Hinglish points:
 4. 🎯 EXACT SCALP PLAN: Entry Zone, Invalidation/SL level, and Target (using active UB-HIGH/LOW or nPOC magnets).
 5. 🌊 INTRADAY ROADMAP: Session CVD & Big Player campaign direction."""
 
-    try:
-        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
-        list_resp = requests.get(list_url, timeout=8)
-        if list_resp.status_code != 200:
-            return jsonify({"status": "error", "message": f"Gemini Model list error: {list_resp.text}"}), 400
-
-        models_json = list_resp.json()
-        available_models = []
-        for m in models_json.get("models", []):
-            name = m.get("name", "")
-            methods = m.get("supportedGenerationMethods", [])
-            if "generateContent" in methods and "2.5" not in name and "omni" not in name.lower():
-                available_models.append(name)
-
-        def orig_priority(x):
-            xl = x.lower()
-            if "gemini-flash-lite-latest" in xl or "flash-lite" in xl:
-                return 0
-            if "flash" in xl:
-                return 1
-            return 2
-
-        available_models.sort(key=orig_priority)
-
-        reply_text = None
-        used_model = ""
-        for model_path in available_models[:5]:
-            url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={gemini_key}"
-            resp = requests.post(
-                url,
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.1}
-                },
-                timeout=14
+    def call_groq_heavy_first():
+        if not groq_key:
+            return None
+        try:
+            m_resp = requests.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {groq_key}"},
+                timeout=6
             )
-            rjson = resp.json()
-            if resp.status_code == 200 and "candidates" in rjson:
-                parts = rjson["candidates"][0].get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    used_model = model_path.replace("models/", "")
-                    reply_text = parts[0]["text"]
-                    break
+            if m_resp.status_code != 200:
+                return None
 
-        if not reply_text:
-            return jsonify({"status": "error", "message": "Gemini se response generate nahi ho paya."}), 500
+            all_models = [m.get("id", "") for m in m_resp.json().get("data", [])]
+            valid_g = [
+                m for m in all_models
+                if not any(bad in m.lower() for bad in ["whisper", "guard", "safeguard", "orpheus"])
+            ]
 
-        news_header = "📰 === LIVE CRYPTO NEWS & SENTIMENT DESK ===\n" + "\n".join(f"• {h}" for h in live_news[:4])
-        final_output = f"{news_header}\n\n" + "="*55 + f"\n\n🧠 === GEMINI MENTOR AI ({used_model} | T=0.1) ===\n{reply_text}"
-        return jsonify({"status": "ok", "reply": final_output})
+            # SMART PRIORITY RANKING: Sabse pehle bade/heavy models (120b, qwen, 70b) ko chunenge!
+            def heavy_model_rank(m_id):
+                ml = m_id.lower()
+                if "120b" in ml or "gpt-oss-120b" in ml:
+                    return 0  # Absolute Top Priority: Heavyweight 120B Model
+                if "qwen" in ml or "70b" in ml:
+                    return 1  # Second Priority: Strong Quant / QwQ Models
+                if "20b" in ml:
+                    return 2  # Medium Priority
+                return 3      # Lower Priority (Chote models)
 
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+            valid_g.sort(key=heavy_model_rank)
+
+            for gm in valid_g[:4]:
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {groq_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": gm,
+                        "messages": [
+                            {"role": "system", "content": "You are a ruthless, mathematically precise Institutional Orderflow Quant Mentor."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 900
+                    },
+                    timeout=14
+                )
+                rj = r.json()
+                if r.status_code == 200 and "choices" in rj:
+                    txt = rj["choices"][0]["message"]["content"]
+                    if "</think>" in txt:
+                        txt = txt.split("</think>", 1)[-1].strip()
+                    return f"⚡ === GROQ HEAVY QUANT AI ({gm} | T=0.1) ===\n{txt}"
+        except Exception:
+            pass
+        return None
+
+    def call_gemini():
+        if not gemini_key:
+            return None
+        try:
+            list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
+            list_resp = requests.get(list_url, timeout=8)
+            if list_resp.status_code != 200:
+                return None
+
+            models_json = list_resp.json()
+            available_models = []
+            for m in models_json.get("models", []):
+                name = m.get("name", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods and "2.5" not in name and "omni" not in name.lower():
+                    available_models.append(name)
+
+            def orig_priority(x):
+                xl = x.lower()
+                if "gemini-flash-lite-latest" in xl or "flash-lite" in xl:
+                    return 0
+                if "flash" in xl:
+                    return 1
+                return 2
+
+            available_models.sort(key=orig_priority)
+
+            for model_path in available_models[:5]:
+                url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={gemini_key}"
+                resp = requests.post(
+                    url,
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"temperature": 0.1}
+                    },
+                    timeout=14
+                )
+                rjson = resp.json()
+                if resp.status_code == 200 and "candidates" in rjson:
+                    parts = rjson["candidates"][0].get("content", {}).get("parts", [])
+                    if parts and "text" in parts[0]:
+                        used_model = model_path.replace("models/", "")
+                        return f"🧠 === GEMINI MENTOR AI ({used_model} | T=0.1) ===\n{parts[0]['text']}"
+        except Exception:
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f_groq = executor.submit(call_groq_heavy_first)
+        f_gem = executor.submit(call_gemini)
+        groq_reply = f_groq.result()
+        gem_reply = f_gem.result()
+
+    news_header = "📰 === LIVE CRYPTO NEWS & SENTIMENT DESK ===\n" + "\n".join(f"• {h}" for h in live_news[:4])
+    sections = [news_header]
+    if groq_reply:
+        sections.append(groq_reply)
+    if gem_reply:
+        sections.append(gem_reply)
+
+    if not groq_reply and not gem_reply:
+        return jsonify({"status": "error", "message": "Groq ya Gemini se response nahi aaya. Check API Keys!"}), 500
+
+    return jsonify({"status": "ok", "reply": ("\n\n" + "="*55 + "\n\n").join(sections)})
 
 
 import gzip
