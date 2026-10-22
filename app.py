@@ -1739,6 +1739,7 @@ def home():
     <button class="btn" onclick="resetCamera()">Fit</button>
     <button class="btn active" id="viewModeBtn" onclick="toggleViewMode()">👁️ PRO</button>
     <button class="btn" id="domToggleBtn" onclick="toggleDOM()">DOM</button>
+    <button class="btn" onclick="toggleMeter()" style="background:#7c4dff;color:#fff;border-color:#b388ff;font-weight:bold;">📊 METER</button>
     <button class="btn" onclick="toggleAI()" style="background:#00bfa5;color:#000;border-color:#00e5ff;font-weight:bold;">🤖 AI MENTOR</button>
     <button class="btn" onclick="toggleRules()" style="border-color:#ffeb3b;color:#ffeb3b;font-weight:bold;">📖 RULES</button>
 
@@ -1844,6 +1845,59 @@ def home():
         • <b>🌊 Box 2 (INTRADAY VERDICT):</b> Rolling 20-candle session CVD, Whale Blocks, Multi-Candle Absorption aur POC stepping se bada intraday direction aur HTF Magnet Target batata hai.<br>
         • <b>🤖 AI Mentor:</b> Render ke <code>GEMINI_API_KEY</code> se juda hua Zero-Load Co-Pilot jo TradingView structure aur SA Engine data ko cross-verify karta hai.
     </div>
+
+    <div class="rule-sec" style="border-color:#b388ff;">
+        <h4 style="color:#b388ff;">7. COMPLETE 35-POINT 1-LINE MASTER PARAMETER DICTIONARY (🟢 BULLISH / 🔴 BEARISH / ⚪ NEUTRAL)</h4>
+        <b>[A] FOOTPRINT PRICE-LEVEL &amp; CLUSTER TOOLS:</b><br>
+        1. <code>H-B.ABS (&ge;65%)</code>: <b>🟢 BULLISH</b> — Retail heavy selling ko institutional limit buyers ne niche absorb karke rok liya hai.<br>
+        2. <code>b-abs (&ge;52%)</code>: <b>🟢 MILD BULLISH</b> — Lower zone me moderate selling absorb ho rahi hai.<br>
+        3. <code>H-A.ABS (&ge;65%)</code>: <b>🔴 BEARISH</b> — Retail heavy buying ko institutional limit sellers ne upar absorb karke cap kar diya hai.<br>
+        4. <code>a-abs (&ge;52%)</code>: <b>🔴 MILD BEARISH</b> — Upper zone me moderate buying ko limit sellers rok rahe hain.<br>
+        5. <code>Stealth 50/50 Churn Iceberg</code>: <b>🟢/🔴 PINNING</b> — Heavy volume (&ge;2x Avg) par 50-50 Buy/Sell fight ke baad jis taraf candle close ho, us taraf institutional iceberg jeeta.<br>
+        6. <code>H-BP / bp (10s+ Bid Pulled)</code>: <b>🔴 BEARISH</b> — Niche se 10s+ purani Bid support wall kheench li gayi (support gayab / fake bid trap).<br>
+        7. <code>H-AP / ap (10s+ Ask Pulled)</code>: <b>🟢 BULLISH</b> — Upar se 10s+ purani Ask resistance wall hata li gayi (rasta saaf / fake ask trap).<br>
+        8. <code>◆ Whale Buy Block (Buy &gt; Sell)</code>: <b>🟢 BULLISH</b> — Bade lot size (&ge;2.8x baseline) me institutional aggressive market buying.<br>
+        9. <code>◆ Whale Sell Block (Sell &gt; Buy)</code>: <b>🔴 BEARISH</b> — Bade lot size (&ge;2.8x baseline) me institutional aggressive market selling.<br>
+        10. <code>Buy Imbalance (Buy &gt; 2.5x Sell)</code>: <b>🟢 BULLISH</b> — Us price par aggressive market buyers 2.5 guna haavi hain.<br>
+        11. <code>Sell Imbalance (Sell &gt; 2.5x Buy)</code>: <b>🔴 BEARISH</b> — Us price par aggressive market sellers 2.5 guna haavi hain.<br>
+        12. <code>▲ BID ABS Banner (Bottom)</code>: <b>🟢 BULLISH</b> — Candle ke lower wick me sabse badi selling absorb hui (reversal/hold).<br>
+        13. <code>▼ ASK ABS Banner (Top)</code>: <b>🔴 BEARISH</b> — Candle ke upper wick me sabse badi buying absorb hui (rejection/cap).<br><br>
+        <b>[B] VALUE AREA, POC &amp; MAGNET TOOLS:</b><br>
+        14. <code>POC (Yellow Box)</code>: <b>⚪ PIVOT</b> — Price POC ke upar = <b>🟢 Bullish Support</b> | Price POC ke niche = <b>🔴 Bearish Resistance</b>.<br>
+        15. <code>POC Stepping (Migration)</code>: <b>POC Up (&uarr;) = 🟢 BULLISH</b> | <b>POC Down (&darr;) = 🔴 BEARISH</b>.<br>
+        16. <code>VAH (Value Area High)</code>: <b>Price &gt; VAH = 🟢 BULLISH BREAKOUT</b> | <b>Reject at VAH = 🔴 BEARISH</b>.<br>
+        17. <code>VAL (Value Area Low)</code>: <b>Price &lt; VAL = 🔴 BEARISH BREAKDOWN</b> | <b>Bounce at VAL = 🟢 BULLISH</b>.<br>
+        18. <code>🟡 nPOC (Untouched POC)</code>: <b>🧲 MAGNET</b> — Price ke upar = <b>🟢 Bullish Target</b> | Price ke niche = <b>🔴 Bearish Target</b>.<br>
+        19. <code>🎯 UB-HIGH (Unfinished High)</code>: <b>🟢 BULLISH MAGNET</b> — Candle high par adhura auction, price sweep karne upar aayega.<br>
+        20. <code>🎯 UB-LOW (Unfinished Low)</code>: <b>🔴 BEARISH MAGNET</b> — Candle low par adhura auction, price sweep karne niche aayega.<br><br>
+        <b>[C] CANDLE PILL, DELTA, CVD &amp; TRAP TOOLS:</b><br>
+        21. <code>&Delta; (Candle Delta)</code>: <b>+&Delta; with Green Close = 🟢 BULLISH</b> | <b>&minus;&Delta; with Red Close = 🔴 BEARISH</b> | <b>+&Delta; with Red Close = 🔴 Ask Absorption</b> | <b>&minus;&Delta; with Green Close = 🟢 Bid Absorption</b>.<br>
+        22. <code>CVD (Cumulative Vol Delta)</code>: <b>Positive &amp; Rising = 🟢 BULLISH</b> | <b>Negative &amp; Falling = 🔴 BEARISH</b>.<br>
+        23. <code>RVOL (Relative Volume)</code>: <b>&ge;1.2x = ⚡ REAL FUEL</b> | <b>&lt;0.65x = ⚪ SIDEWAYS RETAIL NOISE (Skip)</b>.<br>
+        24. <code>P&Delta; (10s+ Pulling Delta = BP &minus; AP)</code>: <b>Negative P&Delta; + Price Up = 🟢 BULLISH (Ask Spoof Pulled)</b> | <b>Positive P&Delta; + Price Down = 🔴 BEARISH (Bid Spoof Pulled)</b>.<br>
+        25. <code>🎯 SSL-SWEEP</code>: <b>🟢 BULLISH REVERSAL</b> — Swing Low ke retail SLs khakar price wapas range me upar close hua.<br>
+        26. <code>🎯 BSL-SWEEP</code>: <b>🔴 BEARISH REVERSAL</b> — Swing High ke retail SLs khakar price wapas range me niche close hua.<br>
+        27. <code>⚠️ FAKE-ASK WALL PULLED</code>: <b>🟢 BULLISH BREAKOUT</b> — Heavy Ask wall pull + Green expansion.<br>
+        28. <code>⚠️ FAKE-BID WALL PULLED</code>: <b>🔴 BEARISH DUMP</b> — Heavy Bid wall pull + Red breakdown.<br>
+        29. <code>🛡️ SOLID-BID WALL</code>: <b>🟢 BULLISH HOLD</b> — Heavy selling absorbed at Bid with low pull.<br>
+        30. <code>🛡️ SOLID-ASK WALL</code>: <b>🔴 BEARISH CAP</b> — Heavy buying absorbed at Ask with low pull.<br><br>
+        <b>[D] SMT RADAR &amp; BATTLE DOM TOOLS:</b><br>
+        31. <code>🔗 SMT Radar</code>: <b>🚨 BULL SMT = 🟢 BULLISH</b> | <b>🚨 BEAR SMT = 🔴 BEARISH</b> | <b>SYNCED = ⚪ NEUTRAL</b>.<br>
+        32. <code>DOM Real Exec (B vs S)</code>: <b>Buy Exec &gt; Sell Exec = 🟢 BULLISH</b> | <b>Sell Exec &gt; Buy Exec = 🔴 BEARISH</b>.<br>
+        33. <code>DOM Near Resting Wall</code>: <b>Bid Rest &gt; Ask Rest = 🟢 BULLISH SUPPORT</b> | <b>Ask Rest &gt; Bid Rest = 🔴 BEARISH RESISTANCE</b>.<br>
+        34. <code>DOM 🛡️ABS vs 🛡️CAP</code>: <b>🛡️ABS = 🟢 BULLISH LEVEL HOLD</b> | <b>🛡️CAP = 🔴 BEARISH LEVEL REJECTION</b>.<br>
+        35. <code>Macro Efficiency</code>: <b>&lt;0.15 = ⚪ SIDEWAYS ROTATIONAL CHOP</b> | <b>&ge;0.20 = ⚡ TRENDING DISPLACEMENT</b>.
+    </div>
+</div>
+
+<div id="meterModal" style="display:none; position:fixed; inset:36px 4%; background:rgba(11,14,22,0.98); border:1px solid #b388ff; border-radius:6px; z-index:999; padding:14px 18px; overflow-y:auto; color:#d1d4dc; font-size:12px; line-height:1.55; box-shadow:0 12px 40px #000; touch-action:pan-y;">
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #b388ff; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
+        <b style="color:#b388ff; font-size:14px;">📊 LIVE PARAMETER CONFLUENCE METER (🟢 BULLISH vs 🔴 BEARISH vs ⚪ NEUTRAL)</b>
+        <button class="btn" onclick="toggleMeter()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
+    </div>
+    <div id="meterModalBody" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:12px;">
+        Loading live parameters...
+    </div>
 </div>
 <script>
 const wrap = document.getElementById('wrap');
@@ -1859,6 +1913,11 @@ function toggleRules() {
 }
 function toggleAI() {
     aiModal.style.display = (aiModal.style.display === 'block') ? 'none' : 'block';
+}
+const meterModal = document.getElementById('meterModal');
+function toggleMeter() {
+    meterModal.style.display = (meterModal.style.display === 'block') ? 'none' : 'block';
+    needsRender = true;
 }
 
 async function askAI(customPrompt) {
@@ -2744,9 +2803,11 @@ function drawAll() {
             const bAbsPct = Math.round((sellV / totV) * 100);
             const aAbsPct = Math.round((buyV / totV) * 100);
 
+            // Includes both 65%+ One-Sided Absorption AND 2.0x Heavy Volume 50-50 Stealth Iceberg Pinning!
+            const isStealthChurnLvl = totV >= Math.max(avgV * 2.0, heavyLvlBenchmark * 0.85) && bAbsPct >= 42 && aAbsPct >= 42;
             const inBidZone = l.price <= Math.max(cMidPrice + effStep, Math.min(c.open, c.close) + effStep * 2);
             let bidAbsType = null;
-            if (sellV >= effectiveHeavyAbsCut && bAbsPct >= 65 && c.close >= l.price && inBidZone) {
+            if ((sellV >= effectiveHeavyAbsCut && bAbsPct >= 65 && c.close >= l.price && inBidZone) || (isStealthChurnLvl && inBidZone && c.close > l.price + effStep * 0.5)) {
                 bidAbsType = 'heavy';
                 if (!botSummary || sellV > botSummary.val) botSummary = { type: 'ABS', val: sellV, pct: bAbsPct };
             } else if (sellV >= effectiveNormAbsCut && bAbsPct >= 52 && c.close >= l.price && inBidZone) {
@@ -2755,7 +2816,7 @@ function drawAll() {
 
             const inAskZone = l.price >= Math.min(cMidPrice - effStep, Math.max(c.open, c.close) - effStep * 2);
             let askAbsType = null;
-            if (buyV >= effectiveHeavyAbsCut && aAbsPct >= 65 && c.close <= l.price && inAskZone) {
+            if ((buyV >= effectiveHeavyAbsCut && aAbsPct >= 65 && c.close <= l.price && inAskZone) || (isStealthChurnLvl && inAskZone && c.close < l.price - effStep * 0.5)) {
                 askAbsType = 'heavy';
                 if (!topSummary || buyV > topSummary.val) topSummary = { type: 'ABS', val: buyV, pct: aAbsPct };
             } else if (buyV >= effectiveNormAbsCut && aAbsPct >= 52 && c.close <= l.price && inAskZone) {
@@ -3301,7 +3362,71 @@ function drawAll() {
     else if (intraPts <= -28) { intraFinalTxt = '🔴 SELL'; intraFinalCol = '#ff5252'; }
     else if (intraPts <= -12) { intraFinalTxt = '🟠 WEAK SELL'; intraFinalCol = '#ff9100'; }
 
-    // --- C. COMPLETE X-RAY PAYLOAD FOR GROQ & GEMINI AI ---
+    // --- C. BUILD EXACT GREEN (BULL) vs RED (BEAR) vs WHITE (NEUTRAL) PARAMETER TALLY ---
+    const scalpMeterList = [
+        { name: '1. DOM Executed Flow (Buy vs Sell)', state: totExecBuy > totExecSell * 1.10 ? 'BULL' : (totExecSell > totExecBuy * 1.10 ? 'BEAR' : 'NEU'), val: `B:${fmt(totExecBuy)} vs S:${fmt(totExecSell)}` },
+        { name: '2. 10s+ Spoof Pulling Delta (PΔ)', state: (domPullDelta < -tfAvgCellVol * 0.3 && lastC.close >= lastC.open) ? 'BULL' : ((domPullDelta > tfAvgCellVol * 0.3 && lastC.close <= lastC.open) ? 'BEAR' : 'NEU'), val: `PΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}` },
+        { name: '3. 3-Candle Institutional Absorption', state: rBidAbs > rAskAbs ? 'BULL' : (rAskAbs > rBidAbs ? 'BEAR' : 'NEU'), val: `BidAbs:${rBidAbs} vs AskAbs:${rAskAbs}` },
+        { name: '4. Live Resting Book Wall (6-Step)', state: nearBidRest > nearAskRest * 1.25 ? 'BULL' : (nearAskRest > nearBidRest * 1.25 ? 'BEAR' : 'NEU'), val: `BidWall:${fmt(nearBidRest)} vs AskWall:${fmt(nearAskRest)}` },
+        { name: '5. Current Candle Delta (Δ)', state: lastC.delta > 0 ? 'BULL' : (lastC.delta < 0 ? 'BEAR' : 'NEU'), val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}` },
+        { name: '6. Candle Close Position & Body', state: closePos >= 0.60 ? 'BULL' : (closePos <= 0.40 ? 'BEAR' : 'NEU'), val: `ClosePos:${Math.round(closePos * 100)}%` },
+        { name: '7. Whale Block Executions (◆)', state: recentWhaleB > recentWhaleS ? 'BULL' : (recentWhaleS > recentWhaleB ? 'BEAR' : 'NEU'), val: `◆Buy:${recentWhaleB} vs ◆Sell:${recentWhaleS}` },
+        { name: '8. Value Area Position (VAH/VAL)', state: (lastC.vah != null && lastC.close > lastC.vah) ? 'BULL' : ((lastC.val != null && lastC.close < lastC.val) ? 'BEAR' : 'NEU'), val: `Px:${lastC.close.toFixed(dec)}` },
+        { name: '9. Candle POC Hold/Reject', state: (lastC.poc != null && lastC.close > lastC.poc) ? 'BULL' : ((lastC.poc != null && lastC.close < lastC.poc) ? 'BEAR' : 'NEU'), val: `POC:${lastC.poc ? lastC.poc.toFixed(dec) : '--'}` },
+        { name: '10. Retail Stop-Sweep (BSL/SSL)', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'SSL-Sweep Bounce' : (bearSweepReject ? 'BSL-Sweep Reject' : 'None') },
+        { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
+        { name: '12. RVOL Conviction Fuel', state: curRvol >= 0.85 ? (lastC.close >= lastC.open ? 'BULL' : 'BEAR') : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
+    ];
+
+    const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
+    const avgSessPoc = sessionPocsList.length > 0 ? sessionPocsList.reduce((a, b) => a + b, 0) / sessionPocsList.length : lastC.close;
+    const ubHiCnt = unfinishedLevels.filter(u => u.type === 'UB-HIGH' && u.price > lastC.close).length;
+    const ubLoCnt = unfinishedLevels.filter(u => u.type === 'UB-LOW' && u.price < lastC.close).length;
+
+    const intraMeterList = [
+        { name: '1. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
+        { name: '2. Session POC Migration (Stepping)', state: (macroInfo && macroInfo. netMacro > 10) ? 'BULL' : ((macroInfo && macroInfo.netMacro < -10) ? 'BEAR' : 'NEU'), val: macroInfo ? (macroInfo.macroNotes[0] || 'Balanced') : '--' },
+        { name: '3. Session Multi-Candle Absorptions', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidAbs:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskAbs:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
+        { name: '4. Session 10s+ Spoof Campaign (PΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `SessPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
+        { name: '5. Session Whale Block Inventory (◆)', state: (macroInfo && macroInfo.whaleBuyLots > macroInfo.whaleSellLots) ? 'BULL' : ((macroInfo && macroInfo.whaleSellLots > macroInfo.whaleBuyLots) ? 'BEAR' : 'NEU'), val: `◆B:${macroInfo ? macroInfo.whaleBuyLots : 0} vs ◆S:${macroInfo ? macroInfo.whaleSellLots : 0}` },
+        { name: '6. Price vs Session Mean POC', state: lastC.close > avgSessPoc + domStep ? 'BULL' : (lastC.close < avgSessPoc - domStep ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
+        { name: '7. Unfinished Business Magnet Draw', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} vs UB-LO:${ubLoCnt}` },
+        { name: '8. Untouched nPOC Gravity', state: nakedPocs.filter(n => n.price > lastC.close).length > nakedPocs.filter(n => n.price < lastC.close).length ? 'BULL' : (nakedPocs.filter(n => n.price < lastC.close).length > nakedPocs.filter(n => n.price > lastC.close).length ? 'BEAR' : 'NEU'), val: `nPOCs:${nakedPocs.length}` },
+        { name: '9. Orderbook Macro Depth Support', state: nearBidRest > nearAskRest * 1.3 ? 'BULL' : (nearAskRest > nearBidRest * 1.3 ? 'BEAR' : 'NEU'), val: `B:${fmt(nearBidRest)} vs A:${fmt(nearAskRest)}` },
+        { name: '10. SMT Divergence Alignment', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text }
+    ];
+
+    const sBullCnt = scalpMeterList.filter(x => x.state === 'BULL').length;
+    const sBearCnt = scalpMeterList.filter(x => x.state === 'BEAR').length;
+    const sNeuCnt = scalpMeterList.filter(x => x.state === 'NEU').length;
+
+    const iBullCnt = intraMeterList.filter(x => x.state === 'BULL').length;
+    const iBearCnt = intraMeterList.filter(x => x.state === 'BEAR').length;
+    const iNeuCnt = intraMeterList.filter(x => x.state === 'NEU').length;
+
+    if (meterModal && meterModal.style.display === 'block') {
+        const renderRows = list => list.map(item => {
+            const badge = item.state === 'BULL'
+                ? '<span style="color:#00e676;font-weight:bold;">🟢 BULL</span>'
+                : (item.state === 'BEAR' ? '<span style="color:#ff5252;font-weight:bold;">🔴 BEAR</span>' : '<span style="color:#ffca28;">⚪ NEU</span>');
+            return `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1e2638;padding:4px 0;font-size:11px;">
+                <span>${item.name}</span>
+                <span><code style="color:#90a4ae;margin-right:6px;">${item.val}</code>${badge}</span>
+            </div>`;
+        }).join('');
+
+        document.getElementById('meterModalBody').innerHTML = `
+            <div class="rule-sec" style="border-color:${scalpFinalCol};">
+                <h4 style="color:${scalpFinalCol};">⚡ SCALP 12-PARAMETER METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
+                ${renderRows(scalpMeterList)}
+            </div>
+            <div class="rule-sec" style="border-color:${intraFinalCol};">
+                <h4 style="color:${intraFinalCol};">🌊 INTRADAY 10-PARAMETER METER: ${intraFinalTxt} (🟢${iBullCnt} Bull | 🔴${iBearCnt} Bear | ⚪${iNeuCnt} Neu)</h4>
+                ${renderRows(intraMeterList)}
+            </div>
+        `;
+    }
+
     const last5CandlesSummary = candles.slice(-5).map(kc => ({
         time: new Date(kc.start).toTimeString().slice(0, 5),
         open: kc.open, high: kc.high, low: kc.low, close: kc.close,
@@ -3321,12 +3446,14 @@ function drawAll() {
         scalp_10factor_verdict: {
             final_bias: scalpFinalTxt,
             quant_score: scalpPts,
+            parameter_tally: `${sBullCnt} Bullish, ${sBearCnt} Bearish, ${sNeuCnt} Neutral`,
             active_factors: scalpFactors,
             dom_battle_status: battleWinner
         },
         intraday_10factor_verdict: {
             final_bias: intraFinalTxt,
             quant_score: intraPts,
+            parameter_tally: `${iBullCnt} Bullish, ${iBearCnt} Bearish, ${iNeuCnt} Neutral`,
             session_cvd: macroInfo ? Math.round(macroInfo.totalCvd) : 0,
             session_pull_delta: macroInfo ? Math.round(macroInfo.macroPullDelta) : 0,
             session_bid_absorptions: macroInfo ? macroInfo.macroBidAbsorbs : 0,
@@ -3363,13 +3490,12 @@ function drawAll() {
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(domX, 0); ctx.lineTo(domX, H); ctx.stroke();
 
-    const headerH = 92; // Top Original Lines + 2 Side-by-Side Final Bias Boxes + Column Bar
+    const headerH = 92;
     ctx.fillStyle = '#141926';
     ctx.fillRect(domX + 1, 0, domW - 1, headerH);
     ctx.strokeStyle = '#263147';
     ctx.beginPath(); ctx.moveTo(domX, headerH); ctx.lineTo(domX + domW, headerH); ctx.stroke();
 
-    // Line 1 & Line 2: Original DOM Battle Reason Lines
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -3379,7 +3505,6 @@ function drawAll() {
     ctx.fillStyle = bwCol;
     ctx.fillText(battleWinner, domX + 6, 25);
 
-    // Line 3: 2 NEW SIDE-BY-SIDE FINAL DECISION BOXES (SCALP BIAS vs INTRADAY BIAS)
     const boxGap = 6;
     const halfBoxW = Math.floor((domW - 14 - boxGap) * 0.5);
     const b1X = domX + 6;
@@ -3387,7 +3512,7 @@ function drawAll() {
     const bY = 35;
     const bH = 36;
 
-    // Box 1: SCALP FINAL BIAS
+    // Box 1: SCALP FINAL BIAS + LIVE TALLY (🟢Bull 🔴Bear ⚪Neu)
     ctx.fillStyle = '#0e131d';
     ctx.fillRect(b1X, bY, halfBoxW, bH);
     ctx.strokeStyle = scalpFinalCol;
@@ -3395,24 +3520,24 @@ function drawAll() {
     ctx.strokeRect(b1X, bY, halfBoxW, bH);
 
     ctx.textAlign = 'center';
-    ctx.font = 'bold 8.5px monospace';
-    ctx.fillStyle = '#90a4ae';
-    ctx.fillText('⚡ SCALP FINAL BIAS', b1X + halfBoxW * 0.5, bY + 10);
-    ctx.font = 'bold 11px monospace';
+    ctx.font = 'bold 8px monospace';
+    ctx.fillStyle = '#cfd8dc';
+    ctx.fillText(`⚡SCALP [🟢${sBullCnt} 🔴${sBearCnt} ⚪${sNeuCnt}]`, b1X + halfBoxW * 0.5, bY + 10);
+    ctx.font = 'bold 10.5px monospace';
     ctx.fillStyle = scalpFinalCol;
     ctx.fillText(scalpFinalTxt, b1X + halfBoxW * 0.5, bY + 25);
 
-    // Box 2: INTRADAY FINAL BIAS
+    // Box 2: INTRADAY FINAL BIAS + LIVE TALLY (🟢Bull 🔴Bear ⚪Neu)
     ctx.fillStyle = '#0e131d';
     ctx.fillRect(b2X, bY, halfBoxW, bH);
     ctx.strokeStyle = intraFinalCol;
     ctx.lineWidth = 1.2;
     ctx.strokeRect(b2X, bY, halfBoxW, bH);
 
-    ctx.font = 'bold 8.5px monospace';
-    ctx.fillStyle = '#90a4ae';
-    ctx.fillText('🌊 INTRADAY FINAL BIAS', b2X + halfBoxW * 0.5, bY + 10);
-    ctx.font = 'bold 11px monospace';
+    ctx.font = 'bold 8px monospace';
+    ctx.fillStyle = '#cfd8dc';
+    ctx.fillText(`🌊INTRA [🟢${iBullCnt} 🔴${iBearCnt} ⚪${iNeuCnt}]`, b2X + halfBoxW * 0.5, bY + 10);
+    ctx.font = 'bold 10.5px monospace';
     ctx.fillStyle = intraFinalCol;
     ctx.fillText(intraFinalTxt, b2X + halfBoxW * 0.5, bY + 25);
 
