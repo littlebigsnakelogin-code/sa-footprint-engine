@@ -1758,6 +1758,7 @@ def home():
     <button class="btn" onclick="toggleMeter()" style="background:#7c4dff;color:#fff;border-color:#b388ff;font-weight:bold;">📊 METER</button>
     <button class="btn" onclick="toggleAI()" style="background:#00bfa5;color:#000;border-color:#00e5ff;font-weight:bold;">🤖 AI MENTOR</button>
     <button class="btn" onclick="toggleRules()" style="border-color:#ffeb3b;color:#ffeb3b;font-weight:bold;">📖 RULES</button>
+    <button class="btn" id="paperTopBtn" onclick="togglePaperModal()" style="background:#ff6d00;color:#000;border-color:#ffd740;font-weight:bold;">🎯 AUTO $10</button>
 
     <div class="legend">
         <span class="lg" style="background:#00e5ff;color:#000;">H-B.ABS(&ge;65%)</span>
@@ -1915,6 +1916,189 @@ def home():
         Loading live parameters...
     </div>
 </div>
+
+<!-- ==================== START DEMO BOT UI ==================== -->
+<div id="paperModal" style="display:none; position:fixed; inset:36px 3%; background:rgba(11,14,22,0.98); border:1px solid #ffd740; border-radius:6px; z-index:999; padding:14px 18px; overflow-y:auto; color:#d1d4dc; font-size:12px; line-height:1.5; box-shadow:0 12px 40px #000; touch-action:pan-y;">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; border-bottom:1px solid #ffd740; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
+        <b style="color:#ffd740; font-size:14px;">🎯 24/7 SERVER-SIDE $10 AUTO-TESTER (PC BAND HONE PAR BHI CHALEGA)</b>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+            <select id="pBotSym" onchange="updatePaperConfig()" style="background:#1a2030;color:#00e5ff;border:1px solid #00e5ff;">
+                <option value="BTCUSDT">Test: BTCUSDT</option>
+                <option value="ETHUSDT">Test: ETHUSDT</option>
+                <option value="SOLUSDT">Test: SOLUSDT</option>
+                <option value="XRPUSDT">Test: XRPUSDT</option>
+            </select>
+            <select id="pBotTf" onchange="updatePaperConfig()" style="background:#1a2030;color:#00e5ff;border:1px solid #00e5ff;">
+                <option value="1m">Scalp TF: 1m</option>
+                <option value="3m">Scalp TF: 3m</option>
+                <option value="5m" selected>Scalp TF: 5m</option>
+                <option value="15m">Scalp TF: 15m</option>
+            </select>
+            <select id="pBotLev" onchange="updatePaperConfig()" style="background:#1a2030;color:#ffd740;border:1px solid #ffd740;">
+                <option value="5">Lev: 5x ($50)</option>
+                <option value="10" selected>Lev: 10x ($100)</option>
+                <option value="20">Lev: 20x ($200)</option>
+            </select>
+            <button class="btn" id="pBotToggleBtn" onclick="togglePaperBotPower()" style="background:#00e676;color:#000;font-weight:bold;">🟢 BOT: ON</button>
+            <button class="btn" onclick="resetPaperBot()" style="background:#37474f;color:#fff;">🔄 RESET $10</button>
+            <button class="btn" onclick="togglePaperModal()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
+        </div>
+    </div>
+    <div id="paperModalBody" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:12px;">
+        Loading 24/7 Server Bot Status...
+    </div>
+</div>
+
+<script>
+function togglePaperModal() {
+    const m = document.getElementById('paperModal');
+    m.style.display = (m.style.display === 'block') ? 'none' : 'block';
+    if (m.style.display === 'block') fetchPaperStatus();
+}
+
+async function fetchPaperStatus() {
+    try {
+        const res = await fetch('/api/paper-status');
+        const d = await res.json();
+        if (d.status !== 'ok') return;
+        const st = d.data;
+
+        const topBtn = document.getElementById('paperTopBtn');
+        if (topBtn) {
+            const sAct = st.scalp.active ? '1' : '0';
+            const iAct = st.intraday.active ? '1' : '0';
+            const pwr = st.enabled ? '🟢' : '⏸️';
+            topBtn.innerText = `${pwr} $10 BOT: $${st.scalp.balance.toFixed(1)}/$${st.intraday.balance.toFixed(1)} [${sAct}|${iAct}]`;
+        }
+
+        const pwrBtn = document.getElementById('pBotToggleBtn');
+        if (pwrBtn) {
+            pwrBtn.innerText = st.enabled ? '🟢 BOT: ON (24/7)' : '🔴 BOT: OFF';
+            pwrBtn.style.background = st.enabled ? '#00e676' : '#ff5252';
+            pwrBtn.style.color = st.enabled ? '#000' : '#fff';
+        }
+        document.getElementById('pBotSym').value = st.symbol || 'BTCUSDT';
+        document.getElementById('pBotTf').value = st.tf || '5m';
+        document.getElementById('pBotLev').value = String(st.leverage || 10);
+
+        const m = document.getElementById('paperModal');
+        if (m && m.style.display === 'block') {
+            renderServerPaperUI(st);
+        }
+    } catch (e) {}
+}
+
+async function togglePaperBotPower() {
+    await fetch('/api/paper-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle' })
+    });
+    fetchPaperStatus();
+}
+
+async function updatePaperConfig() {
+    const sym = document.getElementById('pBotSym').value;
+    const tfVal = document.getElementById('pBotTf').value;
+    const lev = parseInt(document.getElementById('pBotLev').value, 10) || 10;
+    await fetch('/api/paper-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'config', symbol: sym, tf: tfVal, leverage: lev })
+    });
+    fetchPaperStatus();
+}
+
+async function resetPaperBot() {
+    await fetch('/api/paper-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset' })
+    });
+    fetchPaperStatus();
+}
+
+async function closeServerPaperTrade(mode) {
+    await fetch('/api/paper-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'close', mode })
+    });
+    fetchPaperStatus();
+}
+
+function renderServerPaperUI(st) {
+    const livePx = st.live_price || 0;
+    const buildBook = (title, mode, book, col) => {
+        const tot = book.wins + book.losses;
+        const wr = tot > 0 ? Math.round((book.wins / tot) * 100) : 0;
+        const diff = book.balance - 10.0;
+        const pct = ((diff / 10.0) * 100).toFixed(1);
+
+        let actBox = `<div style="background:#0f1420;border:1px dashed #37474f;padding:8px;border-radius:4px;color:#90a4ae;margin:8px 0;">⏳ Scanning Live Orderflow on Server... (No Open Trade)</div>`;
+        if (book.active) {
+            const p = book.active;
+            const cur = livePx || p.entry;
+            const notional = p.margin * p.leverage;
+            const move = p.side === 'LONG' ? ((cur - p.entry) / p.entry) : ((p.entry - cur) / p.entry);
+            const uPnl = (notional * move) - (notional * 0.0007);
+            const uCol = uPnl >= 0 ? '#00e676' : '#ff5252';
+            const sCol = p.side === 'LONG' ? '#00e676' : '#ff5252';
+
+            actBox = `
+                <div style="background:#0e1726;border:1px solid ${sCol};padding:8px;border-radius:4px;margin:8px 0;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <b style="color:${sCol};">🔥 ACTIVE ${p.side} (${p.symbol} ${p.tf}) @ ${p.leverage}x</b>
+                        <button class="btn" onclick="closeServerPaperTrade('${mode}')" style="background:#ff1744;color:#fff;font-size:10px;padding:2px 6px;">Close Now</button>
+                    </div>
+                    <div style="margin-top:4px;font-size:11px;">
+                        Entry: <b>${p.entry}</b> | 🎯 TP: <b style="color:#00e676;">${p.tp}</b> | 🛑 SL: <b style="color:#ff5252;">${p.sl}</b>
+                    </div>
+                    <div style="margin-top:4px;display:flex;justify-content:space-between;font-size:11px;">
+                        <span>Signal: <code style="color:#ffeb3b;">${p.reason}</code></span>
+                        <b style="color:${uCol};font-size:12px;">Live PnL: ${uPnl >= 0 ? '+' : ''}$${uPnl.toFixed(3)}</b>
+                    </div>
+                </div>`;
+        }
+
+        const logs = (book.history || []).length === 0
+            ? `<div style="color:#607d8b;font-size:11px;">No closed trades yet.</div>`
+            : book.history.map(h => {
+                const c = h.pnl >= 0 ? '#00e676' : '#ff5252';
+                return `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1c2436;padding:4px 0;font-size:10.5px;">
+                    <span>[${h.time}] <b>${h.side}</b> ${h.symbol}(${h.tf}) ${h.entry}➔${h.exit}</span>
+                    <span>${h.outcome} <b style="color:${c};">${h.pnl >= 0 ? '+' : ''}$${Number(h.pnl).toFixed(3)}</b></span>
+                </div>`;
+            }).join('');
+
+        return `
+            <div class="rule-sec" style="border-color:${col};">
+                <h4 style="color:${col};display:flex;justify-content:space-between;">
+                    <span>${title}</span>
+                    <span>Wallet: <b style="color:#fff;">$${book.balance.toFixed(2)}</b> (${diff >= 0 ? '+' : ''}${pct}%)</span>
+                </h4>
+                <div style="display:flex;gap:12px;background:#0d111a;padding:6px 10px;border-radius:4px;font-size:11px;">
+                    <span>Trades: <b>${tot}</b></span>
+                    <span style="color:#00e676;">TP Hits: <b>${book.wins}</b></span>
+                    <span style="color:#ff5252;">SL Hits: <b>${book.losses}</b></span>
+                    <span style="color:#ffd740;">Win Rate: <b>${wr}%</b></span>
+                </div>
+                ${actBox}
+                <div style="margin-top:6px;font-weight:bold;color:#90a4ae;font-size:11px;">📜 24H Trade Log (0.07% Fee Deducted):</div>
+                <div style="max-height:210px;overflow-y:auto;margin-top:4px;">${logs}</div>
+            </div>`;
+    };
+
+    document.getElementById('paperModalBody').innerHTML =
+        buildBook('⚡ SCALP 24/7 BOT ($10 CAPITAL)', 'scalp', st.scalp, '#00e5ff') +
+        buildBook('🌊 INTRADAY 24/7 BOT ($10 CAPITAL)', 'intraday', st.intraday, '#e040fb');
+}
+
+setInterval(fetchPaperStatus, 4000);
+setTimeout(fetchPaperStatus, 1500);
+</script>
+<!-- ==================== END DEMO BOT UI ==================== -->
+
 <script>
 const wrap = document.getElementById('wrap');
 const cv = document.getElementById('cv');
@@ -4135,6 +4319,437 @@ def compress_response(response):
     response.headers['Content-Encoding'] = 'gzip'
     response.headers['Content-Length'] = len(response.get_data())
     return response
+
+# ============================================================
+# START 24/7 SERVER-SIDE $10 DEMO PAPER BOT (PLUG & PLAY)
+# ============================================================
+
+paper_bot_lock = threading.Lock()
+paper_bot_thread = None
+_last_self_ping = 0
+
+def _default_paper_state():
+    return {
+        "enabled": True,
+        "symbol": "BTCUSDT",
+        "tf": "5m",
+        "leverage": 10,
+        "scalp": {"balance": 10.0, "wins": 0, "losses": 0, "active": None, "history": [], "last_close": 0},
+        "intraday": {"balance": 10.0, "wins": 0, "losses": 0, "active": None, "history": [], "last_close": 0},
+    }
+
+paper_bot_state = _default_paper_state()
+
+def _load_paper_state_from_turso():
+    global paper_bot_state
+    if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
+        return
+    try:
+        with create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as client:
+            client.execute("CREATE TABLE IF NOT EXISTS paper_bot_store (id INTEGER PRIMARY KEY, state_json TEXT)")
+            res = client.execute("SELECT state_json FROM paper_bot_store WHERE id = 1")
+            if res.rows:
+                loaded = json.loads(res.rows[0][0])
+                if isinstance(loaded, dict) and "scalp" in loaded and "intraday" in loaded:
+                    paper_bot_state = loaded
+    except Exception as e:
+        print(f"[PAPER-BOT] Load skipped: {e}")
+
+def _save_paper_state_to_turso():
+    """Called ONLY when a trade opens/closes or user clicks button (~10 writes/day = Zero Turso Load!)."""
+    if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
+        return
+    try:
+        with paper_bot_lock:
+            snap_json = json.dumps(paper_bot_state)
+        sql = "INSERT OR REPLACE INTO paper_bot_store (id, state_json) VALUES (1, ?)"
+        turso_write_queue.put({"sql": sql, "args": (snap_json,)})
+    except Exception:
+        pass
+
+def _pick_server_magnet_tp(side, entry_px, sl_dist, min_rr, max_rr, magnets):
+    min_d = sl_dist * min_rr
+    max_d = sl_dist * max_rr
+    valid = []
+    for m_px, m_lbl in magnets:
+        if side == "LONG" and (entry_px + min_d) <= m_px <= (entry_px + max_d):
+            valid.append((abs(m_px - entry_px), m_px, m_lbl))
+        elif side == "SHORT" and (entry_px - max_d) <= m_px <= (entry_px - min_d):
+            valid.append((abs(m_px - entry_px), m_px, m_lbl))
+    if valid:
+        valid.sort(key=lambda x: x[0])
+        return valid[0][1], valid[0][2]
+    fallback_tp = (entry_px + sl_dist * min_rr) if side == "LONG" else (entry_px - sl_dist * min_rr)
+    return fallback_tp, f"{min_rr}R-Target"
+
+def _evaluate_server_orderflow(sym, tf_key):
+    """Evaluates live 10-Parameter Scalp & Intraday Confluence + Magnets on the server 24/7."""
+    step = PRICE_STEP.get(sym, 1.0)
+    with lock:
+        c_list = list(candles[sym][tf_key])[-20:]
+        curr = current_candles[sym][tf_key]
+        if curr is not None:
+            c_list.append(finalize_candle(curr))
+        if len(c_list) < 6:
+            return None
+
+        last_c = c_list[-1]
+        live_px = float(last_c["close"])
+        bids_dict = dict(orderbook[sym]["bids"])
+        asks_dict = dict(orderbook[sym]["asks"])
+
+    avg_vol = max(sum(float(x.get("volume", 0)) for x in c_list[:-1]) / max(1, len(c_list) - 1), 0.001)
+    tot_trades = sum(int(x.get("trades", 1)) for x in c_list[:-1])
+    base_lot = max(sum(float(x.get("volume", 0)) for x in c_list[:-1]) / max(1, tot_trades), 0.0001)
+    rvol = float(last_c.get("volume", 0)) / avg_vol
+
+    exec_buy, exec_sell, pull_b, pull_a = 0.0, 0.0, 0.0, 0.0
+    bid_abs, ask_abs, whale_b, whale_s = 0, 0, 0, 0
+    lowest_bid_abs_px = None
+    highest_ask_abs_px = None
+
+    for rc in c_list[-3:]:
+        fp_items = rc.get("footprint", [])
+        if isinstance(fp_items, dict):
+            fp_items = list(fp_items.values())
+        c_avg_v = float(rc.get("volume", 1.0)) / max(1, len(fp_items))
+        for lv in fp_items:
+            bv = float(lv.get("buy", 0.0))
+            sv = float(lv.get("sell", 0.0))
+            tv = float(lv.get("volume", 0.0))
+            bp = float(lv.get("bid_pulled", 0.0))
+            ap = float(lv.get("ask_pulled", 0.0))
+            trd = max(1, int(lv.get("trades", 1)))
+            px = float(lv.get("price", rc["close"]))
+
+            exec_buy += bv
+            exec_sell += sv
+            pull_b += bp
+            pull_a += ap
+
+            if sv >= c_avg_v * 1.35 and sv > bv * 1.8 and float(rc["close"]) >= px:
+                bid_abs += 1
+                if lowest_bid_abs_px is None or px < lowest_bid_abs_px:
+                    lowest_bid_abs_px = px
+            if bv >= c_avg_v * 1.35 and bv > sv * 1.8 and float(rc["close"]) <= px:
+                ask_abs += 1
+                if highest_ask_abs_px is None or px > highest_ask_abs_px:
+                    highest_ask_abs_px = px
+            if tv >= c_avg_v * 1.2 and ((tv / trd) / base_lot) >= 2.8:
+                if bv > sv:
+                    whale_b += 1
+                else:
+                    whale_s += 1
+
+    near_bid = sum(q for p, q in bids_dict.items() if live_px - step * 12 <= float(p) <= live_px)
+    near_ask = sum(q for p, q in asks_dict.items() if live_px <= float(p) <= live_px + step * 12)
+    pull_delta = pull_b - pull_a
+
+    c_range = max(float(last_c["high"]) - float(last_c["low"]), step * 0.5)
+    close_pos = (live_px - float(last_c["low"])) / c_range
+
+    prev5_hi = max(float(x["high"]) for x in c_list[-6:-1])
+    prev5_lo = min(float(x["low"]) for x in c_list[-6:-1])
+
+    # Scalp Score & Bull/Bear Tally
+    s_pts, s_bull, s_bear = 0, 0, 0
+    if exec_buy > exec_sell * 1.20: s_pts += 22; s_bull += 1
+    elif exec_sell > exec_buy * 1.20: s_pts -= 22; s_bear += 1
+
+    if pull_delta < 0 and live_px >= float(last_c["open"]): s_pts += 18; s_bull += 1
+    elif pull_delta > 0 and live_px <= float(last_c["open"]): s_pts -= 18; s_bear += 1
+
+    if bid_abs > ask_abs: s_pts += 20; s_bull += 1
+    elif ask_abs > bid_abs: s_pts -= 20; s_bear += 1
+
+    if near_bid > near_ask * 1.3: s_pts += 14; s_bull += 1
+    elif near_ask > near_bid * 1.3: s_pts -= 14; s_bear += 1
+
+    if float(last_c.get("delta", 0)) > 0 and close_pos >= 0.6: s_pts += 14; s_bull += 1
+    elif float(last_c.get("delta", 0)) < 0 and close_pos <= 0.4: s_pts -= 14; s_bear += 1
+
+    if whale_b > whale_s: s_pts += 15; s_bull += 1
+    elif whale_s > whale_b: s_pts -= 15; s_bear += 1
+
+    if float(last_c["low"]) < prev5_lo and live_px > prev5_lo and close_pos >= 0.55: s_pts += 18; s_bull += 1
+    elif float(last_c["high"]) > prev5_hi and live_px < prev5_hi and close_pos <= 0.45: s_pts -= 18; s_bear += 1
+
+    # Intraday Session Score
+    tot_cvd = sum(float(x.get("delta", 0)) for x in c_list)
+    net_move = live_px - float(c_list[0]["open"])
+    poc_up, poc_dn = 0, 0
+    for idx in range(1, len(c_list)):
+        p1, p0 = c_list[idx].get("poc"), c_list[idx - 1].get("poc")
+        if p1 and p0:
+            if p1 > p0: poc_up += 1
+            elif p1 < p0: poc_dn += 1
+
+    i_pts, i_bull, i_bear = 0, 0, 0
+    if net_move > 0 and poc_up > poc_dn: i_pts += 25; i_bull += 1
+    elif net_move < 0 and poc_dn > poc_up: i_pts -= 25; i_bear += 1
+
+    if tot_cvd > 0 and net_move > 0: i_pts += 22; i_bull += 1
+    elif tot_cvd < 0 and net_move < 0: i_pts -= 22; i_bear += 1
+
+    if bid_abs > ask_abs: i_pts += 18; i_bull += 1
+    elif ask_abs > bid_abs: i_pts -= 18; i_bear += 1
+
+    if whale_b > whale_s: i_pts += 15; i_bull += 1
+    elif whale_s > whale_b: i_pts -= 15; i_bear += 1
+
+    # Untouched nPOC + Unfinished Business (UB-HIGH / UB-LOW) Magnets for Target!
+    magnets = []
+    min_ub_vol = max(base_lot * 0.8, 0.05)
+    for i in range(len(c_list) - 1):
+        hc = c_list[i]
+        pc = hc.get("poc")
+        if pc is not None:
+            touched = any(float(c_list[j]["low"]) <= float(pc) <= float(c_list[j]["high"]) for j in range(i + 1, len(c_list)))
+            if not touched:
+                magnets.append((float(pc), "nPOC"))
+
+        fp_arr = hc.get("footprint", [])
+        if isinstance(fp_arr, dict):
+            fp_arr = list(fp_arr.values())
+        active_fp = [x for x in fp_arr if float(x.get("volume", 0)) > 0]
+        if active_fp:
+            hi_lvl = max(active_fp, key=lambda x: float(x["price"]))
+            lo_lvl = min(active_fp, key=lambda x: float(x["price"]))
+            if float(hi_lvl.get("buy", 0)) >= min_ub_vol and float(hi_lvl.get("sell", 0)) >= min_ub_vol:
+                swept_hi = any(float(c_list[j]["high"]) > float(hi_lvl["price"]) + step * 0.2 for j in range(i + 1, len(c_list)))
+                if not swept_hi:
+                    magnets.append((float(hi_lvl["price"]), "UB-HIGH"))
+            if float(lo_lvl.get("buy", 0)) >= min_ub_vol and float(lo_lvl.get("sell", 0)) >= min_ub_vol:
+                swept_lo = any(float(c_list[j]["low"]) < float(lo_lvl["price"]) - step * 0.2 for j in range(i + 1, len(c_list)))
+                if not swept_lo:
+                    magnets.append((float(lo_lvl["price"]), "UB-LOW"))
+
+    return {
+        "live_px": live_px,
+        "high": float(last_c["high"]),
+        "low": float(last_c["low"]),
+        "open": float(last_c["open"]),
+        " prev_lo": float(c_list[-2]["low"]),
+        "prev_hi": float(c_list[-2]["high"]),
+        "lowest_bid_abs_px": lowest_bid_abs_px,
+        "highest_ask_abs_px": highest_ask_abs_px,
+        "step": step,
+        "rvol": rvol,
+        "s_pts": s_pts, "s_bull": s_bull, "s_bear": s_bear,
+        "i_pts": i_pts, "i_bull": i_bull, "i_bear": i_bear,
+        "prev5_hi": prev5_hi, "prev5_lo": prev5_lo,
+        "magnets": magnets,
+    }
+
+def _check_book_sl_tp(book, sig):
+    act = book.get("active")
+    if not act:
+        return False
+    hi, lo = sig["high"], sig["low"]
+    exit_px, outcome = None, None
+
+    if act["side"] == "LONG":
+        if lo <= act["sl"]: exit_px, outcome = act["sl"], "SL HIT ❌"
+        elif hi >= act["tp"]: exit_px, outcome = act["tp"], f"TP HIT ({act.get('tp_tag', 'TARGET')}) ✅"
+    else:
+        if hi >= act["sl"]: exit_px, outcome = act["sl"], "SL HIT ❌"
+        elif lo <= act["tp"]: exit_px, outcome = act["tp"], f"TP HIT ({act.get('tp_tag', 'TARGET')}) ✅"
+
+    if exit_px is None:
+        return False
+
+    notional = float(act["margin"]) * float(act["leverage"])
+    pct = ((exit_px - act["entry"]) / act["entry"]) if act["side"] == "LONG" else ((act["entry"] - exit_px) / act["entry"])
+    net_pnl = (notional * pct) - (notional * 0.0007)
+
+    book["balance"] = round(max(0.0, float(book["balance"]) + net_pnl), 3)
+    if net_pnl >= 0:
+        book["wins"] += 1
+    else:
+        book["losses"] += 1
+
+    book["history"].insert(0, {
+        "time": time.strftime("%H:%M:%S", time.gmtime(time.time() + 19800)),
+        "symbol": act["symbol"], "tf": act["tf"], "side": act["side"],
+        "entry": act["entry"], "exit": exit_px,
+        "outcome": outcome, "pnl": round(net_pnl, 3), "reason": act["reason"]
+    })
+    book["history"] = book["history"][:30]
+    book["active"] = None
+    book["last_close"] = time.time()
+    return True
+
+def _paper_bot_worker():
+    global _last_self_ping
+    _load_paper_state_from_turso()
+    while True:
+        time.sleep(2.5)
+        try:
+            with paper_bot_lock:
+                enabled = paper_bot_state.get("enabled", True)
+                sym = paper_bot_state.get("symbol", "BTCUSDT")
+                tf_key = paper_bot_state.get("tf", "5m")
+                lev = int(paper_bot_state.get("leverage", 10))
+
+            # Anti-Sleep Self-Ping when BOT is ON so Render runs 24/7 even with PC turned off!
+            if enabled and (time.time() - _last_self_ping > 480):
+                _last_self_ping = time.time()
+                ext_url = os.environ.get("RENDER_EXTERNAL_URL")
+                if ext_url:
+                    try:
+                        requests.get(f"{ext_url.rstrip('/')}/hello", timeout=4)
+                    except Exception:
+                        pass
+
+            sig = _evaluate_server_orderflow(sym, tf_key)
+            if not sig:
+                continue
+
+            changed = False
+            now_s = time.time()
+            dec = 4 if sig["step"] < 0.01 else (2 if sig["step"] < 1 else 1)
+
+            with paper_bot_lock:
+                if _check_book_sl_tp(paper_bot_state["scalp"], sig):
+                    changed = True
+                if _check_book_sl_tp(paper_bot_state["intraday"], sig):
+                    changed = True
+
+                if enabled:
+                    # 1. SCALP AUTO-ENTRY (Max Risk Cap = 3.5% of Wallet i.e. ~$0.35 max loss per trade!)
+                    sb = paper_bot_state["scalp"]
+                    if not sb["active"] and sb["balance"] >= 1.0 and (now_s - sb.get("last_close", 0) > 20):
+                        s_long = sig["s_pts"] >= 44 and sig["s_bull"] >= 4 and sig["rvol"] >= 0.75 and sig["live_px"] >= sig["open"]
+                        s_short = sig["s_pts"] <= -44 and sig["s_bear"] >= 4 and sig["rvol"] >= 0.75 and sig["live_px"] <= sig["open"]
+                        if s_long or s_short:
+                            side = "LONG" if s_long else "SHORT"
+                            ep = sig["live_px"]
+                            if side == "LONG":
+                                struct_floor = sig["lowest_bid_abs_px"] if sig["lowest_bid_abs_px"] else min(sig["low"], sig[" prev_lo"])
+                                raw_d = (ep - struct_floor) + sig["step"] * 3
+                            else:
+                                struct_ceil = sig["highest_ask_abs_px"] if sig["highest_ask_abs_px"] else max(sig["high"], sig["prev_hi"])
+                                raw_d = (struct_ceil - ep) + sig["step"] * 3
+
+                            # Clamp SL between 0.12% and 0.35% of price so it's never too tight or too wide
+                            sl_d = max(ep * 0.0012, min(raw_d, ep * 0.0035))
+                            sl = round(ep - sl_d if side == "LONG" else ep + sl_d, dec)
+                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 1.85, 3.6, sig["magnets"])
+                            tp = round(tp_raw, dec)
+
+                            # Hard Risk Cap: Never lose more than 3.5% of balance ($0.35) on 1 SL hit!
+                            sl_pct = sl_d / ep
+                            max_loss_usd = sb["balance"] * 0.035
+                            safe_notional = min(sb["balance"] * lev, max_loss_usd / max(sl_pct, 0.0005))
+                            eff_margin = round(safe_notional / lev, 2)
+
+                            sb["active"] = {
+                                "symbol": sym, "tf": tf_key, "side": side,
+                                "entry": round(ep, dec), "sl": sl, "tp": tp, "tp_tag": tp_tag,
+                                "margin": eff_margin, "leverage": lev,
+                                "reason": f"Score:{sig['s_pts']} | 🟢{sig['s_bull']}v🔴{sig['s_bear']} | TP:{tp_tag}"
+                            }
+                            changed = True
+
+                    # 2. INTRADAY AUTO-ENTRY (Max Risk Cap = 5% of Wallet i.e. ~$0.50 max loss per trade!)
+                    ib = paper_bot_state["intraday"]
+                    if not ib["active"] and ib["balance"] >= 1.0 and (now_s - ib.get("last_close", 0) > 30):
+                        i_long = sig["i_pts"] >= 40 and sig["i_bull"] >= 3 and sig["s_pts"] >= 20 and sig["live_px"] >= sig["open"]
+                        i_short = sig["i_pts"] <= -40 and sig["i_bear"] >= 3 and sig["s_pts"] <= -20 and sig["live_px"] <= sig["open"]
+                        if i_long or i_short:
+                            side = "LONG" if i_long else "SHORT"
+                            ep = sig["live_px"]
+                            sw_ref = min(sig["low"], sig["prev5_lo"]) if side == "LONG" else max(sig["high"], sig["prev5_hi"])
+                            raw_d = abs(ep - sw_ref) + sig["step"] * 5
+
+                            # Clamp Intraday SL between 0.22% and 0.55% of price
+                            sl_d = max(ep * 0.0022, min(raw_d, ep * 0.0055))
+                            sl = round(ep - sl_d if side == "LONG" else ep + sl_d, dec)
+                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 2.2, 4.5, sig["magnets"])
+                            tp = round(tp_raw, dec)
+
+                            # Hard Risk Cap: Never lose more than 5.0% of balance ($0.50) on 1 Intraday SL!
+                            sl_pct = sl_d / ep
+                            max_loss_usd = ib["balance"] * 0.050
+                            safe_notional = min(ib["balance"] * lev, max_loss_usd / max(sl_pct, 0.0005))
+                            eff_margin = round(safe_notional / lev, 2)
+
+                            ib["active"] = {
+                                "symbol": sym, "tf": tf_key, "side": side,
+                                "entry": round(ep, dec), "sl": sl, "tp": tp, "tp_tag": tp_tag,
+                                "margin": eff_margin, "leverage": lev,
+                                "reason": f"Intra:{sig['i_pts']} | Scalp:{sig['s_pts']} | TP:{tp_tag}"
+                            }
+                            changed = True
+
+            if changed:
+                _save_paper_state_to_turso()
+        except Exception:
+            pass
+
+@app.before_request
+def _start_paper_bot_once():
+    global paper_bot_thread
+    if paper_bot_thread is None or not paper_bot_thread.is_alive():
+        with paper_bot_lock:
+            if paper_bot_thread is None or not paper_bot_thread.is_alive():
+                paper_bot_thread = threading.Thread(target=_paper_bot_worker, name="server-paper-bot", daemon=True)
+                paper_bot_thread.start()
+
+@app.route("/api/paper-status")
+def api_paper_status():
+    with paper_bot_lock:
+        sym = paper_bot_state.get("symbol", "BTCUSDT")
+        px = last_trade.get(sym, {}).get("price")
+        out = dict(paper_bot_state)
+        out["live_price"] = px
+    return jsonify({"status": "ok", "data": out})
+
+@app.route("/api/paper-action", methods=["POST"])
+def api_paper_action():
+    data = request.get_json(silent=True) or {}
+    act = data.get("action")
+    with paper_bot_lock:
+        if act == "toggle":
+            paper_bot_state["enabled"] = not paper_bot_state.get("enabled", True)
+        elif act == "config":
+            if data.get("symbol") in SYMBOLS:
+                paper_bot_state["symbol"] = data["symbol"]
+            if data.get("tf") in TIMEFRAMES:
+                paper_bot_state["tf"] = data["tf"]
+            if data.get("leverage"):
+                paper_bot_state["leverage"] = int(data["leverage"])
+        elif act == "reset":
+            sym, tf_k, lev = paper_bot_state["symbol"], paper_bot_state["tf"], paper_bot_state["leverage"]
+            paper_bot_state.clear()
+            paper_bot_state.update(_default_paper_state())
+            paper_bot_state["symbol"], paper_bot_state["tf"], paper_bot_state["leverage"] = sym, tf_k, lev
+        elif act == "close":
+            mode = data.get("mode", "scalp")
+            book = paper_bot_state.get(mode)
+            if book and book.get("active"):
+                p = book["active"]
+                px = float(last_trade.get(p["symbol"], {}).get("price") or p["entry"])
+                notional = float(p["margin"]) * float(p["leverage"])
+                move = ((px - p["entry"]) / p["entry"]) if p["side"] == "LONG" else ((p["entry"] - px) / p["entry"])
+                net_pnl = (notional * move) - (notional * 0.0007)
+                book["balance"] = round(max(0.0, float(book["balance"]) + net_pnl), 3)
+                if net_pnl >= 0: book["wins"] += 1
+                else: book["losses"] += 1
+                book["history"].insert(0, {
+                    "time": time.strftime("%H:%M:%S", time.gmtime(time.time() + 19800)),
+                    "symbol": p["symbol"], "tf": p["tf"], "side": p["side"],
+                    "entry": p["entry"], "exit": px,
+                    "outcome": "MANUAL EXIT ✋", "pnl": round(net_pnl, 3), "reason": p["reason"]
+                })
+                book["active"] = None
+                book["last_close"] = time.time()
+    _save_paper_state_to_turso()
+    return jsonify({"status": "ok"})
+
+# ============================================================
+# END 24/7 SERVER-SIDE $10 DEMO PAPER BOT
+# ============================================================
 
 
 if __name__ == "__main__":
