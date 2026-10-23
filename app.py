@@ -4608,7 +4608,7 @@ def _evaluate_server_orderflow(sym, tf_key):
             a_pct = (gl["buy"] / gl["volume"]) * 100.0 if gl["volume"] > 0 else 0
             churn = gl["volume"] >= tf_avg_cell_vol * 2.0 and b_pct >= 42 and a_pct >= 42
 
-            if (gl["sell"] >= tf_avg_cell_vol * 1.3 && gl["sell"] > gl["buy"] * 1.8 and float(rc["close"]) >= gl["price"]) if False else (
+            if (gl["sell"] >= tf_avg_cell_vol * 1.3 and gl["sell"] > gl["buy"] * 1.8 and float(rc["close"]) >= gl["price"]):
                 (gl["sell"] >= tf_avg_cell_vol * 1.3 and gl["sell"] > gl["buy"] * 1.8 and float(rc["close"]) >= gl["price"]) or (churn and float(rc["close"]) > gl["price"] + eff_step * 0.5)
             ):
                 r_bid_abs += 1
