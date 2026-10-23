@@ -3524,6 +3524,33 @@ function drawAll() {
         scalpFactors.push(`LowRVOL(${curRvol.toFixed(1)}x)`);
     }
 
+    // --- ANTI-TRAP VETO: Prevent Late Range-Top Buying & Range-Bottom Selling + Respect Absorption Walls ---
+    const recent20 = candles.slice(-20);
+    const r20Hi = Math.max(...recent20.map(x => x.high));
+    const r20Lo = Math.min(...recent20.map(x => x.low));
+    const r20Span = Math.max(r20Hi - r20Lo, rawStep);
+    const rangeLocation = (lastC.close - r20Lo) / r20Span;
+    const sum20Ranges = recent20.reduce((acc, x) => acc + Math.max(x.high - x.low, rawStep), 0);
+    const macroEff20 = Math.abs(lastC.close - recent20[0].open) / Math.max(sum20Ranges, rawStep);
+
+    // 1. Direct Absorption Wall Veto: Do not signal BUY if active candle is capped by Ask Absorption, or SELL if held by Bid Absorption
+    if (rAskAbs > rBidAbs && lastC.close <= lastC.open && scalpPts > 12) {
+        scalpPts = 8;
+        scalpFactors.push('🛡️AskCapVeto');
+    } else if (rBidAbs > rAskAbs && lastC.close >= lastC.open && scalpPts < -12) {
+        scalpPts = -8;
+        scalpFactors.push('🛡️BidHoldVeto');
+    }
+
+    // 2. Range Extreme Chasing Veto: Never chase LONG at Top 15% of range or SHORT at Bottom 15% in low efficiency / against walls
+    if (rangeLocation >= 0.85 && !bullSweepReject && (macroEff20 < 0.22 || rAskAbs > 0 || nearAskRest > nearBidRest * 1.15) && scalpPts > 12) {
+        scalpPts = 10;
+        scalpFactors.push('⚠️RangeTopVeto');
+    } else if (rangeLocation <= 0.15 && !bearSweepReject && (macroEff20 < 0.22 || rBidAbs > 0 || nearBidRest > nearAskRest * 1.15) && scalpPts < -12) {
+        scalpPts = -10;
+        scalpFactors.push('⚠️RangeBotVeto');
+    }
+    
     let scalpFinalTxt = '⚪ SIDEWAYS';
     let scalpFinalCol = '#ffca28';
     if (scalpPts >= 55) { scalpFinalTxt = '🟢 STRONG BUY'; scalpFinalCol = '#00e676'; }
@@ -4321,7 +4348,7 @@ def compress_response(response):
     return response
 
 # ============================================================
-# START 24/7 SERVER-SIDE $10 DEMO PAPER BOT (PLUG & PLAY)
+# START 24/7 SERVER-SIDE $10 DEMO PAPER BOT (ZERO-BYPASS V2)
 # ============================================================
 
 paper_bot_lock = threading.Lock()
@@ -4356,7 +4383,6 @@ def _load_paper_state_from_turso():
         print(f"[PAPER-BOT] Load skipped: {e}")
 
 def _save_paper_state_to_turso():
-    """Called ONLY when a trade opens/closes or user clicks button (~10 writes/day = Zero Turso Load!)."""
     if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return
     try:
@@ -4366,6 +4392,46 @@ def _save_paper_state_to_turso():
         turso_write_queue.put({"sql": sql, "args": (snap_json,)})
     except Exception:
         pass
+
+def _group_fp_server(fp_raw, low_px, high_px, eff_step, close_px, live_rest_bench):
+    """100% Identical to Frontend groupFootprint() so Server Bot sees the exact same clusters!"""
+    items = list(fp_raw.values()) if isinstance(fp_raw, dict) else (fp_raw or [])
+    buckets = {}
+    for l in items:
+        p = float(l.get("price", 0.0))
+        if p < low_px - eff_step * 1.1 or p > high_px + eff_step * 1.1:
+            continue
+        b_px = round(int(p / eff_step + 1e-9) * eff_step, 6)
+        g = buckets.get(b_px)
+        if g is None:
+            g = {"price": b_px, "buy": 0.0, "sell": 0.0, "volume": 0.0, "trades": 0, "bid_pulled": 0.0, "ask_pulled": 0.0}
+            buckets[b_px] = g
+        g["buy"] += float(l.get("buy", 0.0))
+        g["sell"] += float(l.get("sell", 0.0))
+        g["volume"] += float(l.get("volume", 0.0))
+        g["trades"] += int(l.get("trades", 0))
+        bp = float(l.get("bid_pulled", 0.0))
+        ap = float(l.get("ask_pulled", 0.0))
+        pq = float(l.get("pulled_qty", 0.0))
+        if bp == 0.0 and ap == 0.0 and pq > 0.0:
+            if p <= close_px:
+                bp = pq
+            else:
+                ap = pq
+        g["bid_pulled"] += bp
+        g["ask_pulled"] += ap
+
+    rest_cap = max((live_rest_bench or 15.0) * 3.2, 25.0)
+    out = []
+    for g in buckets.values():
+        if g["volume"] <= 0 and g["bid_pulled"] <= 0 and g["ask_pulled"] <= 0:
+            continue
+        max_pull = max(g["volume"] * 2.5, rest_cap)
+        g["bid_pulled"] = min(g["bid_pulled"], max_pull)
+        g["ask_pulled"] = min(g["ask_pulled"], max_pull)
+        out.append(g)
+    out.sort(key=lambda x: x["price"])
+    return out
 
 def _pick_server_magnet_tp(side, entry_px, sl_dist, min_rr, max_rr, magnets):
     min_d = sl_dist * min_rr
@@ -4383,122 +4449,194 @@ def _pick_server_magnet_tp(side, entry_px, sl_dist, min_rr, max_rr, magnets):
     return fallback_tp, f"{min_rr}R-Target"
 
 def _evaluate_server_orderflow(sym, tf_key):
-    """Evaluates live 10-Parameter Scalp & Intraday Confluence + Magnets on the server 24/7."""
-    step = PRICE_STEP.get(sym, 1.0)
+    """100% Zero-Bypass Mirror of Frontend 12 Scalp + 10 Intraday Parameters + Auto-Scale Clustering."""
+    raw_step = PRICE_STEP.get(sym, 1.0)
+    peer_sym = "ETHUSDT" if sym == "BTCUSDT" else "BTCUSDT"
+
     with lock:
         c_list = list(candles[sym][tf_key])[-20:]
         curr = current_candles[sym][tf_key]
         if curr is not None:
             c_list.append(finalize_candle(curr))
-        if len(c_list) < 6:
+        if len(c_list) < 7:
             return None
 
+        peer_list = list(candles[peer_sym][tf_key])[-6:]
+        peer_curr = current_candles[peer_sym][tf_key]
+        if peer_curr is not None:
+            peer_list.append(finalize_candle(peer_curr))
+
         last_c = c_list[-1]
+        prev_c = c_list[-2]
         live_px = float(last_c["close"])
         bids_dict = dict(orderbook[sym]["bids"])
         asks_dict = dict(orderbook[sym]["asks"])
 
-    avg_vol = max(sum(float(x.get("volume", 0)) for x in c_list[:-1]) / max(1, len(c_list) - 1), 0.001)
-    tot_trades = sum(int(x.get("trades", 1)) for x in c_list[:-1])
-    base_lot = max(sum(float(x.get("volume", 0)) for x in c_list[:-1]) / max(1, tot_trades), 0.0001)
-    rvol = float(last_c.get("volume", 0)) / avg_vol
+    # 1. Auto-Scale Step Calculation (Matches Frontend Auto Scale!)
+    focus4 = c_list[-4:]
+    f_lo = min(float(x["low"]) for x in focus4)
+    f_hi = max(float(x["high"]) for x in focus4)
+    p_span = max((f_hi - f_lo) * 1.26, raw_step * 10)
+    raw_rows = p_span / raw_step
+    mult = 1
+    if raw_rows > 24:
+        needed = raw_rows / 24.0
+        nice_steps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500]
+        mult = next((s for s in nice_steps if s >= needed), int(needed) + 1)
+    eff_step = raw_step * mult
 
-    exec_buy, exec_sell, pull_b, pull_a = 0.0, 0.0, 0.0, 0.0
-    bid_abs, ask_abs, whale_b, whale_s = 0, 0, 0, 0
-    lowest_bid_abs_px = None
-    highest_ask_abs_px = None
+    # 2. Live Resting Book Benchmark & Near 6-Step Walls
+    bucket_book = defaultdict(float)
+    near_bid_rest, near_ask_rest = 0.0, 0.0
+    for p_s, q in bids_dict.items():
+        pf = float(p_s)
+        if abs(pf - live_px) <= eff_step * 25:
+            bucket_book[f"B{int(pf / eff_step)}"] += q
+        if (live_px - eff_step * 6) <= pf <= live_px:
+            near_bid_rest += q
+    for p_s, q in asks_dict.items():
+        pf = float(p_s)
+        if abs(pf - live_px) <= eff_step * 25:
+            bucket_book[f"A{int(pf / eff_step)}"] += q
+        if live_px <= pf <= (live_px + eff_step * 6):
+            near_ask_rest += q
+
+    vals = [v for v in bucket_book.values() if v > 0]
+    live_rest_bench = (sum(vals) / len(vals)) if vals else 0.0
+
+    # 3. Historical Flow & Lot Baselines
+    hist_c = c_list[:-1]
+    avg_flow_vol = max(sum(float(x.get("volume", 0)) for x in hist_c) / max(1, len(hist_c)), 0.001)
+    tot_hist_trades = sum(int(x.get("trades", 1)) for x in hist_c)
+    base_lot = max(sum(float(x.get("volume", 0)) for x in hist_c) / max(1, tot_hist_trades), 0.0001)
+    cur_rvol = float(last_c.get("volume", 0)) / avg_flow_vol
+
+    vis_buckets, vis_vol = 0, 0.0
+    for vc in c_list[-8:]:
+        g_fp = _group_fp_server(vc.get("footprint"), float(vc["low"]), float(vc["high"]), eff_step, float(vc["close"]), live_rest_bench)
+        vis_buckets += max(len([x for x in g_fp if x["volume"] > 0]), 1)
+        vis_vol += float(vc.get("volume", 0.0))
+    tf_avg_cell_vol = max(vis_vol / max(vis_buckets, 1), 0.001)
+    heavy_lvl_bench = max(tf_avg_cell_vol * 1.40, min(tf_avg_cell_vol * 2.1, live_rest_bench * 1.20)) if live_rest_bench > 0 else tf_avg_cell_vol * 1.60
+
+    # 4. SMT Divergence Radar (BTC vs ETH)
+    smt_bias = 0
+    if len(peer_list) >= 6:
+        c6 = c_list[-6:]
+        p6 = peer_list[-6:]
+        c_swept_lo = float(c6[-1]["low"]) <= min(float(x["low"]) for x in c6[:-1])
+        p_swept_lo = float(p6[-1]["low"]) <= min(float(x["low"]) for x in p6[:-1])
+        c_swept_hi = float(c6[-1]["high"]) >= max(float(x["high"]) for x in c6[:-1])
+        p_swept_hi = float(p6[-1]["high"]) >= max(float(x["high"]) for x in p6[:-1])
+        if c_swept_lo != p_swept_lo:
+            smt_bias = 1
+        elif c_swept_hi != p_swept_hi:
+            smt_bias = -1
+
+    # 5. Macro 20-Candle Session Stats & Efficiency
+    macro_hi = max(float(x["high"]) for x in c_list)
+    macro_lo = min(float(x["low"]) for x in c_list)
+    macro_span = max(macro_hi - macro_lo, raw_step)
+    sum_ranges = sum(max(float(x["high"]) - float(x["low"]), raw_step) for x in c_list)
+    net_move = live_px - float(c_list[0]["open"])
+    efficiency = abs(net_move) / max(sum_ranges, raw_step)
+    range_location = (live_px - macro_lo) / macro_span
+
+    tot_cvd = 0.0
+    poc_up, poc_dn = 0, 0
+    macro_bid_abs, macro_ask_abs = 0, 0
+    macro_bp, macro_ap = 0.0, 0.0
+    macro_whale_b, macro_whale_s = 0, 0
+
+    for idx, mc in enumerate(c_list):
+        tot_cvd += float(mc.get("delta", 0.0))
+        if idx > 0 and mc.get("poc") and c_list[idx - 1].get("poc"):
+            if float(mc["poc"]) > float(c_list[idx - 1]["poc"]): poc_up += 1
+            elif float(mc["poc"]) < float(c_list[idx - 1]["poc"]): poc_dn += 1
+
+        mfp = _group_fp_server(mc.get("footprint"), float(mc["low"]), float(mc["high"]), eff_step, float(mc["close"]), live_rest_bench)
+        act_cells = [x for x in mfp if x["volume"] > 0]
+        c_avg_v = float(mc.get("volume", 1.0)) / max(len(act_cells), 1)
+        c_heavy_cut = max(c_avg_v * 1.35, heavy_lvl_bench * 0.50)
+
+        for l in mfp:
+            sv, bv, tv = l["sell"], l["buy"], l["volume"]
+            bp, ap = l["bid_pulled"], l["ask_pulled"]
+            b_abs_pct = (sv / tv) * 100.0 if tv > 0 else 0.0
+            a_abs_pct = (bv / tv) * 100.0 if tv > 0 else 0.0
+            is_churn = tv >= max(c_avg_v * 2.0, heavy_lvl_bench * 0.85) and b_abs_pct >= 42 and a_abs_pct >= 42
+
+            macro_bp += bp
+            macro_ap += ap
+            if (sv >= c_heavy_cut and b_abs_pct >= 65 and float(mc["close"]) >= l["price"]) or (is_churn and float(mc["close"]) > l["price"] + eff_step * 0.5):
+                macro_bid_abs += 1
+            if (bv >= c_heavy_cut and a_abs_pct >= 65 and float(mc["close"]) <= l["price"]) or (is_churn and float(mc["close"]) < l["price"] - eff_step * 0.5):
+                macro_ask_abs += 1
+
+            lt = max(l["trades"], 1)
+            lot_ratio = (tv / lt) / base_lot
+            if tv >= max(c_avg_v * 1.15, heavy_lvl_bench * 0.50) and ((lot_ratio >= 2.8 and lt <= 48) or lot_ratio >= 4.5):
+                if bv > sv: macro_whale_b += 1
+                else: macro_whale_s += 1
+
+    macro_pull_delta = macro_bp - macro_ap
+    bull_m, bear_m = 0, 0
+    if net_move > macro_span * 0.20 and poc_up > poc_dn: bull_m += 24
+    elif net_move < -macro_span * 0.20 and poc_dn > poc_up: bear_m += 24
+    if tot_cvd > 0 and net_move > 0: bull_m += 20
+    elif tot_cvd < 0 and net_move < 0: bear_m += 20
+    if macro_pull_delta < 0 and net_move > 0: bull_m += 22
+    elif macro_pull_delta > 0 and net_move < 0: bear_m += 22
+    if macro_whale_b > macro_whale_s: bull_m += 18
+    elif macro_whale_s > macro_whale_b: bear_m += 18
+    net_macro = bull_m - bear_m
+
+    # 6. Recent 3-Candle Sticky DOM & Footprint Matrix
+    tot_exec_buy, tot_exec_sell, tot_pull_b, tot_pull_a = 0.0, 0.0, 0.0, 0.0
+    r_bid_abs, r_ask_abs, recent_whale_b, recent_whale_s = 0, 0, 0, 0
+    lowest_bid_abs_px, highest_ask_abs_px = None, None
 
     for rc in c_list[-3:]:
-        fp_items = rc.get("footprint", [])
-        if isinstance(fp_items, dict):
-            fp_items = list(fp_items.values())
-        c_avg_v = float(rc.get("volume", 1.0)) / max(1, len(fp_items))
-        for lv in fp_items:
-            bv = float(lv.get("buy", 0.0))
-            sv = float(lv.get("sell", 0.0))
-            tv = float(lv.get("volume", 0.0))
-            bp = float(lv.get("bid_pulled", 0.0))
-            ap = float(lv.get("ask_pulled", 0.0))
-            trd = max(1, int(lv.get("trades", 1)))
-            px = float(lv.get("price", rc["close"]))
+        g_list = _group_fp_server(rc.get("footprint"), float(rc["low"]), float(rc["high"]), eff_step, float(rc["close"]), live_rest_bench)
+        for gl in g_list:
+            tot_exec_buy += gl["buy"]
+            tot_exec_sell += gl["sell"]
+            tot_pull_b += gl["bid_pulled"]
+            tot_pull_a += gl["ask_pulled"]
 
-            exec_buy += bv
-            exec_sell += sv
-            pull_b += bp
-            pull_a += ap
+            b_pct = (gl["sell"] / gl["volume"]) * 100.0 if gl["volume"] > 0 else 0
+            a_pct = (gl["buy"] / gl["volume"]) * 100.0 if gl["volume"] > 0 else 0
+            churn = gl["volume"] >= tf_avg_cell_vol * 2.0 and b_pct >= 42 and a_pct >= 42
 
-            if sv >= c_avg_v * 1.35 and sv > bv * 1.8 and float(rc["close"]) >= px:
-                bid_abs += 1
-                if lowest_bid_abs_px is None or px < lowest_bid_abs_px:
-                    lowest_bid_abs_px = px
-            if bv >= c_avg_v * 1.35 and bv > sv * 1.8 and float(rc["close"]) <= px:
-                ask_abs += 1
-                if highest_ask_abs_px is None or px > highest_ask_abs_px:
-                    highest_ask_abs_px = px
-            if tv >= c_avg_v * 1.2 and ((tv / trd) / base_lot) >= 2.8:
-                if bv > sv:
-                    whale_b += 1
-                else:
-                    whale_s += 1
+            if (gl["sell"] >= tf_avg_cell_vol * 1.3 && gl["sell"] > gl["buy"] * 1.8 and float(rc["close"]) >= gl["price"]) if False else (
+                (gl["sell"] >= tf_avg_cell_vol * 1.3 and gl["sell"] > gl["buy"] * 1.8 and float(rc["close"]) >= gl["price"]) or (churn and float(rc["close"]) > gl["price"] + eff_step * 0.5)
+            ):
+                r_bid_abs += 1
+                if lowest_bid_abs_px is None or gl["price"] < lowest_bid_abs_px:
+                    lowest_bid_abs_px = gl["price"]
 
-    near_bid = sum(q for p, q in bids_dict.items() if live_px - step * 12 <= float(p) <= live_px)
-    near_ask = sum(q for p, q in asks_dict.items() if live_px <= float(p) <= live_px + step * 12)
-    pull_delta = pull_b - pull_a
+            if (gl["buy"] >= tf_avg_cell_vol * 1.3 and gl["buy"] > gl["sell"] * 1.8 and float(rc["close"]) <= gl["price"]) or (churn and float(rc["close"]) < gl["price"] - eff_step * 0.5):
+                r_ask_abs += 1
+                if highest_ask_abs_px is None or gl["price"] > highest_ask_abs_px:
+                    highest_ask_abs_px = gl["price"]
 
-    c_range = max(float(last_c["high"]) - float(last_c["low"]), step * 0.5)
+            trd = max(gl["trades"], 1)
+            if gl["volume"] >= tf_avg_cell_vol * 1.15 and ((gl["volume"] / trd) / base_lot) >= 2.8:
+                if gl["buy"] > gl["sell"]: recent_whale_b += 1
+                else: recent_whale_s += 1
+
+    dom_pull_delta = tot_pull_b - tot_pull_a
+    c_range = max(float(last_c["high"]) - float(last_c["low"]), raw_step * 0.5)
     close_pos = (live_px - float(last_c["low"])) / c_range
 
     prev5_hi = max(float(x["high"]) for x in c_list[-6:-1])
     prev5_lo = min(float(x["low"]) for x in c_list[-6:-1])
+    bull_sweep_reject = float(last_c["low"]) < prev5_lo and live_px > prev5_lo and close_pos >= 0.55
+    bear_sweep_reject = float(last_c["high"]) > prev5_hi and live_px < prev5_hi and close_pos <= 0.45
 
-    # Scalp Score & Bull/Bear Tally
-    s_pts, s_bull, s_bear = 0, 0, 0
-    if exec_buy > exec_sell * 1.20: s_pts += 22; s_bull += 1
-    elif exec_sell > exec_buy * 1.20: s_pts -= 22; s_bear += 1
-
-    if pull_delta < 0 and live_px >= float(last_c["open"]): s_pts += 18; s_bull += 1
-    elif pull_delta > 0 and live_px <= float(last_c["open"]): s_pts -= 18; s_bear += 1
-
-    if bid_abs > ask_abs: s_pts += 20; s_bull += 1
-    elif ask_abs > bid_abs: s_pts -= 20; s_bear += 1
-
-    if near_bid > near_ask * 1.3: s_pts += 14; s_bull += 1
-    elif near_ask > near_bid * 1.3: s_pts -= 14; s_bear += 1
-
-    if float(last_c.get("delta", 0)) > 0 and close_pos >= 0.6: s_pts += 14; s_bull += 1
-    elif float(last_c.get("delta", 0)) < 0 and close_pos <= 0.4: s_pts -= 14; s_bear += 1
-
-    if whale_b > whale_s: s_pts += 15; s_bull += 1
-    elif whale_s > whale_b: s_pts -= 15; s_bear += 1
-
-    if float(last_c["low"]) < prev5_lo and live_px > prev5_lo and close_pos >= 0.55: s_pts += 18; s_bull += 1
-    elif float(last_c["high"]) > prev5_hi and live_px < prev5_hi and close_pos <= 0.45: s_pts -= 18; s_bear += 1
-
-    # Intraday Session Score
-    tot_cvd = sum(float(x.get("delta", 0)) for x in c_list)
-    net_move = live_px - float(c_list[0]["open"])
-    poc_up, poc_dn = 0, 0
-    for idx in range(1, len(c_list)):
-        p1, p0 = c_list[idx].get("poc"), c_list[idx - 1].get("poc")
-        if p1 and p0:
-            if p1 > p0: poc_up += 1
-            elif p1 < p0: poc_dn += 1
-
-    i_pts, i_bull, i_bear = 0, 0, 0
-    if net_move > 0 and poc_up > poc_dn: i_pts += 25; i_bull += 1
-    elif net_move < 0 and poc_dn > poc_up: i_pts -= 25; i_bear += 1
-
-    if tot_cvd > 0 and net_move > 0: i_pts += 22; i_bull += 1
-    elif tot_cvd < 0 and net_move < 0: i_pts -= 22; i_bear += 1
-
-    if bid_abs > ask_abs: i_pts += 18; i_bull += 1
-    elif ask_abs > bid_abs: i_pts -= 18; i_bear += 1
-
-    if whale_b > whale_s: i_pts += 15; i_bull += 1
-    elif whale_s > whale_b: i_pts -= 15; i_bear += 1
-
-    # Untouched nPOC + Unfinished Business (UB-HIGH / UB-LOW) Magnets for Target!
-    magnets = []
+    # 7. Untouched nPOC & Clustered UB-HIGH/LOW Magnets
+    naked_pocs = []
+    unfinished_levels = []
     min_ub_vol = max(base_lot * 0.8, 0.05)
     for i in range(len(c_list) - 1):
         hc = c_list[i]
@@ -4506,60 +4644,206 @@ def _evaluate_server_orderflow(sym, tf_key):
         if pc is not None:
             touched = any(float(c_list[j]["low"]) <= float(pc) <= float(c_list[j]["high"]) for j in range(i + 1, len(c_list)))
             if not touched:
-                magnets.append((float(pc), "nPOC"))
+                naked_pocs.append(float(pc))
 
-        fp_arr = hc.get("footprint", [])
-        if isinstance(fp_arr, dict):
-            fp_arr = list(fp_arr.values())
-        active_fp = [x for x in fp_arr if float(x.get("volume", 0)) > 0]
-        if active_fp:
-            hi_lvl = max(active_fp, key=lambda x: float(x["price"]))
-            lo_lvl = min(active_fp, key=lambda x: float(x["price"]))
-            if float(hi_lvl.get("buy", 0)) >= min_ub_vol and float(hi_lvl.get("sell", 0)) >= min_ub_vol:
-                swept_hi = any(float(c_list[j]["high"]) > float(hi_lvl["price"]) + step * 0.2 for j in range(i + 1, len(c_list)))
+        g_fp = _group_fp_server(hc.get("footprint"), float(hc["low"]), float(hc["high"]), eff_step, float(hc["close"]), live_rest_bench)
+        act_fp = [x for x in g_fp if x["volume"] > 0]
+        if act_fp:
+            hi_l = max(act_fp, key=lambda x: x["price"])
+            lo_l = min(act_fp, key=lambda x: x["price"])
+            if hi_l["buy"] >= min_ub_vol and hi_l["sell"] >= min_ub_vol:
+                swept_hi = any(float(c_list[j]["high"]) > hi_l["price"] + eff_step * 0.2 for j in range(i + 1, len(c_list)))
                 if not swept_hi:
-                    magnets.append((float(hi_lvl["price"]), "UB-HIGH"))
-            if float(lo_lvl.get("buy", 0)) >= min_ub_vol and float(lo_lvl.get("sell", 0)) >= min_ub_vol:
-                swept_lo = any(float(c_list[j]["low"]) < float(lo_lvl["price"]) - step * 0.2 for j in range(i + 1, len(c_list)))
+                    unfinished_levels.append((hi_l["price"], "UB-HIGH"))
+            if lo_l["buy"] >= min_ub_vol and lo_l["sell"] >= min_ub_vol:
+                swept_lo = any(float(c_list[j]["low"]) < lo_l["price"] - eff_step * 0.2 for j in range(i + 1, len(c_list)))
                 if not swept_lo:
-                    magnets.append((float(lo_lvl["price"]), "UB-LOW"))
+                    unfinished_levels.append((lo_l["price"], "UB-LOW"))
+
+    magnets = [(p, "nPOC") for p in naked_pocs] + unfinished_levels
+
+    # 8. EXACT 12 SCALP PARAMETERS & SCORING (100% Match with Frontend)
+    scalp_pts = 0
+    if tot_exec_buy > tot_exec_sell * 1.30: scalp_pts += 25
+    elif tot_exec_buy > tot_exec_sell * 1.10: scalp_pts += 12
+    elif tot_exec_sell > tot_exec_buy * 1.30: scalp_pts -= 25
+    elif tot_exec_sell > tot_exec_buy * 1.10: scalp_pts -= 12
+
+    if dom_pull_delta < -tf_avg_cell_vol * 0.35 and live_px >= float(last_c["open"]): scalp_pts += 20
+    elif dom_pull_delta > tf_avg_cell_vol * 0.35 and live_px <= float(last_c["open"]): scalp_pts -= 20
+
+    if r_bid_abs > r_ask_abs: scalp_pts += 22
+    elif r_ask_abs > r_bid_abs: scalp_pts -= 22
+
+    if near_bid_rest > near_ask_rest * 1.35: scalp_pts += 14
+    elif near_ask_rest > near_bid_rest * 1.35: scalp_pts -= 14
+
+    last_delta = float(last_c.get("delta", 0.0))
+    if last_delta > 0 and close_pos >= 0.60: scalp_pts += 14
+    elif last_delta < 0 and close_pos <= 0.40: scalp_pts -= 14
+
+    if recent_whale_b > recent_whale_s: scalp_pts += 15
+    elif recent_whale_s > recent_whale_b: scalp_pts -= 15
+
+    vah, val, poc = last_c.get("vah"), last_c.get("val"), last_c.get("poc")
+    if vah is not None and live_px > float(vah): scalp_pts += 10
+    elif val is not None and live_px < float(val): scalp_pts -= 10
+
+    if bull_sweep_reject: scalp_pts += 18
+    elif bear_sweep_reject: scalp_pts -= 18
+
+    if smt_bias == 1: scalp_pts += 10
+    elif smt_bias == -1: scalp_pts -= 10
+
+    if cur_rvol < 0.60 and recent_whale_b == 0 and recent_whale_s == 0:
+        scalp_pts = int(round(scalp_pts * 0.55))
+
+    # Apply Anti-Trap Vetoes
+    if r_ask_abs > r_bid_abs and live_px <= float(last_c["open"]) and scalp_pts > 12:
+        scalp_pts = 8
+    elif r_bid_abs > r_ask_abs and live_px >= float(last_c["open"]) and scalp_pts < -12:
+        scalp_pts = -8
+
+    if range_location >= 0.85 and not bull_sweep_reject and (efficiency < 0.22 or r_ask_abs > 0 or near_ask_rest > near_bid_rest * 1.15) and scalp_pts > 12:
+        scalp_pts = 10
+    elif range_location <= 0.15 and not bear_sweep_reject and (efficiency < 0.22 or r_bid_abs > 0 or near_bid_rest > near_ask_rest * 1.15) and scalp_pts < -12:
+        scalp_pts = -10
+
+    # Exact 12-Parameter States (BULL / BEAR / NEU)
+    s_states = [
+        "BULL" if tot_exec_buy > tot_exec_sell * 1.10 else ("BEAR" if tot_exec_sell > tot_exec_buy * 1.10 else "NEU"),
+        "BULL" if (dom_pull_delta < -tf_avg_cell_vol * 0.3 and live_px >= float(last_c["open"])) else ("BEAR" if (dom_pull_delta > tf_avg_cell_vol * 0.3 and live_px <= float(last_c["open"])) else "NEU"),
+        "BULL" if r_bid_abs > r_ask_abs else ("BEAR" if r_ask_abs > r_bid_abs else "NEU"),
+        "BULL" if near_bid_rest > near_ask_rest * 1.25 else ("BEAR" if near_ask_rest > near_bid_rest * 1.25 else "NEU"),
+        "BULL" if last_delta > 0 else ("BEAR" if last_delta < 0 else "NEU"),
+        "BULL" if close_pos >= 0.60 else ("BEAR" if close_pos <= 0.40 else "NEU"),
+        "BULL" if recent_whale_b > recent_whale_s else ("BEAR" if recent_whale_s > recent_whale_b else "NEU"),
+        "BULL" if (vah is not None and live_px > float(vah)) else ("BEAR" if (val is not None and live_px < float(val)) else "NEU"),
+        "BULL" if (poc is not None and live_px > float(poc)) else ("BEAR" if (poc is not None and live_px < float(poc)) else "NEU"),
+        "BULL" if bull_sweep_reject else ("BEAR" if bear_sweep_reject else "NEU"),
+        "BULL" if smt_bias == 1 else ("BEAR" if smt_bias == -1 else "NEU"),
+        "BULL" if (cur_rvol >= 0.85 and live_px >= float(last_c["open"])) else ("BEAR" if (cur_rvol >= 0.85 and live_px < float(last_c["open"])) else "NEU"),
+    ]
+    s_bull = s_states.count("BULL")
+    s_bear = s_states.count("BEAR")
+    s_neu = s_states.count("NEU")
+
+    # 9. EXACT 10 INTRADAY PARAMETERS & SCORING (100% Match with Frontend)
+    intra_pts = net_macro
+    if macro_bid_abs > macro_ask_abs: intra_pts += 18
+    elif macro_ask_abs > macro_bid_abs: intra_pts -= 18
+    if smt_bias == 1: intra_pts += 14
+    elif smt_bias == -1: intra_pts -= 14
+
+    sess_pocs = [float(x["poc"]) for x in c_list[-15:] if x.get("poc") is not None]
+    avg_sess_poc = (sum(sess_pocs) / len(sess_pocs)) if sess_pocs else live_px
+    if live_px > avg_sess_poc + eff_step: intra_pts += 12
+    elif live_px < avg_sess_poc - eff_step: intra_pts -= 12
+
+    if near_bid_rest > near_ask_rest * 1.3: intra_pts += 8
+    elif near_ask_rest > near_bid_rest * 1.3: intra_pts -= 8
+
+    ub_hi_cnt = sum(1 for px, t in unfinished_levels if t == "UB-HIGH" and px > live_px)
+    ub_lo_cnt = sum(1 for px, t in unfinished_levels if t == "UB-LOW" and px < live_px)
+    npoc_above = sum(1 for px in naked_pocs if px > live_px)
+    npoc_below = sum(1 for px in naked_pocs if px < live_px)
+
+    i_states = [
+        "BULL" if tot_cvd > 0 else ("BEAR" if tot_cvd < 0 else "NEU"),
+        "BULL" if net_macro > 10 else ("BEAR" if net_macro < -10 else "NEU"),
+        "BULL" if macro_bid_abs > macro_ask_abs else ("BEAR" if macro_ask_abs > macro_bid_abs else "NEU"),
+        "BULL" if macro_pull_delta < 0 else ("BEAR" if macro_pull_delta > 0 else "NEU"),
+        "BULL" if macro_whale_b > macro_whale_s else ("BEAR" if macro_whale_s > macro_whale_b else "NEU"),
+        "BULL" if live_px > avg_sess_poc + eff_step else ("BEAR" if live_px < avg_sess_poc - eff_step else "NEU"),
+        "BULL" if ub_hi_cnt > ub_lo_cnt else ("BEAR" if ub_lo_cnt > ub_hi_cnt else "NEU"),
+        "BULL" if npoc_above > npoc_below else ("BEAR" if npoc_below > npoc_above else "NEU"),
+        "BULL" if near_bid_rest > near_ask_rest * 1.3 else ("BEAR" if near_ask_rest > near_bid_rest * 1.3 else "NEU"),
+        "BULL" if smt_bias == 1 else ("BEAR" if smt_bias == -1 else "NEU"),
+    ]
+    i_bull = i_states.count("BULL")
+    i_bear = i_states.count("BEAR")
+    i_neu = i_states.count("NEU")
+
+    # Closed-candle confirmation check (prevents mid-candle 2-second fake spike entries!)
+    candle_age_sec = (now_ms() - int(last_c["start"])) / 1000.0
+    prev_bull_ok = float(prev_c["close"]) >= float(prev_c["open"]) or float(prev_c.get("delta", 0)) > 0 or bull_sweep_reject
+    prev_bear_ok = float(prev_c["close"]) <= float(prev_c["open"]) or float(prev_c.get("delta", 0)) < 0 or bear_sweep_reject
 
     return {
         "live_px": live_px,
         "high": float(last_c["high"]),
         "low": float(last_c["low"]),
         "open": float(last_c["open"]),
-        " prev_lo": float(c_list[-2]["low"]),
-        "prev_hi": float(c_list[-2]["high"]),
+        "prev_lo": float(prev_c["low"]),
+        "prev_hi": float(prev_c["high"]),
         "lowest_bid_abs_px": lowest_bid_abs_px,
         "highest_ask_abs_px": highest_ask_abs_px,
-        "step": step,
-        "rvol": rvol,
-        "s_pts": s_pts, "s_bull": s_bull, "s_bear": s_bear,
-        "i_pts": i_pts, "i_bull": i_bull, "i_bear": i_bear,
+        "step": raw_step,
+        "eff_step": eff_step,
+        "rvol": cur_rvol,
+        "efficiency": efficiency,
+        "range_location": range_location,
+        "candle_age_sec": candle_age_sec,
+        "prev_bull_ok": prev_bull_ok,
+        "prev_bear_ok": prev_bear_ok,
+        "bull_sweep_reject": bull_sweep_reject,
+        "bear_sweep_reject": bear_sweep_reject,
+        "r_bid_abs": r_bid_abs,
+        "r_ask_abs": r_ask_abs,
+        "s_pts": scalp_pts, "s_bull": s_bull, "s_bear": s_bear, "s_neu": s_neu,
+        "i_pts": intra_pts, "i_bull": i_bull, "i_bear": i_bear, "i_neu": i_neu,
         "prev5_hi": prev5_hi, "prev5_lo": prev5_lo,
         "magnets": magnets,
     }
 
-def _check_book_sl_tp(book, sig):
+def _check_book_sl_tp(book, sig, mode="scalp"):
     act = book.get("active")
     if not act:
         return False
-    hi, lo = sig["high"], sig["low"]
-    exit_px, outcome = None, None
+    hi, lo, live_px = sig["high"], sig["low"], sig["live_px"]
+    entry_px = float(act["entry"])
+    init_risk = float(act.get("init_risk", abs(entry_px - float(act["sl"]))))
+    dec = 4 if sig["step"] < 0.01 else (2 if sig["step"] < 1 else 1)
 
+    # 1. AUTO-BREAKEVEN LOCK (+0.85R): Never let a winning trade turn back into a full SL!
+    if not act.get("be_locked") and init_risk > 0:
+        fee_buf = max(entry_px * 0.0009, sig["step"] * 2)
+        if act["side"] == "LONG" and hi >= (entry_px + init_risk * 0.85):
+            act["sl"] = round(entry_px + fee_buf, dec)
+            act["be_locked"] = True
+        elif act["side"] == "SHORT" and lo <= (entry_px - init_risk * 0.85):
+            act["sl"] = round(entry_px - fee_buf, dec)
+            act["be_locked"] = True
+
+    exit_px, outcome = None, None
     if act["side"] == "LONG":
-        if lo <= act["sl"]: exit_px, outcome = act["sl"], "SL HIT ❌"
-        elif hi >= act["tp"]: exit_px, outcome = act["tp"], f"TP HIT ({act.get('tp_tag', 'TARGET')}) ✅"
+        if lo <= act["sl"]:
+            exit_px = act["sl"]
+            outcome = "BE+ LOCK 🔒" if act.get("be_locked") else "SL HIT ❌"
+        elif hi >= act["tp"]:
+            exit_px = act["tp"]
+            outcome = f"TP HIT ({act.get('tp_tag', 'TARGET')}) ✅"
     else:
-        if hi >= act["sl"]: exit_px, outcome = act["sl"], "SL HIT ❌"
-        elif lo <= act["tp"]: exit_px, outcome = act["tp"], f"TP HIT ({act.get('tp_tag', 'TARGET')}) ✅"
+        if hi >= act["sl"]:
+            exit_px = act["sl"]
+            outcome = "BE+ LOCK 🔒" if act.get("be_locked") else "SL HIT ❌"
+        elif lo <= act["tp"]:
+            exit_px = act["tp"]
+            outcome = f"TP HIT ({act.get('tp_tag', 'TARGET')}) ✅"
+
+    # 2. ORDERFLOW FLIP / TIME-STOP GUARD: Don't stay stuck for 4 hours if orderflow reverses!
+    age_mins = (time.time() - float(act.get("opened_ts", time.time()))) / 60.0
+    max_mins = 50 if mode == "scalp" else 180
+    if exit_px is None and age_mins >= max_mins:
+        if (act["side"] == "LONG" and sig["s_pts"] <= -25) or (act["side"] == "SHORT" and sig["s_pts"] >= 25):
+            exit_px = live_px
+            outcome = "FLOW-FLIP EXIT 🔄"
 
     if exit_px is None:
         return False
 
     notional = float(act["margin"]) * float(act["leverage"])
-    pct = ((exit_px - act["entry"]) / act["entry"]) if act["side"] == "LONG" else ((act["entry"] - exit_px) / act["entry"])
+    pct = ((exit_px - entry_px) / entry_px) if act["side"] == "LONG" else ((entry_px - exit_px) / entry_px)
     net_pnl = (notional * pct) - (notional * 0.0007)
 
     book["balance"] = round(max(0.0, float(book["balance"]) + net_pnl), 3)
@@ -4571,7 +4855,7 @@ def _check_book_sl_tp(book, sig):
     book["history"].insert(0, {
         "time": time.strftime("%H:%M:%S", time.gmtime(time.time() + 19800)),
         "symbol": act["symbol"], "tf": act["tf"], "side": act["side"],
-        "entry": act["entry"], "exit": exit_px,
+        "entry": act["entry"], "exit": round(exit_px, dec),
         "outcome": outcome, "pnl": round(net_pnl, 3), "reason": act["reason"]
     })
     book["history"] = book["history"][:30]
@@ -4591,7 +4875,6 @@ def _paper_bot_worker():
                 tf_key = paper_bot_state.get("tf", "5m")
                 lev = int(paper_bot_state.get("leverage", 10))
 
-            # Anti-Sleep Self-Ping when BOT is ON so Render runs 24/7 even with PC turned off!
             if enabled and (time.time() - _last_self_ping > 480):
                 _last_self_ping = time.time()
                 ext_url = os.environ.get("RENDER_EXTERNAL_URL")
@@ -4610,75 +4893,94 @@ def _paper_bot_worker():
             dec = 4 if sig["step"] < 0.01 else (2 if sig["step"] < 1 else 1)
 
             with paper_bot_lock:
-                if _check_book_sl_tp(paper_bot_state["scalp"], sig):
+                if _check_book_sl_tp(paper_bot_state["scalp"], sig, "scalp"):
                     changed = True
-                if _check_book_sl_tp(paper_bot_state["intraday"], sig):
+                if _check_book_sl_tp(paper_bot_state["intraday"], sig, "intraday"):
                     changed = True
 
-                if enabled:
-                    # 1. SCALP AUTO-ENTRY (Max Risk Cap = 3.5% of Wallet i.e. ~$0.35 max loss per trade!)
+                if enabled and sig["candle_age_sec"] >= 35:
+                    # 1. SCALP AUTO-ENTRY (Full 12-Param Check + Anti-Chop + Baap-Beta Trend Alignment)
                     sb = paper_bot_state["scalp"]
-                    if not sb["active"] and sb["balance"] >= 1.0 and (now_s - sb.get("last_close", 0) > 20):
-                        s_long = sig["s_pts"] >= 44 and sig["s_bull"] >= 4 and sig["rvol"] >= 0.75 and sig["live_px"] >= sig["open"]
-                        s_short = sig["s_pts"] <= -44 and sig["s_bear"] >= 4 and sig["rvol"] >= 0.75 and sig["live_px"] <= sig["open"]
+                    if not sb["active"] and sb["balance"] >= 1.0 and (now_s - sb.get("last_close", 0) > 45):
+                        chop_ok_long = (sig["efficiency"] >= 0.17 and sig["range_location"] <= 0.82) or (sig["bull_sweep_reject"] and sig["r_bid_abs"] > 0)
+                        chop_ok_short = (sig["efficiency"] >= 0.17 and sig["range_location"] >= 0.18) or (sig["bear_sweep_reject"] and sig["r_ask_abs"] > 0)
+
+                        s_long = (
+                            sig["s_pts"] >= 46 and sig["s_bull"] >= 7 and (sig["s_bull"] - sig["s_bear"] >= 4)
+                            and sig["i_pts"] >= -8 and sig["rvol"] >= 0.80 and sig["live_px"] >= sig["open"]
+                            and sig["prev_bull_ok"] and chop_ok_long
+                        )
+                        s_short = (
+                            sig["s_pts"] <= -46 and sig["s_bear"] >= 7 and (sig["s_bear"] - sig["s_bull"] >= 4)
+                            and sig["i_pts"] <= 8 and sig["rvol"] >= 0.80 and sig["live_px"] <= sig["open"]
+                            and sig["prev_bear_ok"] and chop_ok_short
+                        )
+
                         if s_long or s_short:
                             side = "LONG" if s_long else "SHORT"
                             ep = sig["live_px"]
                             if side == "LONG":
-                                struct_floor = sig["lowest_bid_abs_px"] if sig["lowest_bid_abs_px"] else min(sig["low"], sig[" prev_lo"])
-                                raw_d = (ep - struct_floor) + sig["step"] * 3
+                                struct_fl = sig["lowest_bid_abs_px"] if sig["lowest_bid_abs_px"] else min(sig["low"], sig["prev_lo"])
+                                raw_d = (ep - struct_fl) + sig["eff_step"] * 1.5
                             else:
-                                struct_ceil = sig["highest_ask_abs_px"] if sig["highest_ask_abs_px"] else max(sig["high"], sig["prev_hi"])
-                                raw_d = (struct_ceil - ep) + sig["step"] * 3
+                                struct_cl = sig["highest_ask_abs_px"] if sig["highest_ask_abs_px"] else max(sig["high"], sig["prev_hi"])
+                                raw_d = (struct_cl - ep) + sig["eff_step"] * 1.5
 
-                            # Clamp SL between 0.12% and 0.35% of price so it's never too tight or too wide
-                            sl_d = max(ep * 0.0012, min(raw_d, ep * 0.0035))
+                            sl_d = max(ep * 0.0012, min(raw_d, ep * 0.0028))
                             sl = round(ep - sl_d if side == "LONG" else ep + sl_d, dec)
-                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 1.85, 3.6, sig["magnets"])
+                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 1.55, 2.6, sig["magnets"])
                             tp = round(tp_raw, dec)
 
-                            # Hard Risk Cap: Never lose more than 3.5% of balance ($0.35) on 1 SL hit!
                             sl_pct = sl_d / ep
-                            max_loss_usd = sb["balance"] * 0.035
+                            max_loss_usd = sb["balance"] * 0.032
                             safe_notional = min(sb["balance"] * lev, max_loss_usd / max(sl_pct, 0.0005))
                             eff_margin = round(safe_notional / lev, 2)
 
                             sb["active"] = {
                                 "symbol": sym, "tf": tf_key, "side": side,
                                 "entry": round(ep, dec), "sl": sl, "tp": tp, "tp_tag": tp_tag,
+                                "init_risk": sl_d, "be_locked": False, "opened_ts": now_s,
                                 "margin": eff_margin, "leverage": lev,
-                                "reason": f"Score:{sig['s_pts']} | 🟢{sig['s_bull']}v🔴{sig['s_bear']} | TP:{tp_tag}"
+                                "reason": f"Score:{sig['s_pts']} | 🟢{sig['s_bull']}🔴{sig['s_bear']}⚪{sig['s_neu']} | TP:{tp_tag}"
                             }
                             changed = True
 
-                    # 2. INTRADAY AUTO-ENTRY (Max Risk Cap = 5% of Wallet i.e. ~$0.50 max loss per trade!)
+                    # 2. INTRADAY AUTO-ENTRY (Full 10-Param Check + Macro Efficiency Filter)
                     ib = paper_bot_state["intraday"]
-                    if not ib["active"] and ib["balance"] >= 1.0 and (now_s - ib.get("last_close", 0) > 30):
-                        i_long = sig["i_pts"] >= 40 and sig["i_bull"] >= 3 and sig["s_pts"] >= 20 and sig["live_px"] >= sig["open"]
-                        i_short = sig["i_pts"] <= -40 and sig["i_bear"] >= 3 and sig["s_pts"] <= -20 and sig["live_px"] <= sig["open"]
+                    if not ib["active"] and ib["balance"] >= 1.0 and (now_s - ib.get("last_close", 0) > 60):
+                        i_long = (
+                            sig["i_pts"] >= 42 and sig["i_bull"] >= 6 and (sig["i_bull"] - sig["i_bear"] >= 3)
+                            and sig["s_pts"] >= 28 and sig["efficiency"] >= 0.18 and sig["range_location"] <= 0.85
+                            and sig["live_px"] >= sig["open"] and sig["prev_bull_ok"]
+                        )
+                        i_short = (
+                            sig["i_pts"] <= -42 and sig["i_bear"] >= 6 and (sig["i_bear"] - sig["i_bull"] >= 3)
+                            and sig["s_pts"] <= -28 and sig["efficiency"] >= 0.18 and sig["range_location"] >= 0.15
+                            and sig["live_px"] <= sig["open"] and sig["prev_bear_ok"]
+                        )
+
                         if i_long or i_short:
                             side = "LONG" if i_long else "SHORT"
                             ep = sig["live_px"]
                             sw_ref = min(sig["low"], sig["prev5_lo"]) if side == "LONG" else max(sig["high"], sig["prev5_hi"])
-                            raw_d = abs(ep - sw_ref) + sig["step"] * 5
+                            raw_d = abs(ep - sw_ref) + sig["eff_step"] * 2.0
 
-                            # Clamp Intraday SL between 0.22% and 0.55% of price
-                            sl_d = max(ep * 0.0022, min(raw_d, ep * 0.0055))
+                            sl_d = max(ep * 0.0020, min(raw_d, ep * 0.0045))
                             sl = round(ep - sl_d if side == "LONG" else ep + sl_d, dec)
-                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 2.2, 4.5, sig["magnets"])
+                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 1.9, 3.5, sig["magnets"])
                             tp = round(tp_raw, dec)
 
-                            # Hard Risk Cap: Never lose more than 5.0% of balance ($0.50) on 1 Intraday SL!
                             sl_pct = sl_d / ep
-                            max_loss_usd = ib["balance"] * 0.050
+                            max_loss_usd = ib["balance"] * 0.045
                             safe_notional = min(ib["balance"] * lev, max_loss_usd / max(sl_pct, 0.0005))
                             eff_margin = round(safe_notional / lev, 2)
 
                             ib["active"] = {
                                 "symbol": sym, "tf": tf_key, "side": side,
                                 "entry": round(ep, dec), "sl": sl, "tp": tp, "tp_tag": tp_tag,
+                                "init_risk": sl_d, "be_locked": False, "opened_ts": now_s,
                                 "margin": eff_margin, "leverage": lev,
-                                "reason": f"Intra:{sig['i_pts']} | Scalp:{sig['s_pts']} | TP:{tp_tag}"
+                                "reason": f"Intra:{sig['i_pts']} (🟢{sig['i_bull']}🔴{sig['i_bear']}⚪{sig['i_neu']}) | TP:{tp_tag}"
                             }
                             changed = True
 
