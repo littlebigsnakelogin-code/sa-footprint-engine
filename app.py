@@ -4604,13 +4604,11 @@ def _evaluate_server_orderflow(sym, tf_key):
             tot_pull_b += gl["bid_pulled"]
             tot_pull_a += gl["ask_pulled"]
 
-            b_pct = (gl["sell"] / gl["volume"]) * 100.0 if gl["volume"] > 0 else 0
-            a_pct = (gl["buy"] / gl["volume"]) * 100.0 if gl["volume"] > 0 else 0
-            churn = gl["volume"] >= tf_avg_cell_vol * 2.0 and b_pct >= 42 and a_pct >= 42
+            b_pct = (gl["sell"] / gl["volume"]) * 100.0 if gl["volume"] > 0 else 0.0
+            a_pct = (gl["buy"] / gl["volume"]) * 100.0 if gl["volume"] > 0 else 0.0
+            churn = gl["volume"] >= tf_avg_cell_vol * 2.0 and b_pct >= 42.0 and a_pct >= 42.0
 
-            if (gl["sell"] >= tf_avg_cell_vol * 1.3 and gl["sell"] > gl["buy"] * 1.8 and float(rc["close"]) >= gl["price"]):
-                (gl["sell"] >= tf_avg_cell_vol * 1.3 and gl["sell"] > gl["buy"] * 1.8 and float(rc["close"]) >= gl["price"]) or (churn and float(rc["close"]) > gl["price"] + eff_step * 0.5)
-            ):
+            if (gl["sell"] >= tf_avg_cell_vol * 1.3 and gl["sell"] > gl["buy"] * 1.8 and float(rc["close"]) >= gl["price"]) or (churn and float(rc["close"]) > gl["price"] + eff_step * 0.5):
                 r_bid_abs += 1
                 if lowest_bid_abs_px is None or gl["price"] < lowest_bid_abs_px:
                     lowest_bid_abs_px = gl["price"]
@@ -4622,8 +4620,10 @@ def _evaluate_server_orderflow(sym, tf_key):
 
             trd = max(gl["trades"], 1)
             if gl["volume"] >= tf_avg_cell_vol * 1.15 and ((gl["volume"] / trd) / base_lot) >= 2.8:
-                if gl["buy"] > gl["sell"]: recent_whale_b += 1
-                else: recent_whale_s += 1
+                if gl["buy"] > gl["sell"]:
+                    recent_whale_b += 1
+                else:
+                    recent_whale_s += 1
 
     dom_pull_delta = tot_pull_b - tot_pull_a
     c_range = max(float(last_c["high"]) - float(last_c["low"]), raw_step * 0.5)
