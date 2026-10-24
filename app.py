@@ -448,9 +448,8 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
                 d_cell["w_sell"] += quantity
             else:
                 d_cell["r_sell"] += quantity
-            # Check 3-tick cluster neighborhood so diagonal/cluster absorption is caught even if price shifts by 1-2 ticks!
-            c_sell_exec = sum(d_raw[round_price_to_step(price_level + k * step, step)]["w_sell"] + d_raw[round_price_to_step(price_level + k * step, step)]["r_sell"] for k in (-1, 0, 1))
-            c_peak_bid = sum(d_raw[round_price_to_step(price_level + k * step, step)]["peak_bid"] for k in (-1, 0, 1))
+            c_sell_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("w_sell", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("r_sell", 0.0) for k in (-1, 0, 1))
+            c_peak_bid = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_bid", 0.0) for k in (-1, 0, 1))
             if c_peak_bid > 0 and c_sell_exec > c_peak_bid * 1.10:
                 d_cell["iceberg_bid"] = max(d_cell["iceberg_bid"], (c_sell_exec - c_peak_bid) * 0.5)
         else:
@@ -458,8 +457,8 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
                 d_cell["w_buy"] += quantity
             else:
                 d_cell["r_buy"] += quantity
-            c_buy_exec = sum(d_raw[round_price_to_step(price_level + k * step, step)]["w_buy"] + d_raw[round_price_to_step(price_level + k * step, step)]["r_buy"] for k in (-1, 0, 1))
-            c_peak_ask = sum(d_raw[round_price_to_step(price_level + k * step, step)]["peak_ask"] for k in (-1, 0, 1))
+            c_buy_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("w_buy", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("r_buy", 0.0) for k in (-1, 0, 1))
+            c_peak_ask = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_ask", 0.0) for k in (-1, 0, 1))
             if c_peak_ask > 0 and c_buy_exec > c_peak_ask * 1.10:
                 d_cell["iceberg_ask"] = max(d_cell["iceberg_ask"], (c_buy_exec - c_peak_ask) * 0.5)
 
@@ -924,14 +923,12 @@ def apply_orderbook_event(symbol, event):
                 if d_cell is not None:
                     if is_bid:
                         d_cell["ms_bid_add"] += added_qty
-                        # Cluster Zone Iceberg Reload: Limit Bids reloading within 5 steps of live price where Sells hit!
-                        cluster_sells = sum(dom_raw[round_price_to_step(b_px + k * step, step)]["w_sell"] + dom_raw[round_price_to_step(b_px + k * step, step)]["r_sell"] for k in (-1, 0, 1))
+                        cluster_sells = sum((dom_raw.get(round_price_to_step(b_px + k * step, step)) or {}).get("w_sell", 0.0) + (dom_raw.get(round_price_to_step(b_px + k * step, step)) or {}).get("r_sell", 0.0) for k in (-1, 0, 1))
                         if cluster_sells >= min_track_qty * 0.45 and live_px is not None and abs(b_px - float(live_px)) <= step * 5.0:
                             d_cell["iceberg_bid"] += added_qty * 0.70
                     else:
                         d_cell["ms_ask_add"] += added_qty
-                        # Cluster Zone Iceberg Reload: Limit Asks reloading within 5 steps of live price where Buys hit!
-                        cluster_buys = sum(dom_raw[round_price_to_step(b_px + k * step, step)]["w_buy"] + dom_raw[round_price_to_step(b_px + k * step, step)]["r_buy"] for k in (-1, 0, 1))
+                        cluster_buys = sum((dom_raw.get(round_price_to_step(b_px + k * step, step)) or {}).get("w_buy", 0.0) + (dom_raw.get(round_price_to_step(b_px + k * step, step)) or {}).get("r_buy", 0.0) for k in (-1, 0, 1))
                         if cluster_buys >= min_track_qty * 0.45 and live_px is not None and abs(b_px - float(live_px)) <= step * 5.0:
                             d_cell["iceberg_ask"] += added_qty * 0.70
 
@@ -3581,763 +3578,635 @@ function drawAll() {
     }
 
     // =========================================================================
-    // MULTI-ROW CLUSTER DOM + DYNAMIC TIMEFRAME PRE-BREAKOUT PREDICTOR
+    // MULTI-ROW CLUSTER DOM + DYNAMIC TIMEFRAME PRE-BREAKOUT PREDICTOR (CRASH-PROOF)
     // =========================================================================
-    const domStep = effStep;
-    const bidsArr = obData.bids || [];
-    const asksArr = obData.asks || [];
-    const rawDomArr = obData.dom_raw || [];
-    const liveCenterP = Math.floor(lastC.close / domStep + 1e-9) * domStep;
+    try {
+        const domStep = Math.max(effStep || rawStep || 1.0, 1e-6);
+        const bidsArr = Array.isArray(obData.bids) ? obData.bids : [];
+        const asksArr = Array.isArray(obData.asks) ? obData.asks : [];
+        const rawDomArr = Array.isArray(obData.dom_raw) ? obData.dom_raw : [];
+        const liveCenterP = Math.floor(lastC.close / domStep + 1e-9) * domStep;
 
-    const bidMap = new Map();
-    const askMap = new Map();
-    bidsArr.forEach(b => {
-        const bp = Math.floor(b.price / domStep + 1e-9) * domStep;
-        const k = bp.toFixed(6);
-        bidMap.set(k, (bidMap.get(k) || 0) + b.quantity);
-    });
-    asksArr.forEach(a => {
-        const ap = Math.floor(a.price / domStep + 1e-9) * domStep;
-        const k = ap.toFixed(6);
-        askMap.set(k, (askMap.get(k) || 0) + a.quantity);
-    });
+        const bidMap = new Map();
+        const askMap = new Map();
+        bidsArr.forEach(b => {
+            if (!b || !Number.isFinite(b.price)) return;
+            const bp = Math.floor(b.price / domStep + 1e-9) * domStep;
+            const k = bp.toFixed(6);
+            bidMap.set(k, (bidMap.get(k) || 0) + (Number(b.quantity) || 0));
+        });
+        asksArr.forEach(a => {
+            if (!a || !Number.isFinite(a.price)) return;
+            const ap = Math.floor(a.price / domStep + 1e-9) * domStep;
+            const k = ap.toFixed(6);
+            askMap.set(k, (askMap.get(k) || 0) + (Number(a.quantity) || 0));
+        });
 
-    const rawDomCluster = new Map();
-    rawDomArr.forEach(d => {
-        const b = Math.floor(d.price / domStep + 1e-9) * domStep;
-        const k = b.toFixed(6);
-        let cur = rawDomCluster.get(k) || {
-            wBuy: 0, wSell: 0, rBuy: 0, rSell: 0,
-            flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0,
-            iceBid: 0, iceAsk: 0
-        };
-        cur.wBuy += (d.w_buy || 0);
-        cur.wSell += (d.w_sell || 0);
-        cur.rBuy += (d.r_buy || 0);
-        cur.rSell += (d.r_sell || 0);
-        cur.flashBp += (d.flash_bid_pull || 0);
-        cur.flashAp += (d.flash_ask_pull || 0);
-        cur.agedBp += (d.aged_bid_pull || 0);
-        cur.agedAp += (d.aged_ask_pull || 0);
-        cur.iceBid += (d.iceberg_bid || 0);
-        cur.iceAsk += (d.iceberg_ask || 0);
-        rawDomCluster.set(k, cur);
-    });
+        const rawDomCluster = new Map();
+        rawDomArr.forEach(d => {
+            if (!d || !Number.isFinite(d.price)) return;
+            const b = Math.floor(d.price / domStep + 1e-9) * domStep;
+            const k = b.toFixed(6);
+            let cur = rawDomCluster.get(k) || {
+                wBuy: 0, wSell: 0, rBuy: 0, rSell: 0,
+                flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0,
+                iceBid: 0, iceAsk: 0
+            };
+            cur.wBuy += (Number(d.w_buy) || 0);
+            cur.wSell += (Number(d.w_sell) || 0);
+            cur.rBuy += (Number(d.r_buy) || 0);
+            cur.rSell += (Number(d.r_sell) || 0);
+            cur.flashBp += (Number(d.flash_bid_pull) || 0);
+            cur.flashAp += (Number(d.flash_ask_pull) || 0);
+            cur.agedBp += (Number(d.aged_bid_pull) || 0);
+            cur.agedAp += (Number(d.aged_ask_pull) || 0);
+            cur.iceBid += (Number(d.iceberg_bid) || 0);
+            cur.iceAsk += (Number(d.iceberg_ask) || 0);
+            rawDomCluster.set(k, cur);
+        });
 
-    const domMagnetMap = new Map();
-    nakedPocs.forEach(np => {
-        const b = Math.floor(np.price / domStep + 1e-9) * domStep;
-        domMagnetMap.set(b.toFixed(6), { type: 'nPOC', lbl: '🟡nPOC' });
-    });
-    unfinishedLevels.forEach(ub => {
-        const b = Math.floor(ub.price / domStep + 1e-9) * domStep;
-        domMagnetMap.set(b.toFixed(6), { type: ub.type, lbl: ub.type === 'UB-HIGH' ? '🎯UB-HI' : '🎯UB-LO' });
-    });
+        const domMagnetMap = new Map();
+        nakedPocs.forEach(np => {
+            const b = Math.floor(np.price / domStep + 1e-9) * domStep;
+            domMagnetMap.set(b.toFixed(6), { type: 'nPOC', lbl: '🟡nPOC' });
+        });
+        unfinishedLevels.forEach(ub => {
+            const b = Math.floor(ub.price / domStep + 1e-9) * domStep;
+            domMagnetMap.set(b.toFixed(6), { type: ub.type, lbl: ub.type === 'UB-HIGH' ? '🎯UB-HI' : '🎯UB-LO' });
+        });
 
-    // Analyze Active Structure Cluster (Last 6 Candles of Selected Timeframe for Horizontal/Diagonal/Triangle/Arc Buildup)
-    const structSet = candles.slice(-6);
-    const stickyMap = new Map();
-    let minActivePrice = lastC.low;
-    let maxActivePrice = lastC.high;
-    let rBidAbs = 0, rAskAbs = 0;
+        const structSet = candles.slice(-6);
+        const stickyMap = new Map();
+        let minActivePrice = lastC.low;
+        let maxActivePrice = lastC.high;
+        let rBidAbs = 0, rAskAbs = 0;
 
-    const minInstCellFloor = (avgFlowVol / 12.0) * 0.85;
-    const effCellBench = Math.max(tfAvgCellVol, minInstCellFloor);
+        const minInstCellFloor = (avgFlowVol / 12.0) * 0.85;
+        const effCellBench = Math.max(tfAvgCellVol, minInstCellFloor);
 
-    // Recent 3-candle DOM execution map + 6-candle Multi-Swing Cluster Absorption count
-    structSet.forEach((rc, sIdx) => {
-        const isRecent3 = sIdx >= Math.max(0, structSet.length - 3);
-        if ( isRecent3 ) {
-            if (rc.low < minActivePrice) minActivePrice = rc.low;
-            if (rc.high > maxActivePrice) maxActivePrice = rc.high;
-        }
-        const rcRange = Math.max(rc.high - rc.low, rawStep * 0.5);
-        const rcClosePos = (rc.close - rc.low) / rcRange;
-        const lowerSwingZone = rc.low + rcRange * 0.45;
-        const upperSwingZone = rc.high - rcRange * 0.45;
-        const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
-
-        for (let i = 0; i < gList.length; i++) {
-            const gl = gList[i];
-            const k = gl.price.toFixed(6);
+        structSet.forEach((rc, sIdx) => {
+            const isRecent3 = sIdx >= Math.max(0, structSet.length - 3);
             if (isRecent3) {
-                let cur = stickyMap.get(k) || { buy: 0, sell: 0, wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, bp: 0, ap: 0 };
-                cur.buy += gl.buy;
-                cur.sell += gl.sell;
-                cur.wBuy += (gl.whale_buy || 0);
-                cur.wSell += (gl.whale_sell || 0);
-                cur.rBuy += (gl.retail_buy || 0);
-                cur.rSell += (gl.retail_sell || 0);
-                cur.bp += gl.bid_pulled;
-                cur.ap += gl.ask_pulled;
-                stickyMap.set(k, cur);
+                if (rc.low < minActivePrice) minActivePrice = rc.low;
+                if (rc.high > maxActivePrice) maxActivePrice = rc.high;
             }
+            const rcRange = Math.max(rc.high - rc.low, rawStep * 0.5);
+            const rcClosePos = (rc.close - rc.low) / rcRange;
+            const lowerSwingZone = rc.low + rcRange * 0.45;
+            const upperSwingZone = rc.high - rcRange * 0.45;
+            const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
 
-            // 3-Row Sliding Cluster Sum (Captures multi-tick cluster stopping along horizontal/diagonal/curved boundaries)
-            let clusSell = gl.sell || 0, clusBuy = gl.buy || 0;
-            if (i > 0 && Math.abs(gList[i - 1].price - gl.price) <= domStep * 1.5) {
-                clusSell += (gList[i - 1].sell || 0);
-                clusBuy += (gList[i - 1].buy || 0);
-            }
-            if (i + 1 < gList.length && Math.abs(gList[i + 1].price - gl.price) <= domStep * 1.5) {
-                clusSell += (gList[i + 1].sell || 0);
-                clusBuy += (gList[i + 1].buy || 0);
-            }
-            const clusTot = clusSell + clusBuy;
-            const clusBPct = clusTot > 0 ? (clusSell / clusTot) * 100 : 0;
-            const clusAPct = clusTot > 0 ? (clusBuy / clusTot) * 100 : 0;
-            const isChurn = clusTot >= effCellBench * 2.1 && clusBPct >= 42 && clusAPct >= 42;
-            const bRestHere = bidMap.get(k) || 0;
-            const aRestHere = askMap.get(k) || 0;
-            const rawD = rawDomCluster.get(k);
+            for (let i = 0; i < gList.length; i++) {
+                const gl = gList[i];
+                const k = gl.price.toFixed(6);
+                if (isRecent3) {
+                    let cur = stickyMap.get(k) || { buy: 0, sell: 0, wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, bp: 0, ap: 0 };
+                    cur.buy += gl.buy;
+                    cur.sell += gl.sell;
+                    cur.wBuy += (gl.whale_buy || 0);
+                    cur.wSell += (gl.whale_sell || 0);
+                    cur.rBuy += (gl.retail_buy || 0);
+                    cur.rSell += (gl.retail_sell || 0);
+                    cur.bp += gl.bid_pulled;
+                    cur.ap += gl.ask_pulled;
+                    stickyMap.set(k, cur);
+                }
 
-            const bidRotatedUp = (rc.close >= rc.open || rcClosePos >= 0.45) && (rc.close > gl.price + domStep * 0.4);
-            const askRotatedDn = (rc.close <= rc.open || rcClosePos <= 0.55) && (rc.close < gl.price - domStep * 0.4);
+                let clusSell = gl.sell || 0, clusBuy = gl.buy || 0;
+                if (i > 0 && Math.abs(gList[i - 1].price - gl.price) <= domStep * 1.5) {
+                    clusSell += (gList[i - 1].sell || 0);
+                    clusBuy += (gList[i - 1].buy || 0);
+                }
+                if (i + 1 < gList.length && Math.abs(gList[i + 1].price - gl.price) <= domStep * 1.5) {
+                    clusSell += (gList[i + 1].sell || 0);
+                    clusBuy += (gList[i + 1].buy || 0);
+                }
+                const clusTot = clusSell + clusBuy;
+                const clusBPct = clusTot > 0 ? (clusSell / clusTot) * 100 : 0;
+                const clusAPct = clusTot > 0 ? (clusBuy / clusTot) * 100 : 0;
+                const isChurn = clusTot >= effCellBench * 2.1 && clusBPct >= 42 && clusAPct >= 42;
+                const bRestHere = bidMap.get(k) || 0;
+                const aRestHere = askMap.get(k) || 0;
+                const rawD = rawDomCluster.get(k);
 
-            const isBidClusterAbs = gl.price <= lowerSwingZone && bidRotatedUp && (
-                (clusSell >= effCellBench * 1.6 && clusBPct >= 58 && gl.sell >= effCellBench * 0.7)
-                || isChurn
-                || (gl.sell >= effCellBench * 1.0 && bRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
-                || (rawD && rawD.iceBid >= effCellBench * 0.5)
-            );
+                const bidRotatedUp = (rc.close >= rc.open || rcClosePos >= 0.45) && (rc.close > gl.price + domStep * 0.4);
+                const askRotatedDn = (rc.close <= rc.open || rcClosePos <= 0.55) && (rc.close < gl.price - domStep * 0.4);
 
-            const isAskClusterAbs = gl.price >= upperSwingZone && askRotatedDn && (
-                (clusBuy >= effCellBench * 1.6 && clusAPct >= 58 && gl.buy >= effCellBench * 0.7)
-                || isChurn
-                || (gl.buy >= effCellBench * 1.0 && aRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
-                || (rawD && rawD.iceAsk >= effCellBench * 0.5)
-            );
+                const isBidClusterAbs = gl.price <= lowerSwingZone && bidRotatedUp && (
+                    (clusSell >= effCellBench * 1.6 && clusBPct >= 58 && gl.sell >= effCellBench * 0.7)
+                    || isChurn
+                    || (gl.sell >= effCellBench * 1.0 && bRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
+                    || (rawD && rawD.iceBid >= effCellBench * 0.5)
+                );
 
-            if (isBidClusterAbs) rBidAbs++;
-            if (isAskClusterAbs) rAskAbs++;
-        }
-    });
+                const isAskClusterAbs = gl.price >= upperSwingZone && askRotatedDn && (
+                    (clusBuy >= effCellBench * 1.6 && clusAPct >= 58 && gl.buy >= effCellBench * 0.7)
+                    || isChurn
+                    || (gl.buy >= effCellBench * 1.0 && aRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
+                    || (rawD && rawD.iceAsk >= effCellBench * 0.5)
+                );
 
-    const minVisibleBucket = Math.floor((minActivePrice - domStep * 5) / domStep) * domStep;
-    const maxVisibleBucket = Math.ceil((maxActivePrice + domStep * 5) / domStep) * domStep;
-
-    const activeDomRows = [];
-    for (let p = maxVisibleBucket; p >= minVisibleBucket; p -= domStep) {
-        const k = p.toFixed(6);
-        const bRest = bidMap.get(k) || 0;
-        const aRest = askMap.get(k) || 0;
-        const st = stickyMap.get(k) || { buy: 0, sell: 0, wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, bp: 0, ap: 0 };
-        const rawD = rawDomCluster.get(k) || { wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0, iceBid: 0, iceAsk: 0 };
-        const mag = domMagnetMap.get(k) || null;
-        const distTicks = Math.round(Math.abs(p - liveCenterP) / domStep);
-
-        const totRawBp = Math.max(st.bp, rawD.agedBp) + rawD.flashBp;
-        const totRawAp = Math.max(st.ap, rawD.agedAp) + rawD.flashAp;
-
-        if (st.buy > 0 || st.sell > 0 || totRawBp > 0 || totRawAp > 0 || mag !== null || distTicks <= 5 || ((bRest > 0 || aRest > 0) && distTicks <= 15)) {
-            activeDomRows.push({ p, k, bRest, aRest, st, rawD, totRawBp, totRawAp, mag });
-        }
-    }
-
-    let maxRowVal = 1;
-    let totExecBuy = 0, totExecSell = 0, totPullB = 0, totPullA = 0;
-    let totFlashPullB = 0, totFlashPullA = 0, totIceBid = 0, totIceAsk = 0;
-    let totWhaleBuy = 0, totWhaleSell = 0, totRetailBuy = 0, totRetailSell = 0;
-    let nearBidRest = 0, nearAskRest = 0;
-
-    activeDomRows.forEach(r => {
-        totExecBuy += r.st.buy;
-        totExecSell += r.st.sell;
-        totWhaleBuy += Math.max(r.st.wBuy, r.rawD.wBuy);
-        totWhaleSell += Math.max(r.st.wSell, r.rawD.wSell);
-        totRetailBuy += Math.max(r.st.rBuy, r.rawD.rBuy);
-        totRetailSell += Math.max(r.st.rSell, r.rawD.rSell);
-        totPullB += r.totRawBp;
-        totPullA += r.totRawAp;
-        totFlashPullB += r.rawD.flashBp;
-        totFlashPullA += r.rawD.flashAp;
-        totIceBid += r.rawD.iceBid;
-        totIceAsk += r.rawD.iceAsk;
-
-        if (r.p <= liveCenterP && r.p >= liveCenterP - domStep * 8) nearBidRest += r.bRest;
-        if (r.p >= liveCenterP && r.p <= liveCenterP + domStep * 8) nearAskRest += r.aRest;
-        maxRowVal = Math.max(maxRowVal, r.st.buy, r.st.sell, r.totRawBp, r.totRawAp, r.bRest, r.aRest);
-    });
-
-    const domPullDelta = totPullB - totPullA;
-    const curRvol = (lastC.volume || 0) / avgFlowVol;
-    const cRange = Math.max(lastC.high - lastC.low, rawStep * 0.5);
-    const closePos = (lastC.close - lastC.low) / cRange;
-    const bodySize = Math.abs(lastC.close - lastC.open);
-    const upperWick = lastC.high - Math.max(lastC.open, lastC.close);
-    const lowerWick = Math.min(lastC.open, lastC.close) - lastC.low;
-    const prevC = candles.length >= 2 ? candles[candles.length - 2] : lastC;
-    const prevPoc = prevC.poc != null ? prevC.poc : (prevC.high + prevC.low) * 0.5;
-    const curPoc = lastC.poc != null ? lastC.poc : (lastC.high + lastC.low) * 0.5;
-
-    let sPocUp = 0, sPocDn = 0, hhCount = 0, llCount = 0;
-    const last4 = candles.slice(-4);
-    for (let m = 1; m < last4.length; m++) {
-        if (last4[m].poc != null && last4[m - 1].poc != null) {
-            if (last4[m].poc > last4[m - 1].poc) sPocUp++;
-            else if (last4[m].poc < last4[m - 1].poc) sPocDn++;
-        }
-        if (last4[m].high > last4[m - 1].high && last4[m].low >= last4[m - 1].low) hhCount++;
-        if (last4[m].low < last4[m - 1].low && last4[m].high <= last4[m - 1].high) llCount++;
-    }
-
-    let prev5High = -Infinity, prev5Low = Infinity;
-    for (let k = Math.max(0, candles.length - 6); k < candles.length - 1; k++) {
-        if (candles[k].high > prev5High) prev5High = candles[k].high;
-        if (candles[k].low < prev5Low) prev5Low = candles[k].low;
-    }
-
-    // =========================================================================
-    // 4-SCENARIO CLUSTER & BOUNDARY MACHINE DECODER (Buildup vs Sweep vs Breakout)
-    // =========================================================================
-    // Scenario 1: Fakeout Liquidity Sweep at Cluster Boundary (Pokes out, Retail trapped, Absorbed & Reversing)
-    const bullSweepReject = lastC.low < prev5Low && lastC.close > prev5Low && (closePos >= 0.50 || rBidAbs > 0 || totIceBid > 0);
-    const bearSweepReject = lastC.high > prev5High && lastC.close < prev5High && (closePos <= 0.50 || rAskAbs > 0 || totIceAsk > 0);
-
-    // Scenario 2: Genuine Breakout Expansion (Breaks boundary/POC with Whale Drive + Opposite Wall Pulled)
-    const instBullDrive = (totExecBuy > totExecSell * 1.15 || totWhaleBuy > totWhaleSell * 1.20)
-        && lastC.close > lastC.open && closePos >= 0.58 && lastC.close >= curPoc && !bearSweepReject;
-
-    const instBearDrive = (totExecSell > totExecBuy * 1.15 || totWhaleSell > totWhaleBuy * 1.20)
-        && lastC.close < lastC.open && closePos <= 0.42 && lastC.close <= curPoc && !bullSweepReject;
-
-    // Scenario 3: Inside-Cluster Accumulation vs Distribution (Before Breakout!)
-    const clusterLongBuildup = (
-        (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25)
-        && (totWhaleBuy >= totWhaleSell || domPullDelta < -effCellBench * 0.25 || nearBidRest > nearAskRest * 1.25)
-    );
-    const clusterShortBuildup = (
-        (rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25)
-        && (totWhaleSell >= totWhaleBuy || domPullDelta > effCellBench * 0.25 || nearAskRest > nearBidRest * 1.25)
-    );
-
-    // Scenario 4: Silent Cluster Absorption Stopping Retail Momentum
-    const retailBuysTrapped = !instBullDrive && (
-        bearSweepReject
-        || (totRetailBuy > totWhaleBuy * 1.15 && (totIceAsk > effCellBench * 0.35 || rAskAbs > rBidAbs) && closePos <= 0.52)
-        || (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.44)
-        || (prevC.delta > effCellBench * 0.35 && lastC.close < prevPoc - domStep * 0.5 && lastC.close < lastC.open)
-    );
-
-    const retailSellsTrapped = !instBearDrive && (
-        bullSweepReject
-        || (totRetailSell > totWhaleSell * 1.15 && (totIceBid > effCellBench * 0.35 || rBidAbs > rAskAbs) && closePos >= 0.48)
-        || (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.56)
-        || (prevC.delta < -effCellBench * 0.35 && lastC.close > prevPoc + domStep * 0.5 && lastC.close > lastC.open)
-    );
-
-    let battleWinner = `⚖️ [${tf.toUpperCase()}] TWO-WAY CLUSTER FIGHT (MONITORING BUILDUP)`;
-    let bwCol = '#ffd700';
-    if (bullSweepReject) {
-        battleWinner = `🎯 [${tf.toUpperCase()}] SSL FAKEOUT SWEEP + BID CLUSTER ABSORBED ➔ LONG REVERSAL!`;
-        bwCol = '#00e5ff';
-    } else if (bearSweepReject) {
-        battleWinner = `🎯 [${tf.toUpperCase()}] BSL FAKEOUT SWEEP + ASK CLUSTER ABSORBED ➔ SHORT REVERSAL!`;
-        bwCol = '#ff9100';
-    } else if (instBullDrive) {
-        battleWinner = `🚀 [${tf.toUpperCase()}] GENUINE BULL BREAKOUT (🐋W.Buy:${fmt(totWhaleBuy)} + AskPulled:${fmt(totPullA)})`;
-        bwCol = '#00e676';
-    } else if (instBearDrive) {
-        battleWinner = `🚀 [${tf.toUpperCase()}] GENUINE BEAR BREAKDOWN (🐋W.Sell:${fmt(totWhaleSell)} + BidPulled:${fmt(totPullB)})`;
-        bwCol = '#ff1744';
-    } else if (clusterLongBuildup || retailSellsTrapped) {
-        battleWinner = `🏦 [${tf.toUpperCase()}] CLUSTER LONG ACCUMULATION (BidAbs:${rBidAbs} 🧊Ice:${fmt(totIceBid)}) ➔ UP PROB HIGH`;
-        bwCol = '#00e5ff';
-    } else if (clusterShortBuildup || retailBuysTrapped) {
-        battleWinner = `🏦 [${tf.toUpperCase()}] CLUSTER SHORT DISTRIBUTION (AskAbs:${rAskAbs} 🧊Ice:${fmt(totIceAsk)}) ➔ DN PROB HIGH`;
-        bwCol = '#ff9100';
-    }
-
-    let recentWhaleB = 0, recentWhaleS = 0;
-    candles.slice(-3).forEach(rc => {
-        const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
-        gList.forEach(gl => {
-            const trd = Math.max(gl.trades || 1, 1);
-            const hasTickW = (gl.whale_buy || 0) + (gl.whale_sell || 0) > 0;
-            if (hasTickW || (gl.volume >= effCellBench * 1.20 && ((gl.volume / trd) / baselineLotSize) >= 2.8)) {
-                if ((gl.whale_buy || gl.buy) > (gl.whale_sell || gl.sell) && rc.close >= gl.price - domStep * 0.5) recentWhaleB++;
-                else if ((gl.whale_sell || gl.sell) >= (gl.whale_buy || gl.buy) && rc.close <= gl.price + domStep * 0.5) recentWhaleS++;
+                if (isBidClusterAbs) rBidAbs++;
+                if (isAskClusterAbs) rAskAbs++;
             }
         });
-    });
 
-    const recent20 = candles.slice(-20);
-    const r20Hi = Math.max(...recent20.map(x => x.high));
-    const r20Lo = Math.min(...recent20.map(x => x.low));
-    const r20Span = Math.max(r20Hi - r20Lo, rawStep);
-    const rangeLocation = (lastC.close - r20Lo) / r20Span;
+        // Clamp visible DOM bucket span to max 160 rows so loop never freezes on huge candle ranges!
+        const rawMinB = Math.floor((minActivePrice - domStep * 5) / domStep) * domStep;
+        const rawMaxB = Math.ceil((maxActivePrice + domStep * 5) / domStep) * domStep;
+        const maxSpanSteps = domStep * 80;
+        const minVisibleBucket = Math.max(rawMinB, liveCenterP - maxSpanSteps);
+        const maxVisibleBucket = Math.min(rawMaxB, liveCenterP + maxSpanSteps);
 
-    // --- A. 12-PARAMETER DYNAMIC TIMEFRAME SCALP & CLUSTER SCORING MATRIX ---
-    let scalpPts = 0;
-    let scalpFactors = [];
+        const activeDomRows = [];
+        for (let p = maxVisibleBucket; p >= minVisibleBucket; p -= domStep) {
+            const k = p.toFixed(6);
+            const bRest = bidMap.get(k) || 0;
+            const aRest = askMap.get(k) || 0;
+            const st = stickyMap.get(k) || { buy: 0, sell: 0, wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, bp: 0, ap: 0 };
+            const rawD = rawDomCluster.get(k) || { wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0, iceBid: 0, iceAsk: 0 };
+            const mag = domMagnetMap.get(k) || null;
+            const distTicks = Math.round(Math.abs(p - liveCenterP) / domStep);
 
-    // 1. Cluster Buildup / Breakout / Trap Core
-    if (instBullDrive) {
-        scalpPts += 28;
-        scalpFactors.push('TrueBullBreak');
-    } else if (instBearDrive) {
-        scalpPts -= 28;
-        scalpFactors.push('TrueBearBreak');
-    } else if (retailBuysTrapped || clusterShortBuildup) {
-        scalpPts -= 25;
-        scalpFactors.push('ClusterShortBuildup');
-    } else if (retailSellsTrapped || clusterLongBuildup) {
-        scalpPts += 25;
-        scalpFactors.push('ClusterLongBuildup');
-    }
+            const totRawBp = Math.max(st.bp, rawD.agedBp) + rawD.flashBp;
+            const totRawAp = Math.max(st.ap, rawD.agedAp) + rawD.flashAp;
 
-    // 2. Multi-Swing Cluster & Raw DOM Iceberg Absorption
-    if ((rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) && !instBearDrive) {
-        scalpPts += Math.min(24, 14 + (rBidAbs - rAskAbs) * 4);
-        scalpFactors.push(`ClusterBidAbs(${rBidAbs}v${rAskAbs})`);
-    } else if ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) && !instBullDrive) {
-        scalpPts -= Math.min(24, 14 + (rAskAbs - rBidAbs) * 4);
-        scalpFactors.push(`ClusterAskAbs(${rAskAbs}v${rBidAbs})`);
-    }
-
-    // 3. Raw Flash + 10s Aged Spoof Pulling Delta
-    if (domPullDelta < -effCellBench * 0.28) {
-        scalpPts += 18;
-        scalpFactors.push(`AskWallPulled(PΔ${fmt(domPullDelta)})`);
-    } else if (domPullDelta > effCellBench * 0.28) {
-        scalpPts -= 18;
-        scalpFactors.push(`BidWallPulled(PΔ+${fmt(domPullDelta)})`);
-    }
-
-    // 4. 8-Step Cluster Resting Book Density
-    const minBookFloor = effCellBench * 1.3;
-    if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) {
-        scalpPts += 12;
-        scalpFactors.push(`BidBookCluster(${fmt(nearBidRest)}v${fmt(nearAskRest)})`);
-    } else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) {
-        scalpPts -= 12;
-        scalpFactors.push(`AskBookCluster(${fmt(nearAskRest)}v${fmt(nearBidRest)})`);
-    }
-
-    // 5. Delta Displacement vs Cluster Stuffing
-    let deltaState = 'NEU';
-    if (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.44) {
-        scalpPts -= 18;
-        deltaState = 'BEAR';
-        scalpFactors.push('+ΔStuffedInAskCluster');
-    } else if (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.56) {
-        scalpPts += 18;
-        deltaState = 'BULL';
-        scalpFactors.push('-ΔAbsorbedInBidCluster');
-    } else if (lastC.delta > effCellBench * 0.30 && lastC.close > lastC.open && closePos >= 0.56) {
-        scalpPts += 15;
-        deltaState = 'BULL';
-    } else if (lastC.delta < -effCellBench * 0.30 && lastC.close < lastC.open && closePos <= 0.44) {
-        scalpPts -= 15;
-        deltaState = 'BEAR';
-    }
-
-    // 6. Tick-Separated Whale vs Retail Execution Flow
-    let whaleVsRetailState = 'NEU';
-    if ((totWhaleBuy > totWhaleSell * 1.20 || recentWhaleB > recentWhaleS) && !instBearDrive) {
-        scalpPts += 18;
-        whaleVsRetailState = 'BULL';
-        scalpFactors.push(`🐋WhaleBuy(${fmt(totWhaleBuy)}v${fmt(totWhaleSell)})`);
-    } else if ((totWhaleSell > totWhaleBuy * 1.20 || recentWhaleS > recentWhaleB) && !instBullDrive) {
-        scalpPts -= 18;
-        whaleVsRetailState = 'BEAR';
-        scalpFactors.push(`🐋WhaleSell(${fmt(totWhaleSell)}v${fmt(totWhaleBuy)})`);
-    }
-
-    // 7. Cluster POC Control
-    let locState = 'NEU';
-    if (lastC.close > curPoc && (lastC.close >= prevPoc || clusterLongBuildup)) {
-        scalpPts += 14;
-        locState = 'BULL';
-    } else if (lastC.close < curPoc && (lastC.close <= prevPoc || clusterShortBuildup)) {
-        scalpPts -= 14;
-        locState = 'BEAR';
-    }
-
-    // 8. Boundary Fakeout Sweep Reversal
-    if (bullSweepReject) { scalpPts += 22; scalpFactors.push('SSL-FakeoutSweep'); }
-    else if (bearSweepReject) { scalpPts -= 22; scalpFactors.push('BSL-FakeoutSweep'); }
-
-    // 9. 4-Candle POC Migration
-    if (sPocUp > sPocDn) scalpPts += 12;
-    else if (sPocDn > sPocUp) scalpPts -= 12;
-
-    // 10. SMT Divergence Radar
-    if (smtState.bias === 1) scalpPts += 10;
-    else if (smtState.bias === -1) scalpPts -= 10;
-
-    // Anti-Knife Veto: Only veto if there is NO cluster absorption/sweep and price is free-falling below POCs
-    if (instBearDrive && lastC.close < curPoc && lastC.close < prevPoc && !bullSweepReject && scalpPts > 0) {
-        scalpPts = -22;
-    } else if (instBullDrive && lastC.close > curPoc && lastC.close > prevPoc && !bearSweepReject && scalpPts < 0) {
-        scalpPts = 22;
-    }
-
-    const scalpProb = Math.min(96, Math.round(50 + (Math.abs(scalpPts) / 110) * 46));
-    let scalpFinalTxt = `⚪ ${tf.toUpperCase()} EQUILIBRIUM`;
-    let scalpFinalCol = '#ffca28';
-    if (scalpPts >= 48) { scalpFinalTxt = `🟢 STRONG LONG (${scalpProb}%)`; scalpFinalCol = '#00e676'; }
-    else if (scalpPts >= 24) { scalpFinalTxt = `🟢 LONG BUILDUP (${scalpProb}%)`; scalpFinalCol = '#69f0ae'; }
-    else if (scalpPts >= 12) { scalpFinalTxt = `🟡 LEAN LONG (${scalpProb}%)`; scalpFinalCol = '#00e5ff'; }
-    else if (scalpPts <= -48) { scalpFinalTxt = `🔴 STRONG SHORT (${scalpProb}%)`; scalpFinalCol = '#ff1744'; }
-    else if (scalpPts <= -24) { scalpFinalTxt = `🔴 SHORT BUILDUP (${scalpProb}%)`; scalpFinalCol = '#ff5252'; }
-    else if (scalpPts <= -12) { scalpFinalTxt = `🟠 LEAN SHORT (${scalpProb}%)`; scalpFinalCol = '#ff9100'; }
-
-    // --- B. INTRADAY / STRUCTURE 10-PARAMETER SCORING MATRIX (DYNAMIC TO SELECTED TF) ---
-    let intraPts = macroInfo ? macroInfo.netMacro : 0;
-    if (macroInfo) {
-        if (sPocUp > sPocDn) intraPts += 14;
-        else if (sPocDn > sPocUp) intraPts -= 14;
-
-        if (smtState.bias === 1) intraPts += 12;
-        else if (smtState.bias === -1) intraPts -= 12;
-
-        const sessionPocs = candles.slice(-15).map(x => x.poc).filter(x => x != null);
-        if (sessionPocs.length > 0) {
-            const avgSessionPoc = sessionPocs.reduce((a, b) => a + b, 0) / sessionPocs.length;
-            if (lastC.close > avgSessionPoc + domStep) intraPts += 12;
-            else if (lastC.close < avgSessionPoc - domStep) intraPts -= 12;
+            if (st.buy > 0 || st.sell > 0 || totRawBp > 0 || totRawAp > 0 || mag !== null || distTicks <= 6 || ((bRest > 0 || aRest > 0) && distTicks <= 16)) {
+                activeDomRows.push({ p, k, bRest, aRest, st, rawD, totRawBp, totRawAp, mag });
+            }
         }
 
-        if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) intraPts += 10;
-        else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) intraPts -= 10;
-    }
+        let maxRowVal = 1;
+        let totExecBuy = 0, totExecSell = 0, totPullB = 0, totPullA = 0;
+        let totFlashPullB = 0, totFlashPullA = 0, totIceBid = 0, totIceAsk = 0;
+        let totWhaleBuy = 0, totWhaleSell = 0, totRetailBuy = 0, totRetailSell = 0;
+        let nearBidRest = 0, nearAskRest = 0;
 
-    const intraProb = Math.min(96, Math.round(50 + (Math.abs(intraPts) / 110) * 46));
-    let intraFinalTxt = `⚪ ${tf.toUpperCase()} BALANCED`;
-    let intraFinalCol = '#ffca28';
-    if (intraPts >= 48) { intraFinalTxt = `🟢 STRONG LONG (${intraProb}%)`; intraFinalCol = '#00e676'; }
-    else if (intraPts >= 24) { intraFinalTxt = `🟢 ACCUMULATING LONG (${intraProb}%)`; intraFinalCol = '#69f0ae'; }
-    else if (intraPts >= 12) { intraFinalTxt = `🟡 LEAN LONG (${intraProb}%)`; intraFinalCol = '#00e5ff'; }
-    else if (intraPts <= -48) { intraFinalTxt = `🔴 STRONG SHORT (${intraProb}%)`; intraFinalCol = '#ff1744'; }
-    else if (intraPts <= -24) { intraFinalTxt = `🔴 DISTRIBUTING SHORT (${intraProb}%)`; intraFinalCol = '#ff5252'; }
-    else if (intraPts <= -12) { intraFinalTxt = `🟠 LEAN SHORT (${intraProb}%)`; intraFinalCol = '#ff9100'; }
+        activeDomRows.forEach(r => {
+            totExecBuy += r.st.buy;
+            totExecSell += r.st.sell;
+            totWhaleBuy += Math.max(r.st.wBuy, r.rawD.wBuy);
+            totWhaleSell += Math.max(r.st.wSell, r.rawD.wSell);
+            totRetailBuy += Math.max(r.st.rBuy, r.rawD.rBuy);
+            totRetailSell += Math.max(r.st.rSell, r.rawD.rSell);
+            totPullB += r.totRawBp;
+            totPullA += r.totRawAp;
+            totFlashPullB += r.rawD.flashBp;
+            totFlashPullA += r.rawD.flashAp;
+            totIceBid += r.rawD.iceBid;
+            totIceAsk += r.rawD.iceAsk;
 
-    // --- C. EXACT 12 SCALP & 10 INTRADAY PARAMETER TALLY ---
-    const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : ((retailBuysTrapped || clusterShortBuildup) ? 'BEAR' : ((retailSellsTrapped || clusterLongBuildup) ? 'BULL' : 'NEU')));
-    const execVsAbsLbl = instBullDrive ? `BullBreak(B:${fmt(totExecBuy)})` : (instBearDrive ? `BearBreak(S:${fmt(totExecSell)})` : ((retailBuysTrapped || clusterShortBuildup) ? 'ShortClusterBuildup' : ((retailSellsTrapped || clusterLongBuildup) ? 'LongClusterBuildup' : `B:${fmt(totExecBuy)} vs S:${fmt(totExecSell)}`)));
+            if (r.p <= liveCenterP && r.p >= liveCenterP - domStep * 8) nearBidRest += r.bRest;
+            if (r.p >= liveCenterP && r.p <= liveCenterP + domStep * 8) nearAskRest += r.aRest;
+            maxRowVal = Math.max(maxRowVal, r.st.buy, r.st.sell, r.totRawBp, r.totRawAp, r.bRest, r.aRest);
+        });
 
-    const scalpMeterList = [
-        { name: '1. Cluster Buildup vs Breakout Intent', state: execVsAbsState, val: execVsAbsLbl },
-        { name: '2. Multi-Row Cluster + Iceberg Abs', state: ((rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) && !instBearDrive) ? 'BULL' : (((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) && !instBullDrive) ? 'BEAR' : 'NEU'), val: `BidClus:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskClus:${rAskAbs}(🧊${fmt(totIceAsk)})` },
-        { name: '3. Raw Flash + 10s Spoof Pull (PΔ)', state: domPullDelta < -effCellBench * 0.28 ? 'BULL' : (domPullDelta > effCellBench * 0.28 ? 'BEAR' : 'NEU'), val: `RawPΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)} (⚡F:${fmt(totFlashPullB - totFlashPullA)})` },
-        { name: '4. 8-Step Cluster Resting Book Depth', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `Bid:${fmt(nearBidRest)} vs Ask:${fmt(nearAskRest)}` },
-        { name: '5. Delta Displacement vs Cluster Cap', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)} (Cls:${Math.round(closePos * 100)}%)` },
-        { name: '6. Cluster POC Structure Control', state: locState, val: `Px:${lastC.close.toFixed(dec)} vs POC:${curPoc.toFixed(dec)}` },
-        { name: '7. Tick Whale (🐋) vs Retail (🐑) Flow', state: whaleVsRetailState, val: `🐋W B:${fmt(totWhaleBuy)}/S:${fmt(totWhaleSell)} | 🐑R B:${fmt(totRetailBuy)}/S:${fmt(totRetailSell)}` },
-        { name: '8. Value Area Zone (VAH/VAL)', state: (lastC.vah != null && lastC.close > lastC.vah && lastC.close > lastC.open) ? 'BULL' : ((lastC.val != null && lastC.close < lastC.val && lastC.close < lastC.open) ? 'BEAR' : 'NEU'), val: `RangeLoc:${Math.round(rangeLocation * 100)}%` },
-        { name: '9. 4-Candle POC Stepping Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
-        { name: '10. Boundary Fakeout Sweep (BSL/SSL)', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'SSL-Fakeout Reversal' : (bearSweepReject ? 'BSL-Fakeout Reject' : 'None') },
-        { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
-        { name: '12. RVOL Institutional Participation', state: curRvol >= 0.85 ? (execVsAbsState !== 'NEU' ? execVsAbsState : (lastC.close >= lastC.open ? 'BULL' : 'BEAR')) : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
-    ];
+        const domPullDelta = totPullB - totPullA;
+        const curRvol = (lastC.volume || 0) / avgFlowVol;
+        const cRange = Math.max(lastC.high - lastC.low, rawStep * 0.5);
+        const closePos = (lastC.close - lastC.low) / cRange;
+        const prevC = candles.length >= 2 ? candles[candles.length - 2] : lastC;
+        const prevPoc = prevC.poc != null ? prevC.poc : (prevC.high + prevC.low) * 0.5;
+        const curPoc = lastC.poc != null ? lastC.poc : (lastC.high + lastC.low) * 0.5;
 
-    const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
-    const avgSessPoc = sessionPocsList.length > 0 ? sessionPocsList.reduce((a, b) => a + b, 0) / sessionPocs.length : lastC.close;
-    const ubHiCnt = unfinishedLevels.filter(u => u.type === 'UB-HIGH' && u.price > lastC.close).length;
-    const ubLoCnt = unfinishedLevels.filter(u => u.type === 'UB-LOW' && u.price < lastC.close).length;
-
-    const intraMeterList = [
-        { name: '1. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
-        { name: '2. Multi-Swing Cluster Absorption', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidClus:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskClus:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
-        { name: '3. 4-Candle Structure & POC Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `POC Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
-        { name: '4. Session Wall Pulling Campaign (PΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `SessPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
-        { name: '5. Session Whale Net Inventory (🐋)', state: (macroInfo && macroInfo.sessWhaleBuyVol > macroInfo.sessWhaleSellVol) ? 'BULL' : ((macroInfo && macroInfo.sessWhaleSellVol > macroInfo.sessWhaleBuyVol) ? 'BEAR' : 'NEU'), val: `🐋B:${macroInfo ? fmt(macroInfo.sessWhaleBuyVol) : 0} vs 🐋S:${macroInfo ? fmt(macroInfo.sessWhaleSellVol) : 0}` },
-        { name: '6. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
-        { name: '7. Unfinished Business Magnet Draw', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} vs UB-LO:${ubLoCnt}` },
-        { name: '8. Untouched nPOC Gravity', state: nakedPocs.filter(n => n.price > lastC.close).length > nakedPocs.filter(n => n.price < lastC.close).length ? 'BULL' : (nakedPocs.filter(n => n.price < lastC.close).length > nakedPocs.filter(n => n.price > lastC.close).length ? 'BEAR' : 'NEU'), val: `nPOCs:${nakedPocs.length}` },
-        { name: '9. Orderbook Macro Depth Support', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `B:${fmt(nearBidRest)} vs A:${fmt(nearAskRest)}` },
-        { name: '10. SMT Divergence Alignment', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text }
-    ];
-
-    const sBullCnt = scalpMeterList.filter(x => x.state === 'BULL').length;
-    const sBearCnt = scalpMeterList.filter(x => x.state === 'BEAR').length;
-    const sNeuCnt = scalpMeterList.filter(x => x.state === 'NEU').length;
-
-    const iBullCnt = intraMeterList.filter(x => x.state === 'BULL').length;
-    const iBearCnt = intraMeterList.filter(x => x.state === 'BEAR').length;
-    const iNeuCnt = intraMeterList.filter(x => x.state === 'NEU').length;
-
-    if (meterModal && meterModal.style.display === 'block') {
-        const renderRows = list => list.map(item => {
-            const badge = item.state === 'BULL'
-                ? '<span style="color:#00e676;font-weight:bold;">🟢 BULL</span>'
-                : (item.state === 'BEAR' ? '<span style="color:#ff5252;font-weight:bold;">🔴 BEAR</span>' : '<span style="color:#ffca28;">⚪ NEU</span>');
-            return `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1e2638;padding:4px 0;font-size:11px;">
-                <span>${item.name}</span>
-                <span><code style="color:#90a4ae;margin-right:6px;">${item.val}</code>${badge}</span>
-            </div>`;
-        }).join('');
-
-        document.getElementById('meterModalBody').innerHTML = `
-            <div class="rule-sec" style="border-color:${scalpFinalCol};">
-                <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] SCALP & CLUSTER METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
-                ${renderRows(scalpMeterList)}
-            </div>
-            <div class="rule-sec" style="border-color:${intraFinalCol};">
-                <h4 style="color:${intraFinalCol};">🌊 [${tf.toUpperCase()}] MACRO CAMPAIGN METER: ${intraFinalTxt} (🟢${iBullCnt} Bull | 🔴${iBearCnt} Bear | ⚪${iNeuCnt} Neu)</h4>
-                ${renderRows(intraMeterList)}
-            </div>
-        `;
-    }
-
-    const last5CandlesSummary = candles.slice(-5).map(kc => ({
-        time: new Date(kc.start).toTimeString().slice(0, 5),
-        open: kc.open, high: kc.high, low: kc.low, close: kc.close,
-        vol: Math.round(kc.volume || 0),
-        whale_buy: Math.round(kc.whale_buy_vol || 0),
-        whale_sell: Math.round(kc.whale_sell_vol || 0),
-        retail_buy: Math.round(kc.retail_buy_vol || 0),
-        retail_sell: Math.round(kc.retail_sell_vol || 0),
-        delta: Math.round(kc.delta || 0),
-        poc: kc.poc, vah: kc.vah, val: kc.val
-    }));
-
-    latestEngineSummary = {
-        symbol,
-        timeframe: tf,
-        live_price: lastC.close,
-        rvol: Number(curRvol.toFixed(2)),
-        smt_divergence: smtState.text,
-        scalp_10factor_verdict: {
-            final_bias: scalpFinalTxt,
-            quant_score: scalpPts,
-            parameter_tally: `${sBullCnt} Bullish, ${sBearCnt} Bearish, ${sNeuCnt} Neutral`,
-            active_factors: scalpFactors,
-            dom_battle_status: battleWinner
-        },
-        intraday_10factor_verdict: {
-            final_bias: intraFinalTxt,
-            quant_score: intraPts,
-            parameter_tally: `${iBullCnt} Bullish, ${iBearCnt} Bearish, ${iNeuCnt} Neutral`,
-            session_cvd: macroInfo ? Math.round(macroInfo.totalCvd) : 0,
-            session_pull_delta: macroInfo ? Math.round(macroInfo.macroPullDelta) : 0,
-            session_bid_absorptions: macroInfo ? macroInfo.macroBidAbsorbs : 0,
-            session_ask_absorptions: macroInfo ? macroInfo.macroAskAbsorbs : 0,
-            session_whale_blocks: macroInfo ? `${macroInfo.whaleBuyLots} Buy vs ${macroInfo.whaleSellLots} Sell` : '0',
-            macro_notes: macroInfo ? macroInfo.macroNotes : []
-        },
-        dom_orderflow_matrix: {
-            active_buy_executed: Number(totExecBuy.toFixed(2)),
-            active_sell_executed: Number(totExecSell.toFixed(2)),
-            whale_buy_executed: Number(totWhaleBuy.toFixed(2)),
-            whale_sell_executed: Number(totWhaleSell.toFixed(2)),
-            retail_buy_executed: Number(totRetailBuy.toFixed(2)),
-            retail_sell_executed: Number(totRetailSell.toFixed(2)),
-            raw_total_bid_pulled: Number(totPullB.toFixed(2)),
-            raw_total_ask_pulled: Number(totPullA.toFixed(2)),
-            flash_ms_bid_pulled: Number(totFlashPullB.toFixed(2)),
-            flash_ms_ask_pulled: Number(totFlashPullA.toFixed(2)),
-            silent_bid_iceberg_reload: Number(totIceBid.toFixed(2)),
-            silent_ask_iceberg_reload: Number(totIceAsk.toFixed(2)),
-            net_pulling_delta_PDelta: Number(domPullDelta.toFixed(2)),
-            near_8step_bid_resting_wall: Number(nearBidRest.toFixed(2)),
-            near_8step_ask_resting_wall: Number(nearAskRest.toFixed(2)),
-            recent_cluster_bid_absorptions: rBidAbs,
-            recent_cluster_ask_absorptions: rAskAbs
-        },
-        untouched_magnets: {
-            unfinished_business_high_low: unfinishedLevels.slice(-5),
-            naked_pocs: nakedPocs.slice(-5)
-        },
-        last_5_candles_ohlcv_delta_va: last5CandlesSummary
-    };
-
-    if (!showDOM || domW <= 0) return;
-
-    const domX = chartW + yAxisW;
-    ctx.fillStyle = '#0a0d14';
-    ctx.fillRect(domX, 0, domW, H);
-    ctx.strokeStyle = '#00e5ff';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(domX, 0); ctx.lineTo(domX, H); ctx.stroke();
-
-    const headerH = 92;
-    ctx.fillStyle = '#141926';
-    ctx.fillRect(domX + 1, 0, domW - 1, headerH);
-    ctx.strokeStyle = '#263147';
-    ctx.beginPath(); ctx.moveTo(domX, headerH); ctx.lineTo(domX + domW, headerH); ctx.stroke();
-
-    ctx.font = 'bold 9.5px monospace';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#00e5ff';
-    ctx.fillText(`🐋W:${fmt(totWhaleBuy)}B/${fmt(totWhaleSell)}S | 🐑R:${fmt(totRetailBuy)}B/${fmt(totRetailSell)}S | 🧊Ice:${fmt(totIceBid)}B/${fmt(totIceAsk)}A | RawPΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}`, domX + 6, 11);
-
-    ctx.fillStyle = bwCol;
-    ctx.fillText(battleWinner, domX + 6, 25);
-
-    const boxGap = 6;
-    const halfBoxW = Math.floor((domW - 14 - boxGap) * 0.5);
-    const b1X = domX + 6;
-    const b2X = b1X + halfBoxW + boxGap;
-    const bY = 35;
-    const bH = 36;
-
-    // Box 1: DYNAMIC TF SCALP / CLUSTER VERDICT
-    ctx.fillStyle = '#0e131d';
-    ctx.fillRect(b1X, bY, halfBoxW, bH);
-    ctx.strokeStyle = scalpFinalCol;
-    ctx.lineWidth = 1.2;
-    ctx.strokeRect(b1X, bY, halfBoxW, bH);
-
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 8px monospace';
-    ctx.fillStyle = '#cfd8dc';
-    ctx.fillText(`⚡${tf.toUpperCase()} CLUSTER [🟢${sBullCnt} 🔴${sBearCnt} ⚪${sNeuCnt}]`, b1X + halfBoxW * 0.5, bY + 10);
-    ctx.font = 'bold 10px monospace';
-    ctx.fillStyle = scalpFinalCol;
-    ctx.fillText(scalpFinalTxt, b1X + halfBoxW * 0.5, bY + 25);
-
-    // Box 2: DYNAMIC TF MACRO / INTRADAY VERDICT
-    ctx.fillStyle = '#0e131d';
-    ctx.fillRect(b2X, bY, halfBoxW, bH);
-    ctx.strokeStyle = intraFinalCol;
-    ctx.lineWidth = 1.2;
-    ctx.strokeRect(b2X, bY, halfBoxW, bH);
-
-    ctx.font = 'bold 8px monospace';
-    ctx.fillStyle = '#cfd8dc';
-    ctx.fillText(`🌊${tf.toUpperCase()} MACRO [🟢${iBullCnt} 🔴${iBearCnt} ⚪${iNeuCnt}]`, b2X + halfBoxW * 0.5, bY + 10);
-    ctx.font = 'bold 10px monospace';
-    ctx.fillStyle = intraFinalCol;
-    ctx.fillText(intraFinalTxt, b2X + halfBoxW * 0.5, bY + 25);
-
-    // Column Headers
-    const pxScaleW = isMobile ? 64 : 78;
-    const battleAreaW = domW - pxScaleW;
-    const halfBattleW = battleAreaW * 0.5;
-    const domSpineX = domX + halfBattleW;
-    const domPxScaleX = domX + battleAreaW;
-
-    ctx.fillStyle = '#90a4ae';
-    ctx.font = 'bold 8px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('◀ BID [🐋W/🐑R SELL | 🧊ICE | ⚡RAW PULL]', domX + halfBattleW * 0.5, 82);
-    ctx.fillText('ASK [🐋W/🐑R BUY | 🧊ICE | ⚡RAW PULL] ▶', domSpineX + halfBattleW * 0.5, 82);
-    ctx.fillStyle = '#ffeb3b';
-    ctx.fillText('PRICE', domPxScaleX + pxScaleW * 0.5, 82);
-
-    const rH = 24;
-    const maxVisDomRows = Math.floor((H - headerH - 6) / rH);
-    const startIdx = Math.max(0, Math.min(activeDomRows.length - maxVisDomRows, Math.floor((activeDomRows.length - maxVisDomRows) * 0.5 - domScrollRows)));
-    const visibleSlice = activeDomRows.slice(startIdx, startIdx + maxVisDomRows);
-
-    let ry = headerH + 2;
-
-    visibleSlice.forEach((row, idx) => {
-        const { p, bRest, aRest, st, rawD, totRawBp, totRawAp, mag } = row;
-        const isCurrentRow = Math.abs(p - liveCenterP) < domStep * 0.4;
-
-        ctx.fillStyle = isCurrentRow ? 'rgba(255, 235, 59, 0.16)' : (idx % 2 === 0 ? '#0c1018' : '#101520');
-        ctx.fillRect(domX + 1, ry, domW - 1, rH);
-
-        const bSpoofPct = (totRawBp + st.sell) > 0 ? Math.round((totRawBp / (totRawBp + st.sell)) * 100) : 0;
-        const aSpoofPct = (totRawAp + st.buy) > 0 ? Math.round((totRawAp / (totRawAp + st.buy)) * 100) : 0;
-        const rowPDelta = totRawBp - totRawAp;
-
-        const execSellRatio = Math.min(1, st.sell / maxRowVal);
-        if (st.sell > 0) {
-            ctx.fillStyle = 'rgba(255, 23, 68, 0.55)';
-            ctx.fillRect(domSpineX - halfBattleW * execSellRatio, ry + 2, halfBattleW * execSellRatio, 10);
-        }
-        const pullBidRatio = Math.min(1, totRawBp / maxRowVal);
-        if (totRawBp > 0) {
-            ctx.fillStyle = 'rgba(255, 64, 129, 0.40)';
-            ctx.fillRect(domSpineX - halfBattleW * pullBidRatio, ry + 12, halfBattleW * pullBidRatio, 10);
+        let sPocUp = 0, sPocDn = 0, hhCount = 0, llCount = 0;
+        const last4 = candles.slice(-4);
+        for (let m = 1; m < last4.length; m++) {
+            if (last4[m].poc != null && last4[m - 1].poc != null) {
+                if (last4[m].poc > last4[m - 1].poc) sPocUp++;
+                else if (last4[m].poc < last4[m - 1].poc) sPocDn++;
+            }
+            if (last4[m].high > last4[m - 1].high && last4[m].low >= last4[m - 1].low) hhCount++;
+            if (last4[m].low < last4[m - 1].low && last4[m].high <= last4[m - 1].high) llCount++;
         }
 
-        ctx.textAlign = 'right';
-        ctx.textBaseline = 'middle';
-        ctx.font = 'bold 8px monospace';
-        ctx.fillStyle = '#ff8a80';
-        const wSellHere = Math.max(st.wSell, rawD.wSell);
-        const winBidTag = (rawD.iceBid > effCellBench * 0.35 || (st.sell > st.buy * 1.4 && lastC.close >= p + domStep * 0.4)) ? '🧊ABS ' : '';
-        const wSellTag = wSellHere > 0 ? `🐋${fmt(wSellHere)} ` : '';
-        ctx.fillText(`${winBidTag}${wSellTag}S:${fmt(st.sell)} (Rest:${fmt(bRest)})`, domSpineX - 4, ry + 7);
-
-        if (totRawBp > 0 || rawD.iceBid > 0) {
-            ctx.font = bSpoofPct >= 55 ? 'bold 7.5px monospace' : '7.5px monospace';
-            ctx.fillStyle = rawD.flashBp > 0 ? '#ff4081' : '#ff80ab';
-            const fTag = rawD.flashBp > 0 ? `⚡F:${fmt(rawD.flashBp)} ` : '';
-            const iceTag = rawD.iceBid > 0 ? `🧊+${fmt(rawD.iceBid)} ` : '';
-            ctx.fillText(`${iceTag}${fTag}Pull:${fmt(totRawBp)}(${bSpoofPct}%)`, domSpineX - 4, ry + 18);
+        let prev5High = -Infinity, prev5Low = Infinity;
+        for (let k = Math.max(0, candles.length - 6); k < candles.length - 1; k++) {
+            if (candles[k].high > prev5High) prev5High = candles[k].high;
+            if (candles[k].low < prev5Low) prev5Low = candles[k].low;
         }
 
-        const execBuyRatio = Math.min(1, st.buy / maxRowVal);
-        if (st.buy > 0) {
-            ctx.fillStyle = 'rgba(0, 230, 118, 0.55)';
-            ctx.fillRect(domSpineX, ry + 2, halfBattleW * execBuyRatio, 10);
-        }
-        const pullAskRatio = Math.min(1, totRawAp / maxRowVal);
-        if (totRawAp > 0) {
-            ctx.fillStyle = 'rgba(224, 64, 251, 0.40)';
-            ctx.fillRect(domSpineX, ry + 12, halfBattleW * pullAskRatio, 10);
+        const bullSweepReject = lastC.low < prev5Low && lastC.close > prev5Low && (closePos >= 0.50 || rBidAbs > 0 || totIceBid > 0);
+        const bearSweepReject = lastC.high > prev5High && lastC.close < prev5High && (closePos <= 0.50 || rAskAbs > 0 || totIceAsk > 0);
+
+        const instBullDrive = (totExecBuy > totExecSell * 1.15 || totWhaleBuy > totWhaleSell * 1.20)
+            && lastC.close > lastC.open && closePos >= 0.58 && lastC.close >= curPoc && !bearSweepReject;
+
+        const instBearDrive = (totExecSell > totExecBuy * 1.15 || totWhaleSell > totWhaleBuy * 1.20)
+            && lastC.close < lastC.open && closePos <= 0.42 && lastC.close <= curPoc && !bullSweepReject;
+
+        const clusterLongBuildup = (
+            (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25)
+            && (totWhaleBuy >= totWhaleSell || domPullDelta < -effCellBench * 0.25 || nearBidRest > nearAskRest * 1.25)
+        );
+        const clusterShortBuildup = (
+            (rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25)
+            && (totWhaleSell >= totWhaleBuy || domPullDelta > effCellBench * 0.25 || nearAskRest > nearBidRest * 1.25)
+        );
+
+        const retailBuysTrapped = !instBullDrive && (
+            bearSweepReject
+            || (totRetailBuy > totWhaleBuy * 1.15 && (totIceAsk > effCellBench * 0.35 || rAskAbs > rBidAbs) && closePos <= 0.52)
+            || (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.44)
+            || (prevC.delta > effCellBench * 0.35 && lastC.close < prevPoc - domStep * 0.5 && lastC.close < lastC.open)
+        );
+
+        const retailSellsTrapped = !instBearDrive && (
+            bullSweepReject
+            || (totRetailSell > totWhaleSell * 1.15 && (totIceBid > effCellBench * 0.35 || rBidAbs > rAskAbs) && closePos >= 0.48)
+            || (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.56)
+            || (prevC.delta < -effCellBench * 0.35 && lastC.close > prevPoc + domStep * 0.5 && lastC.close > lastC.open)
+        );
+
+        let battleWinner = `⚖️ [${tf.toUpperCase()}] TWO-WAY CLUSTER FIGHT (MONITORING BUILDUP)`;
+        let bwCol = '#ffd700';
+        if (bullSweepReject) {
+            battleWinner = `🎯 [${tf.toUpperCase()}] SSL FAKEOUT SWEEP + BID CLUSTER ABSORBED ➔ LONG!`;
+            bwCol = '#00e5ff';
+        } else if (bearSweepReject) {
+            battleWinner = `🎯 [${tf.toUpperCase()}] BSL FAKEOUT SWEEP + ASK CLUSTER ABSORBED ➔ SHORT!`;
+            bwCol = '#ff9100';
+        } else if (instBullDrive) {
+            battleWinner = `🚀 [${tf.toUpperCase()}] GENUINE BULL BREAKOUT (🐋W.Buy:${fmt(totWhaleBuy)} + AskPulled:${fmt(totPullA)})`;
+            bwCol = '#00e676';
+        } else if (instBearDrive) {
+            battleWinner = `🚀 [${tf.toUpperCase()}] GENUINE BEAR BREAKDOWN (🐋W.Sell:${fmt(totWhaleSell)} + BidPulled:${fmt(totPullB)})`;
+            bwCol = '#ff1744';
+        } else if (clusterLongBuildup || retailSellsTrapped) {
+            battleWinner = `🏦 [${tf.toUpperCase()}] CLUSTER LONG ACCUMULATION (BidAbs:${rBidAbs} 🧊Ice:${fmt(totIceBid)}) ➔ UP PROB HIGH`;
+            bwCol = '#00e5ff';
+        } else if (clusterShortBuildup || retailBuysTrapped) {
+            battleWinner = `🏦 [${tf.toUpperCase()}] CLUSTER SHORT DISTRIBUTION (AskAbs:${rAskAbs} 🧊Ice:${fmt(totIceAsk)}) ➔ DN PROB HIGH`;
+            bwCol = '#ff9100';
         }
 
+        let recentWhaleB = 0, recentWhaleS = 0;
+        candles.slice(-3).forEach(rc => {
+            const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
+            gList.forEach(gl => {
+                const trd = Math.max(gl.trades || 1, 1);
+                const hasTickW = (gl.whale_buy || 0) + (gl.whale_sell || 0) > 0;
+                if (hasTickW || (gl.volume >= effCellBench * 1.20 && ((gl.volume / trd) / baselineLotSize) >= 2.8)) {
+                    if ((gl.whale_buy || gl.buy) > (gl.whale_sell || gl.sell) && rc.close >= gl.price - domStep * 0.5) recentWhaleB++;
+                    else if ((gl.whale_sell || gl.sell) >= (gl.whale_buy || gl.buy) && rc.close <= gl.price + domStep * 0.5) recentWhaleS++;
+                }
+            });
+        });
+
+        const recent20 = candles.slice(-20);
+        const r20Hi = Math.max(...recent20.map(x => x.high));
+        const r20Lo = Math.min(...recent20.map(x => x.low));
+        const r20Span = Math.max(r20Hi - r20Lo, rawStep);
+        const rangeLocation = (lastC.close - r20Lo) / r20Span;
+
+        let scalpPts = 0;
+        let scalpFactors = [];
+
+        if (instBullDrive) { scalpPts += 28; scalpFactors.push('TrueBullBreak'); }
+        else if (instBearDrive) { scalpPts -= 28; scalpFactors.push('TrueBearBreak'); }
+        else if (retailBuysTrapped || clusterShortBuildup) { scalpPts -= 25; scalpFactors.push('ClusterShortBuildup'); }
+        else if (retailSellsTrapped || clusterLongBuildup) { scalpPts += 25; scalpFactors.push('ClusterLongBuildup'); }
+
+        if ((rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) && !instBearDrive) {
+            scalpPts += Math.min(24, 14 + (rBidAbs - rAskAbs) * 4);
+            scalpFactors.push(`ClusterBidAbs(${rBidAbs}v${rAskAbs})`);
+        } else if ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) && !instBullDrive) {
+            scalpPts -= Math.min(24, 14 + (rAskAbs - rBidAbs) * 4);
+            scalpFactors.push(`ClusterAskAbs(${rAskAbs}v${rBidAbs})`);
+        }
+
+        if (domPullDelta < -effCellBench * 0.28) { scalpPts += 18; scalpFactors.push(`AskWallPulled(PΔ${fmt(domPullDelta)})`); }
+        else if (domPullDelta > effCellBench * 0.28) { scalpPts -= 18; scalpFactors.push(`BidWallPulled(PΔ+${fmt(domPullDelta)})`); }
+
+        const minBookFloor = effCellBench * 1.3;
+        if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) { scalpPts += 12; }
+        else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) { scalpPts -= 12; }
+
+        let deltaState = 'NEU';
+        if (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.44) { scalpPts -= 18; deltaState = 'BEAR'; }
+        else if (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.56) { scalpPts += 18; deltaState = 'BULL'; }
+        else if (lastC.delta > effCellBench * 0.30 && lastC.close > lastC.open && closePos >= 0.56) { scalpPts += 15; deltaState = 'BULL'; }
+        else if (lastC.delta < -effCellBench * 0.30 && lastC.close < lastC.open && closePos <= 0.44) { scalpPts -= 15; deltaState = 'BEAR'; }
+
+        let whaleVsRetailState = 'NEU';
+        if ((totWhaleBuy > totWhaleSell * 1.20 || recentWhaleB > recentWhaleS) && !instBearDrive) { scalpPts += 18; whaleVsRetailState = 'BULL'; }
+        else if ((totWhaleSell > totWhaleBuy * 1.20 || recentWhaleS > recentWhaleB) && !instBullDrive) { scalpPts -= 18; whaleVsRetailState = 'BEAR'; }
+
+        let locState = 'NEU';
+        if (lastC.close > curPoc && (lastC.close >= prevPoc || clusterLongBuildup)) { scalpPts += 14; locState = 'BULL'; }
+        else if (lastC.close < curPoc && (lastC.close <= prevPoc || clusterShortBuildup)) { scalpPts -= 14; locState = 'BEAR'; }
+
+        if (bullSweepReject) scalpPts += 22;
+        else if (bearSweepReject) scalpPts -= 22;
+
+        if (sPocUp > sPocDn) scalpPts += 12;
+        else if (sPocDn > sPocUp) scalpPts -= 12;
+
+        if (smtState.bias === 1) scalpPts += 10;
+        else if (smtState.bias === -1) scalpPts -= 10;
+
+        if (instBearDrive && lastC.close < curPoc && lastC.close < prevPoc && !bullSweepReject && scalpPts > 0) scalpPts = -22;
+        else if (instBullDrive && lastC.close > curPoc && lastC.close > prevPoc && !bearSweepReject && scalpPts < 0) scalpPts = 22;
+
+        const scalpProb = Math.min(96, Math.round(50 + (Math.abs(scalpPts) / 110) * 46));
+        let scalpFinalTxt = `⚪ ${tf.toUpperCase()} EQUILIBRIUM`;
+        let scalpFinalCol = '#ffca28';
+        if (scalpPts >= 48) { scalpFinalTxt = `🟢 STRONG LONG (${scalpProb}%)`; scalpFinalCol = '#00e676'; }
+        else if (scalpPts >= 24) { scalpFinalTxt = `🟢 LONG BUILDUP (${scalpProb}%)`; scalpFinalCol = '#69f0ae'; }
+        else if (scalpPts >= 12) { scalpFinalTxt = `🟡 LEAN LONG (${scalpProb}%)`; scalpFinalCol = '#00e5ff'; }
+        else if (scalpPts <= -48) { scalpFinalTxt = `🔴 STRONG SHORT (${scalpProb}%)`; scalpFinalCol = '#ff1744'; }
+        else if (scalpPts <= -24) { scalpFinalTxt = `🔴 SHORT BUILDUP (${scalpProb}%)`; scalpFinalCol = '#ff5252'; }
+        else if (scalpPts <= -12) { scalpFinalTxt = `🟠 LEAN SHORT (${scalpProb}%)`; scalpFinalCol = '#ff9100'; }
+
+        let intraPts = macroInfo ? macroInfo.netMacro : 0;
+        if (macroInfo) {
+            if (sPocUp > sPocDn) intraPts += 14;
+            else if (sPocDn > sPocUp) intraPts -= 14;
+            if (smtState.bias === 1) intraPts += 12;
+            else if (smtState.bias === -1) intraPts -= 12;
+        }
+
+        const intraProb = Math.min(96, Math.round(50 + (Math.abs(intraPts) / 110) * 46));
+        let intraFinalTxt = `⚪ ${tf.toUpperCase()} BALANCED`;
+        let intraFinalCol = '#ffca28';
+        if (intraPts >= 48) { intraFinalTxt = `🟢 STRONG LONG (${intraProb}%)`; intraFinalCol = '#00e676'; }
+        else if (intraPts >= 24) { intraFinalTxt = `🟢 ACCUMULATING LONG (${intraProb}%)`; intraFinalCol = '#69f0ae'; }
+        else if (intraPts >= 12) { intraFinalTxt = `🟡 LEAN LONG (${intraProb}%)`; intraFinalCol = '#00e5ff'; }
+        else if (intraPts <= -48) { intraFinalTxt = `🔴 STRONG SHORT (${intraProb}%)`; intraFinalCol = '#ff1744'; }
+        else if (intraPts <= -24) { intraFinalTxt = `🔴 DISTRIBUTING SHORT (${intraProb}%)`; intraFinalCol = '#ff5252'; }
+        else if (intraPts <= -12) { intraFinalTxt = `🟠 LEAN SHORT (${intraProb}%)`; intraFinalCol = '#ff9100'; }
+
+        const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : ((retailBuysTrapped || clusterShortBuildup) ? 'BEAR' : ((retailSellsTrapped || clusterLongBuildup) ? 'BULL' : 'NEU')));
+        const execVsAbsLbl = instBullDrive ? `BullBreak(B:${fmt(totExecBuy)})` : (instBearDrive ? `BearBreak(S:${fmt(totExecSell)})` : ((retailBuysTrapped || clusterShortBuildup) ? 'ShortClusterBuildup' : ((retailSellsTrapped || clusterLongBuildup) ? 'LongClusterBuildup' : `B:${fmt(totExecBuy)} vs S:${fmt(totExecSell)}`)));
+
+        const scalpMeterList = [
+            { name: '1. Cluster Buildup vs Breakout Intent', state: execVsAbsState, val: execVsAbsLbl },
+            { name: '2. Multi-Row Cluster + Iceberg Abs', state: ((rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) && !instBearDrive) ? 'BULL' : (((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) && !instBullDrive) ? 'BEAR' : 'NEU'), val: `BidClus:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskClus:${rAskAbs}(🧊${fmt(totIceAsk)})` },
+            { name: '3. Raw Flash + 10s Spoof Pull (PΔ)', state: domPullDelta < -effCellBench * 0.28 ? 'BULL' : (domPullDelta > effCellBench * 0.28 ? 'BEAR' : 'NEU'), val: `RawPΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}` },
+            { name: '4. 8-Step Cluster Resting Book Depth', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `Bid:${fmt(nearBidRest)} vs Ask:${fmt(nearAskRest)}` },
+            { name: '5. Delta Displacement vs Cluster Cap', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}` },
+            { name: '6. Cluster POC Structure Control', state: locState, val: `Px:${lastC.close.toFixed(dec)} vs POC:${curPoc.toFixed(dec)}` },
+            { name: '7. Tick Whale (🐋) vs Retail (🐑) Flow', state: whaleVsRetailState, val: `🐋W B:${fmt(totWhaleBuy)}/S:${fmt(totWhaleSell)}` },
+            { name: '8. Value Area Zone (VAH/VAL)', state: (lastC.vah != null && lastC.close > lastC.vah) ? 'BULL' : ((lastC.val != null && lastC.close < lastC.val) ? 'BEAR' : 'NEU'), val: `Loc:${Math.round(rangeLocation * 100)}%` },
+            { name: '9. 4-Candle POC Stepping Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
+            { name: '10. Boundary Fakeout Sweep (BSL/SSL)', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'SSL-Sweep' : (bearSweepReject ? 'BSL-Sweep' : 'None') },
+            { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
+            { name: '12. RVOL Institutional Participation', state: curRvol >= 0.85 ? (execVsAbsState !== 'NEU' ? execVsAbsState : 'NEU') : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
+        ];
+
+        const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
+        const avgSessPoc = sessionPocsList.length > 0 ? sessionPocsList.reduce((a, b) => a + b, 0) / sessionPocsList.length : lastC.close;
+        const ubHiCnt = unfinishedLevels.filter(u => u.type === 'UB-HIGH' && u.price > lastC.close).length;
+        const ubLoCnt = unfinishedLevels.filter(u => u.type === 'UB-LOW' && u.price < lastC.close).length;
+
+        const intraMeterList = [
+            { name: '1. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
+            { name: '2. Multi-Swing Cluster Absorption', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidClus:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskClus:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
+            { name: '3. 4-Candle Structure & POC Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `POC Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
+            { name: '4. Session Wall Pulling Campaign (PΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `SessPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
+            { name: '5. Session Whale Net Inventory (🐋)', state: (macroInfo && macroInfo.sessWhaleBuyVol > macroInfo.sessWhaleSellVol) ? 'BULL' : ((macroInfo && macroInfo.sessWhaleSellVol > macroInfo.sessWhaleBuyVol) ? 'BEAR' : 'NEU'), val: `🐋B:${macroInfo ? fmt(macroInfo.sessWhaleBuyVol) : 0} vs 🐋S:${macroInfo ? fmt(macroInfo.sessWhaleSellVol) : 0}` },
+            { name: '6. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
+            { name: '7. Unfinished Business Magnet Draw', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} vs UB-LO:${ubLoCnt}` },
+            { name: '8. Untouched nPOC Gravity', state: nakedPocs.filter(n => n.price > lastC.close).length > nakedPocs.filter(n => n.price < lastC.close).length ? 'BULL' : (nakedPocs.filter(n => n.price < lastC.close).length > nakedPocs.filter(n => n.price > lastC.close).length ? 'BEAR' : 'NEU'), val: `nPOCs:${nakedPocs.length}` },
+            { name: '9. Orderbook Macro Depth Support', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `B:${fmt(nearBidRest)} vs A:${fmt(nearAskRest)}` },
+            { name: '10. SMT Divergence Alignment', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text }
+        ];
+
+        const sBullCnt = scalpMeterList.filter(x => x.state === 'BULL').length;
+        const sBearCnt = scalpMeterList.filter(x => x.state === 'BEAR').length;
+        const sNeuCnt = scalpMeterList.filter(x => x.state === 'NEU').length;
+
+        const iBullCnt = intraMeterList.filter(x => x.state === 'BULL').length;
+        const iBearCnt = intraMeterList.filter(x => x.state === 'BEAR').length;
+        const iNeuCnt = intraMeterList.filter(x => x.state === 'NEU').length;
+
+        if (meterModal && meterModal.style.display === 'block') {
+            const renderRows = list => list.map(item => {
+                const badge = item.state === 'BULL'
+                    ? '<span style="color:#00e676;font-weight:bold;">🟢 BULL</span>'
+                    : (item.state === 'BEAR' ? '<span style="color:#ff5252;font-weight:bold;">🔴 BEAR</span>' : '<span style="color:#ffca28;">⚪ NEU</span>');
+                return `<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1e2638;padding:4px 0;font-size:11px;">
+                    <span>${item.name}</span>
+                    <span><code style="color:#90a4ae;margin-right:6px;">${item.val}</code>${badge}</span>
+                </div>`;
+            }).join('');
+
+            document.getElementById('meterModalBody').innerHTML = `
+                <div class="rule-sec" style="border-color:${scalpFinalCol};">
+                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] SCALP & CLUSTER METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
+                    ${renderRows(scalpMeterList)}
+                </div>
+                <div class="rule-sec" style="border-color:${intraFinalCol};">
+                    <h4 style="color:${intraFinalCol};">🌊 [${tf.toUpperCase()}] MACRO CAMPAIGN METER: ${intraFinalTxt} (🟢${iBullCnt} Bull | 🔴${iBearCnt} Bear | ⚪${iNeuCnt} Neu)</h4>
+                    ${renderRows(intraMeterList)}
+                </div>
+            `;
+        }
+
+        if (!showDOM || domW <= 0) return;
+
+        const domX = chartW + yAxisW;
+        ctx.fillStyle = '#0a0d14';
+        ctx.fillRect(domX, 0, domW, H);
+        ctx.strokeStyle = '#00e5ff';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(domX, 0); ctx.lineTo(domX, H); ctx.stroke();
+
+        const headerH = 92;
+        ctx.fillStyle = '#141926';
+        ctx.fillRect(domX + 1, 0, domW - 1, headerH);
+        ctx.strokeStyle = '#263147';
+        ctx.beginPath(); ctx.moveTo(domX, headerH); ctx.lineTo(domX + domW, headerH); ctx.stroke();
+
+        ctx.font = 'bold 9px monospace';
         ctx.textAlign = 'left';
-        ctx.font = 'bold 8px monospace';
-        ctx.fillStyle = '#69f0ae';
-        const wBuyHere = Math.max(st.wBuy, rawD.wBuy);
-        const winAskTag = (rawD.iceAsk > effCellBench * 0.35 || (st.buy > st.sell * 1.4 && lastC.close <= p - domStep * 0.4)) ? ' 🧊CAP' : '';
-        const wBuyTag = wBuyHere > 0 ? ` 🐋${fmt(wBuyHere)}` : '';
-        ctx.fillText(`B:${fmt(st.buy)}${wBuyTag} (Rest:${fmt(aRest)})${winAskTag}`, domSpineX + 4, ry + 7);
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#00e5ff';
+        ctx.fillText(`🐋W:${fmt(totWhaleBuy)}B/${fmt(totWhaleSell)}S | 🐑R:${fmt(totRetailBuy)}B/${fmt(totRetailSell)}S | 🧊Ice:${fmt(totIceBid)}B/${fmt(totIceAsk)}A`, domX + 6, 11);
 
-        if (totRawAp > 0 || rawD.iceAsk > 0) {
-            ctx.font = aSpoofPct >= 55 ? 'bold 7.5px monospace' : '7.5px monospace';
-            ctx.fillStyle = rawD.flashAp > 0 ? '#e040fb' : '#ea80fc';
-            const fTag = rawD.flashAp > 0 ? `⚡F:${fmt(rawD.flashAp)} ` : '';
-            const iceTag = rawD.iceAsk > 0 ? `🧊+${fmt(rawD.iceAsk)} ` : '';
-            ctx.fillText(`${iceTag}${fTag}Pull:${fmt(totRawAp)}(${aSpoofPct}%)`, domSpineX + 4, ry + 18);
-        }
+        ctx.fillStyle = bwCol;
+        ctx.fillText(battleWinner, domX + 6, 25);
 
-        ctx.fillStyle = isCurrentRow ? '#ffeb3b' : (mag ? 'rgba(224, 64, 251, 0.22)' : '#161c2b');
-        ctx.fillRect(domPxScaleX, ry, pxScaleW, rH);
+        const boxGap = 6;
+        const halfBoxW = Math.floor((domW - 14 - boxGap) * 0.5);
+        const b1X = domX + 6;
+        const b2X = b1X + halfBoxW + boxGap;
+        const bY = 35;
+        const bH = 36;
+
+        ctx.fillStyle = '#0e131d';
+        ctx.fillRect(b1X, bY, halfBoxW, bH);
+        ctx.strokeStyle = scalpFinalCol;
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(b1X, bY, halfBoxW, bH);
 
         ctx.textAlign = 'center';
-        ctx.font = isCurrentRow ? 'bold 9.5px monospace' : 'bold 9px monospace';
-        ctx.fillStyle = isCurrentRow ? '#000' : (p > lastC.close ? '#ff8a80' : '#69f0ae');
-        ctx.fillText(p.toFixed(dec), domPxScaleX + pxScaleW * 0.5, ry + 7);
+        ctx.font = 'bold 8px monospace';
+        ctx.fillStyle = '#cfd8dc';
+        ctx.fillText(`⚡${tf.toUpperCase()} CLUSTER [🟢${sBullCnt} 🔴${sBearCnt} ⚪${sNeuCnt}]`, b1X + halfBoxW * 0.5, bY + 10);
+        ctx.font = 'bold 9.5px monospace';
+        ctx.fillStyle = scalpFinalCol;
+        ctx.fillText(scalpFinalTxt, b1X + halfBoxW * 0.5, bY + 25);
 
-        let subLbl = '';
-        let subCol = isCurrentRow ? '#000' : '#ffd700';
-        if (mag) {
-            subLbl = mag.lbl; subCol = isCurrentRow ? '#000' : '#ffeb3b';
-        } else if (rawD.iceBid > rawD.iceAsk && rawD.iceBid > effCellBench * 0.3) {
-            subLbl = '🧊BID CLUS'; subCol = isCurrentRow ? '#004d40' : '#00e5ff';
-        } else if (rawD.iceAsk > rawD.iceBid && rawD.iceAsk > effCellBench * 0.3) {
-            subLbl = '🧊ASK CLUS'; subCol = isCurrentRow ? '#b71c1c' : '#ff9100';
-        } else if (st.buy > st.sell * 1.3) {
-            subLbl = '🟢BUY WIN'; subCol = isCurrentRow ? '#004d40' : '#00e676';
-        } else if (st.sell > st.buy * 1.3) {
-            subLbl = '🔴SELL WIN'; subCol = isCurrentRow ? '#b71c1c' : '#ff5252';
-        } else if (Math.abs(rowPDelta) > 1) {
-            subLbl = `PΔ:${rowPDelta > 0 ? '+' : ''}${fmt(rowPDelta)}`; subCol = isCurrentRow ? '#000' : '#ea80fc';
+        ctx.fillStyle = '#0e131d';
+        ctx.fillRect(b2X, bY, halfBoxW, bH);
+        ctx.strokeStyle = intraFinalCol;
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(b2X, bY, halfBoxW, bH);
+
+        ctx.font = 'bold 8px monospace';
+        ctx.fillStyle = '#cfd8dc';
+        ctx.fillText(`🌊${tf.toUpperCase()} MACRO [🟢${iBullCnt} 🔴${iBearCnt} ⚪${iNeuCnt}]`, b2X + halfBoxW * 0.5, bY + 10);
+        ctx.font = 'bold 9.5px monospace';
+        ctx.fillStyle = intraFinalCol;
+        ctx.fillText(intraFinalTxt, b2X + halfBoxW * 0.5, bY + 25);
+
+        const pxScaleW = isMobile ? 64 : 78;
+        const battleAreaW = domW - pxScaleW;
+        const halfBattleW = battleAreaW * 0.5;
+        const domSpineX = domX + halfBattleW;
+        const domPxScaleX = domX + battleAreaW;
+
+        ctx.fillStyle = '#90a4ae';
+        ctx.font = 'bold 8px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('◀ BID [🐋W/🐑R | 🧊ICE | ⚡PULL]', domX + halfBattleW * 0.5, 82);
+        ctx.fillText('ASK [🐋W/🐑R | 🧊ICE | ⚡PULL] ▶', domSpineX + halfBattleW * 0.5, 82);
+        ctx.fillStyle = '#ffeb3b';
+        ctx.fillText('PRICE', domPxScaleX + pxScaleW * 0.5, 82);
+
+        const rH = 24;
+        const maxVisDomRows = Math.max(1, Math.floor((H - headerH - 6) / rH));
+        const startIdx = Math.max(0, Math.min(Math.max(0, activeDomRows.length - maxVisDomRows), Math.floor((activeDomRows.length - maxVisDomRows) * 0.5 - domScrollRows)));
+        const visibleSlice = activeDomRows.slice(startIdx, startIdx + maxVisDomRows);
+
+        let ry = headerH + 2;
+
+        visibleSlice.forEach((row, idx) => {
+            const { p, bRest, aRest, st, rawD, totRawBp, totRawAp, mag } = row;
+            const isCurrentRow = Math.abs(p - liveCenterP) < domStep * 0.4;
+
+            ctx.fillStyle = isCurrentRow ? 'rgba(255, 235, 59, 0.16)' : (idx % 2 === 0 ? '#0c1018' : '#101520');
+            ctx.fillRect(domX + 1, ry, domW - 1, rH);
+
+            const bSpoofPct = (totRawBp + st.sell) > 0 ? Math.round((totRawBp / (totRawBp + st.sell)) * 100) : 0;
+            const aSpoofPct = (totRawAp + st.buy) > 0 ? Math.round((totRawAp / (totRawAp + st.buy)) * 100) : 0;
+            const rowPDelta = totRawBp - totRawAp;
+
+            const execSellRatio = Math.min(1, st.sell / maxRowVal);
+            if (st.sell > 0) {
+                ctx.fillStyle = 'rgba(255, 23, 68, 0.55)';
+                ctx.fillRect(domSpineX - halfBattleW * execSellRatio, ry + 2, halfBattleW * execSellRatio, 10);
+            }
+            const pullBidRatio = Math.min(1, totRawBp / maxRowVal);
+            if (totRawBp > 0) {
+                ctx.fillStyle = 'rgba(255, 64, 129, 0.40)';
+                ctx.fillRect(domSpineX - halfBattleW * pullBidRatio, ry + 12, halfBattleW * pullBidRatio, 10);
+            }
+
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            ctx.font = 'bold 8px monospace';
+            ctx.fillStyle = '#ff8a80';
+            const wSellHere = Math.max(st.wSell, rawD.wSell);
+            const winBidTag = (rawD.iceBid > effCellBench * 0.35 || (st.sell > st.buy * 1.4 && lastC.close >= p + domStep * 0.4)) ? '🧊ABS ' : '';
+            const wSellTag = wSellHere > 0 ? `🐋${fmt(wSellHere)} ` : '';
+            ctx.fillText(`${winBidTag}${wSellTag}S:${fmt(st.sell)} (Rest:${fmt(bRest)})`, domSpineX - 4, ry + 7);
+
+            if (totRawBp > 0 || rawD.iceBid > 0) {
+                ctx.font = bSpoofPct >= 55 ? 'bold 7.5px monospace' : '7.5px monospace';
+                ctx.fillStyle = rawD.flashBp > 0 ? '#ff4081' : '#ff80ab';
+                const fTag = rawD.flashBp > 0 ? `⚡F:${fmt(rawD.flashBp)} ` : '';
+                const iceTag = rawD.iceBid > 0 ? `🧊+${fmt(rawD.iceBid)} ` : '';
+                ctx.fillText(`${iceTag}${fTag}Pull:${fmt(totRawBp)}(${bSpoofPct}%)`, domSpineX - 4, ry + 18);
+            }
+
+            const execBuyRatio = Math.min(1, st.buy / maxRowVal);
+            if (st.buy > 0) {
+                ctx.fillStyle = 'rgba(0, 230, 118, 0.55)';
+                ctx.fillRect(domSpineX, ry + 2, halfBattleW * execBuyRatio, 10);
+            }
+            const pullAskRatio = Math.min(1, totRawAp / maxRowVal);
+            if (totRawAp > 0) {
+                ctx.fillStyle = 'rgba(224, 64, 251, 0.40)';
+                ctx.fillRect(domSpineX, ry + 12, halfBattleW * pullAskRatio, 10);
+            }
+
+            ctx.textAlign = 'left';
+            ctx.font = 'bold 8px monospace';
+            ctx.fillStyle = '#69f0ae';
+            const wBuyHere = Math.max(st.wBuy, rawD.wBuy);
+            const winAskTag = (rawD.iceAsk > effCellBench * 0.35 || (st.buy > st.sell * 1.4 && lastC.close <= p - domStep * 0.4)) ? ' 🧊CAP' : '';
+            const wBuyTag = wBuyHere > 0 ? ` 🐋${fmt(wBuyHere)}` : '';
+            ctx.fillText(`B:${fmt(st.buy)}${wBuyTag} (Rest:${fmt(aRest)})${winAskTag}`, domSpineX + 4, ry + 7);
+
+            if (totRawAp > 0 || rawD.iceAsk > 0) {
+                ctx.font = aSpoofPct >= 55 ? 'bold 7.5px monospace' : '7.5px monospace';
+                ctx.fillStyle = rawD.flashAp > 0 ? '#e040fb' : '#ea80fc';
+                const fTag = rawD.flashAp > 0 ? `⚡F:${fmt(rawD.flashAp)} ` : '';
+                const iceTag = rawD.iceAsk > 0 ? `🧊+${fmt(rawD.iceAsk)} ` : '';
+                ctx.fillText(`${iceTag}${fTag}Pull:${fmt(totRawAp)}(${aSpoofPct}%)`, domSpineX + 4, ry + 18);
+            }
+
+            ctx.fillStyle = isCurrentRow ? '#ffeb3b' : (mag ? 'rgba(224, 64, 251, 0.22)' : '#161c2b');
+            ctx.fillRect(domPxScaleX, ry, pxScaleW, rH);
+
+            ctx.textAlign = 'center';
+            ctx.font = isCurrentRow ? 'bold 9.5px monospace' : 'bold 9px monospace';
+            ctx.fillStyle = isCurrentRow ? '#000' : (p > lastC.close ? '#ff8a80' : '#69f0ae');
+            ctx.fillText(p.toFixed(dec), domPxScaleX + pxScaleW * 0.5, ry + 7);
+
+            let subLbl = '';
+            let subCol = isCurrentRow ? '#000' : '#ffd700';
+            if (mag) {
+                subLbl = mag.lbl; subCol = isCurrentRow ? '#000' : '#ffeb3b';
+            } else if (rawD.iceBid > rawD.iceAsk && rawD.iceBid > effCellBench * 0.3) {
+                subLbl = '🧊BID CLUS'; subCol = isCurrentRow ? '#004d40' : '#00e5ff';
+            } else if (rawD.iceAsk > rawD.iceBid && rawD.iceAsk > effCellBench * 0.3) {
+                subLbl = '🧊ASK CLUS'; subCol = isCurrentRow ? '#b71c1c' : '#ff9100';
+            } else if (st.buy > st.sell * 1.3) {
+                subLbl = '🟢BUY WIN'; subCol = isCurrentRow ? '#004d40' : '#00e676';
+            } else if (st.sell > st.buy * 1.3) {
+                subLbl = '🔴SELL WIN'; subCol = isCurrentRow ? '#b71c1c' : '#ff5252';
+            } else if (Math.abs(rowPDelta) > 1) {
+                subLbl = `PΔ:${rowPDelta > 0 ? '+' : ''}${fmt(rowPDelta)}`; subCol = isCurrentRow ? '#000' : '#ea80fc';
+            }
+
+            if (subLbl) {
+                ctx.font = 'bold 7.5px monospace';
+                ctx.fillStyle = subCol;
+                ctx.fillText(subLbl, domPxScaleX + pxScaleW * 0.5, ry + 18);
+            }
+
+            ctx.strokeStyle = '#1b2234';
+            ctx.beginPath(); ctx.moveTo(domX, ry + rH); ctx.lineTo(domX + domW, ry + rH); ctx.stroke();
+
+            ry += rH;
+        });
+
+        ctx.strokeStyle = '#00e5ff';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(domSpineX, headerH); ctx.lineTo(domSpineX, ry);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#2c354d';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(domPxScaleX, headerH); ctx.lineTo(domPxScaleX, H);
+        ctx.stroke();
+    } catch (domErr) {
+        console.error("DOM render error:", domErr);
+        if (showDOM && domW > 0) {
+            const domX = chartW + yAxisW;
+            ctx.fillStyle = '#1a0f14';
+            ctx.fillRect(domX, 0, domW, H);
+            ctx.fillStyle = '#ff5252';
+            ctx.font = 'bold 11px monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText('⚠️ DOM ERR: ' + domErr.message, domX + 8, 30);
         }
-
-        if (subLbl) {
-            ctx.font = 'bold 7.5px monospace';
-            ctx.fillStyle = subCol;
-            ctx.fillText(subLbl, domPxScaleX + pxScaleW * 0.5, ry + 18);
-        }
-
-        ctx.strokeStyle = '#1b2234';
-        ctx.beginPath(); ctx.moveTo(domX, ry + rH); ctx.lineTo(domX + domW, ry + rH); ctx.stroke();
-
-        ry += rH;
-    });
-
-    ctx.strokeStyle = '#00e5ff';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(domSpineX, headerH); ctx.lineTo(domSpineX, ry);
-    ctx.stroke();
-
-    ctx.strokeStyle = '#2c354d';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(domPxScaleX, headerH); ctx.lineTo(domPxScaleX, H);
-    ctx.stroke();
+    }
 }
 
 // SMART BANDWIDTH-SAVER POLLING: Auto-pauses when browser tab is minimized!
@@ -4513,8 +4382,8 @@ def api_orderbook():
         asks = sorted(state["asks"].items(), key=lambda x: float(x[0]))[:limit]
 
         raw_list = []
-        for px_k, d_obj in dom_raw_telemetry[symbol].items():
-            if live_px is None or abs(float(px_k) - float(live_px)) <= step * 25.0:
+        for px_k, d_obj in list(dom_raw_telemetry[symbol].items()):
+            if live_px is None or abs(float(px_k) - float(live_px)) <= step * 60.0:
                 raw_list.append({"price": float(px_k), **d_obj})
 
         return jsonify({
