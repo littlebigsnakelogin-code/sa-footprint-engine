@@ -326,6 +326,19 @@ def round_price_to_step(price, step):
         return float(price)
 
 
+# Rolling per-symbol trade size tracker & Raw Millisecond Multi-Tick DOM Telemetry
+rolling_lot_tracker = {"BTCUSDT": 0.06, "ETHUSDT": 0.60, "SOLUSDT": 6.0, "XRPUSDT": 1200.0}
+MIN_WHALE_LOT = {"BTCUSDT": 0.35, "ETHUSDT": 3.5, "SOLUSDT": 35.0, "XRPUSDT": 6000.0}
+dom_raw_telemetry = {sym: defaultdict(lambda: {
+    "w_buy": 0.0, "w_sell": 0.0, "r_buy": 0.0, "r_sell": 0.0,
+    "ms_bid_add": 0.0, "ms_ask_add": 0.0,
+    "flash_bid_pull": 0.0, "flash_ask_pull": 0.0,
+    "aged_bid_pull": 0.0, "aged_ask_pull": 0.0,
+    "iceberg_bid": 0.0, "iceberg_ask": 0.0,
+    "peak_bid": 0.0, "peak_ask": 0.0, "ts": 0
+}) for sym in SYMBOLS}
+
+
 def create_empty_candle(symbol, timeframe, start, open_price):
     return {
         "symbol": symbol,
@@ -339,6 +352,10 @@ def create_empty_candle(symbol, timeframe, start, open_price):
         "volume": 0.0,
         "buy_volume": 0.0,
         "sell_volume": 0.0,
+        "whale_buy_vol": 0.0,
+        "whale_sell_vol": 0.0,
+        "retail_buy_vol": 0.0,
+        "retail_sell_vol": 0.0,
         "delta": 0.0,
         "trades": 0,
         "footprint": {},
@@ -352,17 +369,33 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
     candle["volume"] += quantity
     candle["trades"] += 1
 
-    if is_buyer_maker:
-        candle["sell_volume"] += quantity
-    else:
-        candle["buy_volume"] += quantity
-
-    candle["delta"] = candle["buy_volume"] - candle["sell_volume"]
-
     symbol = candle["symbol"]
     step = PRICE_STEP[symbol]
     price_level = round_price_to_step(price, step)
     key = str(price_level)
+
+    base_lot = rolling_lot_tracker.get(symbol, 0.05)
+    if candle["timeframe"] == "1m":
+        base_lot = (base_lot * 0.992) + (quantity * 0.008)
+        rolling_lot_tracker[symbol] = base_lot
+
+    whale_cut = max(base_lot * 3.0, MIN_WHALE_LOT.get(symbol, 0.25))
+    is_whale_tick = quantity >= whale_cut
+
+    if is_buyer_maker:
+        candle["sell_volume"] += quantity
+        if is_whale_tick:
+            candle["whale_sell_vol"] = float(candle.get("whale_sell_vol", 0.0)) + quantity
+        else:
+            candle["retail_sell_vol"] = float(candle.get("retail_sell_vol", 0.0)) + quantity
+    else:
+        candle["buy_volume"] += quantity
+        if is_whale_tick:
+            candle["whale_buy_vol"] = float(candle.get("whale_buy_vol", 0.0)) + quantity
+        else:
+            candle["retail_buy_vol"] = float(candle.get("retail_buy_vol", 0.0)) + quantity
+
+    candle["delta"] = candle["buy_volume"] - candle["sell_volume"]
 
     level = candle["footprint"].get(key)
     if level is None:
@@ -370,27 +403,69 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
             "price": price_level,
             "buy": 0.0,
             "sell": 0.0,
+            "whale_buy": 0.0,
+            "whale_sell": 0.0,
+            "retail_buy": 0.0,
+            "retail_sell": 0.0,
+            "whale_trades": 0,
             "delta": 0.0,
             "volume": 0.0,
             "trades": 0,
             "pulled_qty": 0.0,
             "bid_pulled": 0.0,
             "ask_pulled": 0.0,
+            "whale_pull_chunks": 0,
             "status": "NORMAL",
         }
         candle["footprint"][key] = level
 
     if is_buyer_maker:
         level["sell"] += quantity
+        if is_whale_tick:
+            level["whale_sell"] = float(level.get("whale_sell", 0.0)) + quantity
+            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
+        else:
+            level["retail_sell"] = float(level.get("retail_sell", 0.0)) + quantity
     else:
         level["buy"] += quantity
+        if is_whale_tick:
+            level["whale_buy"] = float(level.get("whale_buy", 0.0)) + quantity
+            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
+        else:
+            level["retail_buy"] = float(level.get("retail_buy", 0.0)) + quantity
 
     level["volume"] += quantity
     level["trades"] += 1
     level["delta"] = level["buy"] - level["sell"]
 
+    # Feed Raw Millisecond DOM Telemetry + 3-Tick Neighborhood Cluster Iceberg Detection
+    if candle["timeframe"] == "1m":
+        d_raw = dom_raw_telemetry[symbol]
+        d_cell = d_raw[price_level]
+        d_cell["ts"] = now_ms()
+        if is_buyer_maker:
+            if is_whale_tick:
+                d_cell["w_sell"] += quantity
+            else:
+                d_cell["r_sell"] += quantity
+            # Check 3-tick cluster neighborhood so diagonal/cluster absorption is caught even if price shifts by 1-2 ticks!
+            c_sell_exec = sum(d_raw[round_price_to_step(price_level + k * step, step)]["w_sell"] + d_raw[round_price_to_step(price_level + k * step, step)]["r_sell"] for k in (-1, 0, 1))
+            c_peak_bid = sum(d_raw[round_price_to_step(price_level + k * step, step)]["peak_bid"] for k in (-1, 0, 1))
+            if c_peak_bid > 0 and c_sell_exec > c_peak_bid * 1.10:
+                d_cell["iceberg_bid"] = max(d_cell["iceberg_bid"], (c_sell_exec - c_peak_bid) * 0.5)
+        else:
+            if is_whale_tick:
+                d_cell["w_buy"] += quantity
+            else:
+                d_cell["r_buy"] += quantity
+            c_buy_exec = sum(d_raw[round_price_to_step(price_level + k * step, step)]["w_buy"] + d_raw[round_price_to_step(price_level + k * step, step)]["r_buy"] for k in (-1, 0, 1))
+            c_peak_ask = sum(d_raw[round_price_to_step(price_level + k * step, step)]["peak_ask"] for k in (-1, 0, 1))
+            if c_peak_ask > 0 and c_buy_exec > c_peak_ask * 1.10:
+                d_cell["iceberg_ask"] = max(d_cell["iceberg_ask"], (c_buy_exec - c_peak_ask) * 0.5)
+
+
 def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty, old_book_qty, status_str):
-    """Stamps ONLY when price actually approaches within 2 ticks of the 10s+ Resting Wall!"""
+    """FOOTPRINT RULE: Stamps >=10s Aged Resting Wall pulls across the active 18-step cluster zone!"""
     step = PRICE_STEP.get(symbol, 1.0)
     try:
         p_float = float(price_str)
@@ -398,7 +473,10 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
         return
     bucket_price = round_price_to_step(p_float, step)
     key = str(bucket_price)
-    max_distance = step * 2.0  # STRICT: Only count wall pull when live price arrives within 2 ticks of the wall!
+    max_distance = step * 18.0
+
+    min_pull_map = {"BTCUSDT": 1.5, "ETHUSDT": 12.0, "SOLUSDT": 80.0, "XRPUSDT": 15000.0}
+    whale_chunk_cut = min_pull_map.get(symbol, 1.0) * 2.5
 
     with lock:
         live_px = last_trade.get(symbol, {}).get("price")
@@ -408,7 +486,7 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
         for tf in TIMEFRAMES.keys():
             curr = current_candles[symbol][tf]
             if curr is not None and "footprint" in curr:
-                if bucket_price > curr["high"] + step * 2.0 or bucket_price < curr["low"] - step * 2.0:
+                if bucket_price > curr["high"] + step * 10.0 or bucket_price < curr["low"] - step * 10.0:
                     continue
 
                 level = curr["footprint"].get(key)
@@ -417,12 +495,18 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
                         "price": bucket_price,
                         "buy": 0.0,
                         "sell": 0.0,
+                        "whale_buy": 0.0,
+                        "whale_sell": 0.0,
+                        "retail_buy": 0.0,
+                        "retail_sell": 0.0,
+                        "whale_trades": 0,
                         "delta": 0.0,
                         "volume": 0.0,
                         "trades": 0,
                         "pulled_qty": 0.0,
                         "bid_pulled": 0.0,
                         "ask_pulled": 0.0,
+                        "whale_pull_chunks": 0,
                         "max_book_seen": 0.0,
                         "status": "NORMAL",
                     }
@@ -432,7 +516,10 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
                     p_val = float(pulled_qty)
                     peak_seen = max(float(level.get("max_book_seen", 0.0)), float(old_book_qty), p_val)
                     level["max_book_seen"] = peak_seen
-                    max_allowed_pull = peak_seen
+                    max_allowed_pull = peak_seen * 1.30
+
+                    if p_val >= whale_chunk_cut:
+                        level["whale_pull_chunks"] = int(level.get("whale_pull_chunks", 0)) + 1
 
                     if str(side).lower() == "bid":
                         new_bp = min(float(level.get("bid_pulled", 0.0)) + p_val, max_allowed_pull)
@@ -781,14 +868,27 @@ def apply_orderbook_event(symbol, event):
     finalize_liquidity_records(symbol, event_time)
     liquidity_index = state["liquidity_match_index"]
 
-    # Minimum single pull event size to care about
+    step = PRICE_STEP.get(symbol, 1.0)
     min_pull_map = {"BTCUSDT": 1.5, "ETHUSDT": 12.0, "SOLUSDT": 80.0, "XRPUSDT": 15000.0}
     min_track_qty = min_pull_map.get(symbol, 1.0)
-    MIN_WALL_AGE_MS = 10000  # Strict 10 Seconds Minimum Age
+    flash_chunk_qty = min_track_qty * 0.65  # Captures fast millisecond institutional spoofs in Raw DOM
+    MIN_WALL_AGE_MS = 10000  # Strict 10s rule ONLY for Footprint Aged Resting Walls
+
+    live_px = last_trade.get(symbol, {}).get("price")
+    dom_raw = dom_raw_telemetry[symbol]
+
+    # Retain 5 minutes of Raw Millisecond Cluster Telemetry so multi-candle ranges/triangles are tracked!
+    if event_update_id % 60 == 0 and dom_raw:
+        cutoff_ts = event_time - 300000
+        for k_px, v_obj in list(dom_raw.items()):
+            if v_obj["ts"] > 0 and v_obj["ts"] < cutoff_ts:
+                dom_raw.pop(k_px, None)
 
     def process_side(side, event_levels, book):
+        is_bid = (side == "bid")
         for price, quantity in event_levels:
             price = str(price)
+            p_flt = float(price)
             new_quantity = float(quantity)
             old_quantity = float(book.get(price, 0.0))
 
@@ -800,9 +900,18 @@ def apply_orderbook_event(symbol, event):
             else:
                 book[price] = new_quantity
 
+            b_px = round_price_to_step(p_flt, step)
+            near_live = (live_px is None) or (abs(b_px - float(live_px)) <= step * 35.0)
+            d_cell = dom_raw[b_px] if near_live else None
+            if d_cell is not None:
+                d_cell["ts"] = event_time
+                if is_bid:
+                    d_cell["peak_bid"] = max(d_cell["peak_bid"], new_quantity, old_quantity)
+                else:
+                    d_cell["peak_ask"] = max(d_cell["peak_ask"], new_quantity, old_quantity)
+
             lots = state["liquidity_lots"][side][price]
 
-            # FIX 1: Track ALL additions (even small ones) so LIFO cancellation NEVER eats old 10s lots by mistake!
             if added_qty > 1e-8:
                 lots.append({
                     "lot_id": str(uuid.uuid4()),
@@ -812,11 +921,25 @@ def apply_orderbook_event(symbol, event):
                     "origin": "depth_add",
                     "update_id": event_update_id,
                 })
+                if d_cell is not None:
+                    if is_bid:
+                        d_cell["ms_bid_add"] += added_qty
+                        # Cluster Zone Iceberg Reload: Limit Bids reloading within 5 steps of live price where Sells hit!
+                        cluster_sells = sum(dom_raw[round_price_to_step(b_px + k * step, step)]["w_sell"] + dom_raw[round_price_to_step(b_px + k * step, step)]["r_sell"] for k in (-1, 0, 1))
+                        if cluster_sells >= min_track_qty * 0.45 and live_px is not None and abs(b_px - float(live_px)) <= step * 5.0:
+                            d_cell["iceberg_bid"] += added_qty * 0.70
+                    else:
+                        d_cell["ms_ask_add"] += added_qty
+                        # Cluster Zone Iceberg Reload: Limit Asks reloading within 5 steps of live price where Buys hit!
+                        cluster_buys = sum(dom_raw[round_price_to_step(b_px + k * step, step)]["w_buy"] + dom_raw[round_price_to_step(b_px + k * step, step)]["r_buy"] for k in (-1, 0, 1))
+                        if cluster_buys >= min_track_qty * 0.45 and live_px is not None and abs(b_px - float(live_px)) <= step * 5.0:
+                            d_cell["iceberg_ask"] += added_qty * 0.70
 
             fifo_consumption = []
             aged_consumed_qty = 0.0
             aged_executed_qty = 0.0
             aged_unmatched_qty = 0.0
+            flash_unmatched_qty = 0.0
 
             if reduced_qty > 1e-8:
                 executed_qty = match_trade_to_liquidity_reduction(
@@ -825,7 +948,6 @@ def apply_orderbook_event(symbol, event):
                 executed_qty = min(max(float(executed_qty), 0.0), reduced_qty)
                 canceled_qty = max(reduced_qty - executed_qty, 0.0)
 
-                # 1. EXECUTIONS consume from FRONT of queue (FIFO: Oldest Resting Orders Execute First)
                 rem_exec = executed_qty
                 while rem_exec > 1e-12 and lots:
                     oldest_lot = lots[0]
@@ -837,9 +959,7 @@ def apply_orderbook_event(symbol, event):
                     take = min(lot_rem, rem_exec)
                     oldest_lot["remaining_qty"] = max(0.0, lot_rem - take)
                     lot_age = event_time - int(oldest_lot.get("time", event_time))
-                    is_aged = (lot_age >= MIN_WALL_AGE_MS)
-
-                    if is_aged:
+                    if lot_age >= MIN_WALL_AGE_MS:
                         aged_consumed_qty += take
                         aged_executed_qty += take
 
@@ -847,7 +967,6 @@ def apply_orderbook_event(symbol, event):
                     if oldest_lot["remaining_qty"] <= 1e-12:
                         lots.popleft()
 
-                # 2. CANCELLATIONS remove from BACK of queue FIRST (LIFO: All new <10s flickers stripped first!)
                 rem_cancel = canceled_qty
                 while rem_cancel > 1e-12 and lots:
                     newest_lot = lots[-1]
@@ -859,13 +978,14 @@ def apply_orderbook_event(symbol, event):
                     take = min(lot_rem, rem_cancel)
                     newest_lot["remaining_qty"] = max(0.0, lot_rem - take)
                     lot_age = event_time - int(newest_lot.get("time", event_time))
-                    is_aged = (lot_age >= MIN_WALL_AGE_MS)
 
-                    # ONLY count as Pull if this specific canceled lot was resting for >= 10 seconds
-                    # AND the total single pull event was meaningful (>= min_track_qty)!
-                    if is_aged and canceled_qty >= min_track_qty:
-                        aged_consumed_qty += take
-                        aged_unmatched_qty += take
+                    if lot_age >= MIN_WALL_AGE_MS:
+                        if canceled_qty >= min_track_qty:
+                            aged_consumed_qty += take
+                            aged_unmatched_qty += take
+                    else:
+                        if canceled_qty >= flash_chunk_qty and lot_age >= 50:
+                            flash_unmatched_qty += take
 
                     rem_cancel -= take
                     if newest_lot["remaining_qty"] <= 1e-12:
@@ -874,7 +994,14 @@ def apply_orderbook_event(symbol, event):
                 if not lots:
                     state["liquidity_lots"][side].pop(price, None)
 
-                # Only create a pull record if an actual >=10s wall of meaningful size was pulled!
+                if d_cell is not None:
+                    if is_bid:
+                        d_cell["flash_bid_pull"] += flash_unmatched_qty
+                        d_cell["aged_bid_pull"] += aged_unmatched_qty
+                    else:
+                        d_cell["flash_ask_pull"] += flash_unmatched_qty
+                        d_cell["aged_ask_pull"] += aged_unmatched_qty
+
                 if aged_unmatched_qty >= min_track_qty:
                     liquidity_record = {
                         "time": event_time,
@@ -898,7 +1025,7 @@ def apply_orderbook_event(symbol, event):
                         "status": "reduction_pending",
                     }
                     state["liquidity_history"].append(liquidity_record)
-                    price_key = round(float(price), 8)
+                    price_key = round(p_flt, 8)
                     liquidity_index[(side, price_key)].append(liquidity_record)
             else:
                 if not lots:
@@ -2512,21 +2639,33 @@ function fmt(v) {
 }
 
 // Strictly clips to actual candle High-Low + de-flickers raw pulls so 0|0 ghost rows never appear!
+// Preserves BOTH Traded Levels AND 10s+ Aged Pull Levels + Exact Tick-Level Whale vs Retail Volumes!
+// Preserves Traded Levels + 10s+ Aged Pull Levels + Tick-Level Whale vs Retail + 3-Row Cluster Neighborhood!
 function groupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench) {
     const map = new Map();
     const arr = Array.isArray(fpRaw) ? fpRaw : Object.values(fpRaw || {});
     arr.forEach(l => {
-        // Strict range clamp: Only show levels inside actual candle High/Low (+1 step tolerance)
-        if (l.price < low - effStep * 1.1 || l.price > high + effStep * 1.1) return;
+        if (l.price < low - effStep * 2.5 || l.price > high + effStep * 2.5) return;
         const bucket = Math.floor(l.price / effStep + 1e-9) * effStep;
         const key = bucket.toFixed(6);
         let g = map.get(key);
         if (!g) {
-            g = { price: bucket, buy: 0, sell: 0, volume: 0, trades: 0, bid_pulled: 0, ask_pulled: 0, pulled_qty: 0 };
+            g = {
+                price: bucket, buy: 0, sell: 0,
+                whale_buy: 0, whale_sell: 0, retail_buy: 0, retail_sell: 0,
+                whale_trades: 0, whale_pull_chunks: 0,
+                volume: 0, trades: 0, bid_pulled: 0, ask_pulled: 0, pulled_qty: 0
+            };
             map.set(key, g);
         }
         g.buy += (l.buy || 0);
         g.sell += (l.sell || 0);
+        g.whale_buy += (l.whale_buy || 0);
+        g.whale_sell += (l.whale_sell || 0);
+        g.retail_buy += (l.retail_buy || 0);
+        g.retail_sell += (l.retail_sell || 0);
+        g.whale_trades += (l.whale_trades || 0);
+        g.whale_pull_chunks += (l.whale_pull_chunks || 0);
         g.volume += (l.volume || 0);
         g.trades += (l.trades || 0);
 
@@ -2540,13 +2679,11 @@ function groupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench) {
         g.ask_pulled += ap;
     });
 
-    // Frontend Anti-Flicker Sanity Clamp: prevents pre-fix historical candles from showing 900 BTC fake flicker!
-    const restCap = Math.max((liveRestBench || 15) * 3.2, 25);
+    const restCap = Math.max((liveRestBench || 15) * 4.5, 45);
     const out = [];
     map.forEach(g => {
-        // Ignore completely empty ghost rows where 0 volume traded
         if (g.volume <= 0 && g.bid_pulled <= 0 && g.ask_pulled <= 0) return;
-        const maxReasonablePull = Math.max(g.volume * 2.5, restCap);
+        const maxReasonablePull = Math.max(g.volume * 3.5, restCap);
         if (g.bid_pulled > maxReasonablePull) g.bid_pulled = maxReasonablePull;
         if (g.ask_pulled > maxReasonablePull) g.ask_pulled = maxReasonablePull;
         g.pulled_qty = g.bid_pulled + g.ask_pulled;
@@ -2598,12 +2735,18 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
     let macroBidAbsorbs = 0, macroAskAbsorbs = 0;
     let macroBidPulled = 0, macroAskPulled = 0;
     let whaleBuyLots = 0, whaleSellLots = 0;
+    let sessWhaleBuyVol = 0, sessWhaleSellVol = 0;
+    let sessRetailBuyVol = 0, sessRetailSellVol = 0;
 
     sample.forEach((c, idx) => {
         if (c.high > macroHigh) macroHigh = c.high;
         if (c.low < macroLow) macroLow = c.low;
         sumCandleRanges += Math.max(c.high - c.low, rawStep);
         totalCvd += (c.delta || 0);
+        sessWhaleBuyVol += (c.whale_buy_vol || 0);
+        sessWhaleSellVol += (c.whale_sell_vol || 0);
+        sessRetailBuyVol += (c.retail_buy_vol || 0);
+        sessRetailSellVol += (c.retail_sell_vol || 0);
 
         if (idx > 0 && c.poc && sample[idx - 1].poc) {
             if (c.poc > sample[idx - 1].poc) pocUpSteps++;
@@ -2613,86 +2756,148 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         const fpGrouped = groupFootprint(c.footprint, c.low, c.high, effStep, c.close, liveRestBench);
         const activeCells = fpGrouped.filter(x => x.volume > 0);
         const cAvgV = activeCells.length > 0 ? (c.volume || 1) / activeCells.length : 1;
-        const cHeavyCut = Math.max(cAvgV * 1.35, heavyLvlBenchmark * 0.50);
+        const cHeavyCut = Math.max(cAvgV * 1.25, heavyLvlBenchmark * 0.45);
+        const cSpan = Math.max(c.high - c.low, effStep);
+        const lowerSwingTop = c.low + cSpan * 0.42;
+        const upperSwingBot = c.high - cSpan * 0.42;
 
-        fpGrouped.forEach(l => {
+        // Evaluate 3-Row Sliding Clusters inside each candle's swing so Diagonal/Arc/Triangle absorption is caught!
+        for (let i = 0; i < fpGrouped.length; i++) {
+            const l = fpGrouped[i];
             const sv = l.sell || 0, bv = l.buy || 0, tv = l.volume || 0;
             const bp = l.bid_pulled || 0, ap = l.ask_pulled || 0;
-            const bAbsPct = tv > 0 ? (sv / tv) * 100 : 0;
-            const aAbsPct = tv > 0 ? (bv / tv) * 100 : 0;
+
+            // 3-Row Cluster Sum (i-1, i, i+1)
+            let clusSell = sv, clusBuy = bv;
+            if (i > 0 && Math.abs(fpGrouped[i - 1].price - l.price) <= effStep * 1.5) {
+                clusSell += (fpGrouped[i - 1].sell || 0);
+                clusBuy += (fpGrouped[i - 1].buy || 0);
+            }
+            if (i + 1 < fpGrouped.length && Math.abs(fpGrouped[i + 1].price - l.price) <= effStep * 1.5) {
+                clusSell += (fpGrouped[i + 1].sell || 0);
+                clusBuy += (fpGrouped[i + 1].buy || 0);
+            }
+            const clusTot = clusSell + clusBuy;
+            const clusBPct = clusTot > 0 ? (clusSell / clusTot) * 100 : 0;
+            const clusAPct = clusTot > 0 ? (clusBuy / clusTot) * 100 : 0;
 
             macroBidPulled += bp;
             macroAskPulled += ap;
-            if (sv >= cHeavyCut && bAbsPct >= 65 && c.close >= l.price) macroBidAbsorbs++;
-            if (bv >= cHeavyCut && aAbsPct >= 65 && c.close <= l.price) macroAskAbsorbs++;
+
+            if (l.price <= lowerSwingTop && clusSell >= cHeavyCut * 1.3 && clusBPct >= 58 && c.close > l.price + effStep * 0.4) {
+                macroBidAbsorbs++;
+            }
+            if (l.price >= upperSwingBot && clusBuy >= cHeavyCut * 1.3 && clusAPct >= 58 && c.close < l.price - effStep * 0.4) {
+                macroAskAbsorbs++;
+            }
 
             const lt = Math.max(l.trades || 1, 1);
             const lotRatio = (tv / lt) / baselineLotSize;
-            if (tv >= Math.max(cAvgV * 1.15, heavyLvlBenchmark * 0.50) && ((lotRatio >= 2.8 && lt <= 48) || lotRatio >= 4.5)) {
-                if (bv > sv) whaleBuyLots++;
+            const hasTickWhale = (l.whale_buy || 0) + (l.whale_sell || 0) > 0;
+            if (hasTickWhale || (tv >= Math.max(cAvgV * 1.15, heavyLvlBenchmark * 0.50) && ((lotRatio >= 2.8 && lt <= 48) || lotRatio >= 4.5))) {
+                if ((l.whale_buy || bv) > (l.whale_sell || sv)) whaleBuyLots++;
                 else whaleSellLots++;
             }
-        });
+        }
     });
 
     const macroSpan = Math.max(macroHigh - macroLow, rawStep);
     const netPriceMove = last.close - first.open;
     const efficiency = Math.abs(netPriceMove) / Math.max(sumCandleRanges, rawStep);
     const macroPullDelta = macroBidPulled - macroAskPulled;
+    const netWhaleVolDelta = sessWhaleBuyVol - sessWhaleSellVol;
 
-    let bullPts = 0, bearPts = 0, macroNotes = [];
+    // Hidden Institutional Buildup Score (Works EVEN WHEN PRICE IS IN A SIDEWAYS/DIAGONAL/TRIANGLE/ARC CLUSTER!)
+    let instBuildupPts = 0;
+    let macroNotes = [];
 
-    if (netPriceMove > macroSpan * 0.20 && pocUpSteps > pocDownSteps) { bullPts += 24; macroNotes.push(`POC Up(${pocUpSteps}↑)`); }
-    else if (netPriceMove < -macroSpan * 0.20 && pocDownSteps > pocUpSteps) { bearPts += 24; macroNotes.push(`POC Down(${pocDownSteps}↓)`); }
-
-    if (totalCvd > 0 && netPriceMove > 0) { bullPts += 20; macroNotes.push(`CVD +${fmt(totalCvd)}`); }
-    else if (totalCvd < 0 && netPriceMove < 0) { bearPts += 20; macroNotes.push(`CVD ${fmt(totalCvd)}`); }
-
-    if (macroPullDelta < 0 && netPriceMove > 0) {
-        bullPts += 22;
-        macroNotes.push(`PΔ:${fmt(macroPullDelta)} (Ask Spoof Swept UP)`);
-    } else if (macroPullDelta > 0 && netPriceMove < 0) {
-        bearPts += 22;
-        macroNotes.push(`PΔ:+${fmt(macroPullDelta)} (Bid Spoof Swept DN)`);
+    if (macroBidAbsorbs > macroAskAbsorbs) {
+        instBuildupPts += Math.min(28, 12 + (macroBidAbsorbs - macroAskAbsorbs) * 4);
+        macroNotes.push(`ClusterBidAbs(${macroBidAbsorbs}v${macroAskAbsorbs})`);
+    } else if (macroAskAbsorbs > macroBidAbsorbs) {
+        instBuildupPts -= Math.min(28, 12 + (macroAskAbsorbs - macroBidAbsorbs) * 4);
+        macroNotes.push(`ClusterAskAbs(${macroAskAbsorbs}v${macroBidAbsorbs})`);
     }
 
-    if (whaleBuyLots > whaleSellLots) { bullPts += 18; macroNotes.push(`◆Whale(${whaleBuyLots}B/${whaleSellLots}S)`); }
-    else if (whaleSellLots > whaleBuyLots) { bearPts += 18; macroNotes.push(`◆Whale(${whaleSellLots}S/${whaleBuyLots}B)`); }
+    if (whaleBuyLots > whaleSellLots || netWhaleVolDelta > avgFlowVol * 0.3) {
+        instBuildupPts += 24;
+        macroNotes.push(`🐋WhaleNetBuy(+${fmt(netWhaleVolDelta)})`);
+    } else if (whaleSellLots > whaleBuyLots || netWhaleVolDelta < -avgFlowVol * 0.3) {
+        instBuildupPts -= 24;
+        macroNotes.push(`🐋WhaleNetSell(${fmt(netWhaleVolDelta)})`);
+    }
+
+    if (macroPullDelta < -avgFlowVol * 0.15) {
+        instBuildupPts += 18;
+        macroNotes.push(`AskWallPulled(PΔ${fmt(macroPullDelta)})`);
+    } else if (macroPullDelta > avgFlowVol * 0.15) {
+        instBuildupPts -= 18;
+        macroNotes.push(`BidWallPulled(PΔ+${fmt(macroPullDelta)})`);
+    }
+
+    if (pocUpSteps > pocDownSteps) {
+        instBuildupPts += 16;
+        macroNotes.push(`POC-DriftUp(${pocUpSteps}↑)`);
+    } else if (pocDownSteps > pocUpSteps) {
+        instBuildupPts -= 16;
+        macroNotes.push(`POC-DriftDn(${pocDownSteps}↓)`);
+    }
+
+    if (totalCvd > 0 && (netPriceMove >= 0 || macroBidAbsorbs > macroAskAbsorbs)) {
+        instBuildupPts += 14;
+        macroNotes.push(`CVD+${fmt(totalCvd)}`);
+    } else if (totalCvd < 0 && (netPriceMove <= 0 || macroAskAbsorbs > macroBidAbsorbs)) {
+        instBuildupPts -= 14;
+        macroNotes.push(`CVD${fmt(totalCvd)}`);
+    }
 
     const vBox = document.getElementById('masterVerdictBox');
     const vTitle = document.getElementById('masterVerdictTitle');
     const vReasons = document.getElementById('masterVerdictReasons');
-    const netMacro = bullPts - bearPts;
+    const netMacro = instBuildupPts;
+    const isCoilingCluster = efficiency < 0.22; // Price is rotating inside a Range, Channel, Triangle, or Arc!
 
-    if (efficiency < 0.15 && Math.abs(netMacro) < 25) {
-        vBox.style.background = 'rgba(255, 193, 7, 0.15)';
-        vBox.style.borderColor = '#ffca28';
-        vTitle.style.color = '#ffca28';
-        vTitle.innerText = `🟡 MACRO: SIDEWAYS ROTATIONAL CHOP — FADE EXTREMES`;
+    if (isCoilingCluster && Math.abs(netMacro) >= 18) {
+        const prob = Math.min(96, Math.round(56 + (Math.abs(netMacro) / 95) * 40));
+        if (netMacro > 0) {
+            vBox.style.background = 'rgba(0, 229, 255, 0.18)';
+            vBox.style.borderColor = '#00e5ff';
+            vTitle.style.color = '#00e5ff';
+            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: INST ACCUMULATING LONG (${prob}% PROB) ➔ EXPECT LOW-SWEEP OR UPSIDE BREAK!`;
+        } else {
+            vBox.style.background = 'rgba(255, 145, 0, 0.20)';
+            vBox.style.borderColor = '#ff9100';
+            vTitle.style.color = '#ffab00';
+            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: INST DISTRIBUTING SHORT (${prob}% PROB) ➔ EXPECT HIGH-SWEEP OR DOWNSIDE BREAK!`;
+        }
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
-    } else if (netMacro >= 18) {
-        const conf = Math.min(97, Math.round(52 + (netMacro / 100) * 45));
+    } else if (netMacro >= 20) {
+        const conf = Math.min(97, Math.round(54 + (netMacro / 100) * 43));
         vBox.style.background = 'rgba(0, 200, 83, 0.18)';
         vBox.style.borderColor = '#00e676';
         vTitle.style.color = '#00e676';
-        vTitle.innerText = `🟢 MACRO: BULLISH ORDERFLOW DOMINANCE (${conf}%) — LONG BIAS`;
+        vTitle.innerText = `🟢 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BULLISH EXPANSION (${conf}%) — LONG BIAS`;
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
-    } else if (netMacro <= -18) {
-        const conf = Math.min(97, Math.round(52 + (Math.abs(netMacro) / 100) * 45));
+    } else if (netMacro <= -20) {
+        const conf = Math.min(97, Math.round(54 + (Math.abs(netMacro) / 100) * 43));
         vBox.style.background = 'rgba(255, 23, 68, 0.18)';
         vBox.style.borderColor = '#ff5252';
         vTitle.style.color = '#ff5252';
-        vTitle.innerText = `🔴 MACRO: BEARISH ORDERFLOW DOMINANCE (${conf}%) — SHORT BIAS`;
+        vTitle.innerText = `🔴 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BEARISH EXPANSION (${conf}%) — SHORT BIAS`;
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     } else {
         vBox.style.background = 'rgba(38, 50, 56, 0.85)';
         vBox.style.borderColor = '#90a4ae';
         vTitle.style.color = '#eceff1';
-        vTitle.innerText = `⚖️ MACRO: BALANCED TWO-WAY AUCTION — WAIT FOR DISPLACEMENT`;
+        vTitle.innerText = `⚖️ [${tf.toUpperCase()} CLUSTER]: NEUTRAL EQUILIBRIUM — MONITORING ORDERBOOK BUILDUP`;
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     }
 
-    return { netMacro, totalCvd, macroPullDelta, macroBidAbsorbs, macroAskAbsorbs, whaleBuyLots, whaleSellLots, macroNotes };
+    return {
+        netMacro, isCoilingCluster, totalCvd, macroPullDelta, macroBidAbsorbs, macroAskAbsorbs,
+        whaleBuyLots, whaleSellLots, sessWhaleBuyVol, sessWhaleSellVol,
+        sessRetailBuyVol, sessRetailSellVol, macroNotes
+    };
 }
 
 function drawLoop() {
@@ -2845,7 +3050,6 @@ function drawAll() {
         ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(chartW, gy); ctx.stroke();
     }
 
-    // DRAW NAKED POCs (nPOC) & UNFINISHED BUSINESS (UB-HIGH / UB-LOW) MAGNET LINES
     const candleIdxToX = idx => rightStart - (candles.length - 1 - idx) * candleW;
 
     nakedPocs.slice(-8).forEach(np => {
@@ -2903,7 +3107,7 @@ function drawAll() {
         ctx.textBaseline = 'middle';
         ctx.fillText(lbl, chartW - 8, py);
     });
-    
+
     const timeBarTop = H - TIME_H;
     ctx.fillStyle = '#11151f';
     ctx.fillRect(0, timeBarTop, chartW, TIME_H);
@@ -2940,12 +3144,12 @@ function drawAll() {
         });
 
         const avgV = tradedCells.length > 0 ? sumV / tradedCells.length : tfAvgCellVol;
-        const effectiveHeavyAbsCut = Math.max(avgV * 1.35, heavyLvlBenchmark * 0.60);
+        const effectiveHeavyAbsCut = Math.max(avgV * 1.30, heavyLvlBenchmark * 0.55);
         const effectiveNormAbsCut = Math.max(avgV * 0.70, heavyLvlBenchmark * 0.28);
 
         const baseRestRef = liveRestBench > 0 ? Math.max(liveRestBench, heavyLvlBenchmark) : heavyLvlBenchmark;
-        const effectiveHeavyPullQty = Math.max(baseRestRef * 1.10, avgV * 1.25);
-        const effectiveNormPullQty = Math.max(baseRestRef * 0.65, avgV * 0.75);
+        const effectiveHeavyPullQty = Math.max(baseRestRef * 0.95, avgV * 1.10);
+        const effectiveNormPullQty = Math.max(baseRestRef * 0.50, avgV * 0.60);
 
         if (c.vah != null && c.val != null) {
             const yVah = pToY(c.vah + effStep * 0.5);
@@ -2978,70 +3182,86 @@ function drawAll() {
         let botSummary = null;
         let cBidPullSum = 0, cAskPullSum = 0;
         let whaleBuyCount = 0, whaleSellCount = 0;
-        const cMidPrice = (c.high + c.low) * 0.5;
+        let cWhaleBuyVol = c.whale_buy_vol || 0, cWhaleSellVol = c.whale_sell_vol || 0;
+        const cRange = Math.max(c.high - c.low, rawStep * 0.5);
+        const closePos = (c.close - c.low) / cRange;
+        const lowerClusterTop = c.low + cRange * 0.45;
+        const upperClusterBot = c.high - cRange * 0.45;
 
-        fp.forEach(l => {
+        fp.forEach((l, rowIdx) => {
             const py = pToY(l.price + effStep * 0.5);
             const sellV = l.sell || 0;
             const buyV = l.buy || 0;
             const totV = l.volume || 0;
-            if (totV <= 0) return;
+            const bPull = l.bid_pulled || 0;
+            const aPull = l.ask_pulled || 0;
+
+            cBidPullSum += bPull;
+            cAskPullSum += aPull;
+
+            if (totV <= 0 && bPull <= 0 && aPull <= 0) return;
+
+            // 3-Row Sliding Cluster Calculation (Captures multi-tick cluster stopping!)
+            let clusSell = sellV, clusBuy = buyV;
+            if (rowIdx > 0 && Math.abs(fp[rowIdx - 1].price - l.price) <= effStep * 1.5) {
+                clusSell += (fp[rowIdx - 1].sell || 0);
+                clusBuy += (fp[rowIdx - 1].buy || 0);
+            }
+            if (rowIdx + 1 < fp.length && Math.abs(fp[rowIdx + 1].price - l.price) <= effStep * 1.5) {
+                clusSell += (fp[rowIdx + 1].sell || 0);
+                clusBuy += (fp[rowIdx + 1].buy || 0);
+            }
+            const clusTot = clusSell + clusBuy;
+            const clusBPct = clusTot > 0 ? Math.round((clusSell / clusTot) * 100) : 0;
+            const clusAPct = clusTot > 0 ? Math.round((clusBuy / clusTot) * 100) : 0;
 
             const trd = Math.max(l.trades || 1, 1);
             const lvlLotSize = totV / trd;
             const lotRatio = lvlLotSize / baselineLotSize;
+            const wBuy = l.whale_buy || 0;
+            const wSell = l.whale_sell || 0;
 
-            const isWhaleLot = totV >= Math.max(avgV * 1.15, heavyLvlBenchmark * 0.50) && ((lotRatio >= 2.8 && trd <= 48) || lotRatio >= 4.5);
+            const isWhaleLot = (wBuy + wSell > 0) || (totV >= Math.max(avgV * 1.15, heavyLvlBenchmark * 0.50) && ((lotRatio >= 2.8 && trd <= 48) || lotRatio >= 4.5));
             if (isWhaleLot) {
-                if (buyV > sellV) whaleBuyCount++;
+                if ((wBuy > 0 || wSell > 0) ? (wBuy > wSell) : (buyV > sellV)) whaleBuyCount++;
                 else whaleSellCount++;
             }
 
-            const bPull = l.bid_pulled || 0;
-            const aPull = l.ask_pulled || 0;
             const lvlPullDelta = bPull - aPull;
-            cBidPullSum += bPull;
-            cAskPullSum += aPull;
-
             const bPullPct = bPull > 0 ? Math.round((bPull / (bPull + sellV)) * 100) : 0;
             const aPullPct = aPull > 0 ? Math.round((aPull / (aPull + buyV)) * 100) : 0;
-            const bAbsPct = Math.round((sellV / totV) * 100);
-            const aAbsPct = Math.round((buyV / totV) * 100);
+            const bAbsPct = totV > 0 ? Math.round((sellV / totV) * 100) : 0;
+            const aAbsPct = totV > 0 ? Math.round((buyV / totV) * 100) : 0;
 
-            // Includes both 65%+ One-Sided Absorption AND 2.0x Heavy Volume 50-50 Stealth Iceberg Pinning!
-            const isStealthChurnLvl = totV >= Math.max(avgV * 2.0, heavyLvlBenchmark * 0.85) && bAbsPct >= 42 && aAbsPct >= 42;
-            const inBidZone = l.price <= Math.max(cMidPrice + effStep, Math.min(c.open, c.close) + effStep * 2);
+            // Cluster-Aware Absorption: Catches single-level OR 3-row cluster stopping where price rotates away!
+            const isStealthChurnLvl = clusTot >= Math.max(avgV * 2.2, heavyLvlBenchmark * 0.90) && clusBPct >= 42 && clusAPct >= 42;
+            const inBidCluster = l.price <= lowerClusterTop;
+            const bidClusterHeld = c.close > l.price + effStep * 0.4 && (c.close >= c.open || closePos >= 0.42);
             let bidAbsType = null;
-            if ((sellV >= effectiveHeavyAbsCut && bAbsPct >= 65 && c.close >= l.price && inBidZone) || (isStealthChurnLvl && inBidZone && c.close > l.price + effStep * 0.5)) {
+            if (inBidCluster && bidClusterHeld && ((sellV >= effectiveHeavyAbsCut && bAbsPct >= 60) || (clusSell >= effectiveHeavyAbsCut * 1.65 && clusBPct >= 58 && sellV >= avgV * 0.8) || isStealthChurnLvl)) {
                 bidAbsType = 'heavy';
-                if (!botSummary || sellV > botSummary.val) botSummary = { type: 'ABS', val: sellV, pct: bAbsPct };
-            } else if (sellV >= effectiveNormAbsCut && bAbsPct >= 52 && c.close >= l.price && inBidZone) {
+                if (!botSummary || sellV > botSummary.val) botSummary = { type: 'ABS', val: sellV, pct: Math.max(bAbsPct, clusBPct) };
+            } else if (inBidCluster && bidClusterHeld && sellV >= effectiveNormAbsCut && bAbsPct >= 52) {
                 bidAbsType = 'norm';
             }
 
-            const inAskZone = l.price >= Math.min(cMidPrice - effStep, Math.max(c.open, c.close) - effStep * 2);
+            const inAskCluster = l.price >= upperClusterBot;
+            const askClusterHeld = c.close < l.price - effStep * 0.4 && (c.close <= c.open || closePos <= 0.58);
             let askAbsType = null;
-            if ((buyV >= effectiveHeavyAbsCut && aAbsPct >= 65 && c.close <= l.price && inAskZone) || (isStealthChurnLvl && inAskZone && c.close < l.price - effStep * 0.5)) {
+            if (inAskCluster && askClusterHeld && ((buyV >= effectiveHeavyAbsCut && aAbsPct >= 60) || (clusBuy >= effectiveHeavyAbsCut * 1.65 && clusAPct >= 58 && buyV >= avgV * 0.8) || isStealthChurnLvl)) {
                 askAbsType = 'heavy';
-                if (!topSummary || buyV > topSummary.val) topSummary = { type: 'ABS', val: buyV, pct: aAbsPct };
-            } else if (buyV >= effectiveNormAbsCut && aAbsPct >= 52 && c.close <= l.price && inAskZone) {
+                if (!topSummary || buyV > topSummary.val) topSummary = { type: 'ABS', val: buyV, pct: Math.max(aAbsPct, clusAPct) };
+            } else if (inAskCluster && askClusterHeld && buyV >= effectiveNormAbsCut && aAbsPct >= 52) {
                 askAbsType = 'norm';
             }
 
-            const isSignificantOrderflowLvl = totV >= avgV * 0.35;
             let bidPullType = null;
-            if (isSignificantOrderflowLvl && bPull >= effectiveHeavyPullQty && bPullPct >= 60) {
-                bidPullType = 'heavy';
-            } else if (isSignificantOrderflowLvl && bPull >= effectiveNormPullQty && bPullPct >= 40) {
-                bidPullType = 'norm';
-            }
+            if (bPull >= effectiveHeavyPullQty && bPullPct >= 55) bidPullType = 'heavy';
+            else if (bPull >= effectiveNormPullQty && bPullPct >= 38) bidPullType = 'norm';
 
             let askPullType = null;
-            if (isSignificantOrderflowLvl && aPull >= effectiveHeavyPullQty && aPullPct >= 60) {
-                askPullType = 'heavy';
-            } else if (isSignificantOrderflowLvl && aPull >= effectiveNormPullQty && aPullPct >= 40) {
-                askPullType = 'norm';
-            }
+            if (aPull >= effectiveHeavyPullQty && aPullPct >= 55) askPullType = 'heavy';
+            else if (aPull >= effectiveNormPullQty && aPullPct >= 38) askPullType = 'norm';
 
             if (py < -20 || py > chartH + 10) return;
 
@@ -3086,7 +3306,9 @@ function drawAll() {
 
             if (curX >= boxL && curX <= boxR && curY >= topY && curY <= topY + cellH) {
                 hoveredCellInfo = {
-                    price: l.price, sellV, buyV, bPull, aPull, lvlPullDelta,
+                    price: l.price, sellV, buyV,
+                    wBuy, wSell, rBuy: l.retail_buy || 0, rSell: l.retail_sell || 0,
+                    bPull, aPull, lvlPullDelta,
                     bPullPct, aPullPct, bAbsPct, aAbsPct,
                     trades: trd, lvlLotSize, lotRatio, isWhaleLot
                 };
@@ -3097,8 +3319,8 @@ function drawAll() {
 
             if (canPrint) {
                 ctx.textBaseline = 'middle';
-                const whaleSellMark = (proViewMode && isWhaleLot && sellV >= buyV) ? '◆' : '';
-                const whaleBuyMark = (proViewMode && isWhaleLot && buyV > sellV) ? '◆' : '';
+                const whaleSellMark = (proViewMode && isWhaleLot && (wSell > wBuy || (wSell === 0 && sellV >= buyV))) ? '◆' : '';
+                const whaleBuyMark = (proViewMode && isWhaleLot && (wBuy > wSell || (wBuy === 0 && buyV > sellV))) ? '◆' : '';
 
                 ctx.font = (sellImb || isPoc || whaleSellMark) ? 'bold 9.5px monospace' : '9.5px monospace';
                 ctx.fillStyle = whaleSellMark ? '#ffd700' : (sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
@@ -3171,11 +3393,9 @@ function drawAll() {
         const rvol = cVol / avgFlowVol;
         const mktBuyPct = cVol > 0 ? Math.round(((c.buy_volume || 0) / cVol) * 100) : 50;
         const mktSellPct = 100 - mktBuyPct;
-        const cRange = Math.max(c.high - c.low, rawStep * 0.5);
         const bodySize = Math.abs(c.close - c.open);
         const upperWick = c.high - Math.max(c.open, c.close);
         const lowerWick = Math.min(c.open, c.close) - c.low;
-        const closePos = (c.close - c.low) / cRange;
 
         let prevSwingHigh = -Infinity, prevSwingLow = Infinity;
         for (let k = Math.max(0, idx - 5); k < idx; k++) {
@@ -3191,7 +3411,7 @@ function drawAll() {
         const cBpPct = cBidPullSum > 0 ? Math.round((cBidPullSum / (cBidPullSum + (c.sell_volume || 1))) * 100) : 0;
         const cApPct = cAskPullSum > 0 ? Math.round((cAskPullSum / (cAskPullSum + (c.buy_volume || 1))) * 100) : 0;
 
-        let pullDeltaLine = `BP:${fmt(cBidPullSum)}(${cBpPct}%) AP:${fmt(cAskPullSum)}(${cApPct}%) PΔ:${candlePullDelta >= 0 ? '+' : ''}${fmt(candlePullDelta)}`;
+        let pullDeltaLine = `10sBP:${fmt(cBidPullSum)}(${cBpPct}%) AP:${fmt(cAskPullSum)}(${cApPct}%) PΔ:${candlePullDelta >= 0 ? '+' : ''}${fmt(candlePullDelta)}`;
         let pullDeltaCol = '#b0bec5';
         if (candlePullDelta < -avgV * 0.4 && c.close > c.open) {
             pullDeltaCol = '#00e5ff';
@@ -3199,7 +3419,9 @@ function drawAll() {
             pullDeltaCol = '#ff4081';
         }
 
-        let flowVerdict = `MB:${mktBuyPct}%|MS:${mktSellPct}%`;
+        let flowVerdict = (cWhaleBuyVol + cWhaleSellVol > 0)
+            ? `🐋W:${fmt(cWhaleBuyVol)}B/${fmt(cWhaleSellVol)}S | 🐑R:${fmt(c.retail_buy_vol)}B/${fmt(c.retail_sell_vol)}S`
+            : `MB:${mktBuyPct}%|MS:${mktSellPct}%`;
         let candleDecision = `⚪ NEUTRAL / CHOP`;
         let verdictCol = '#8b93a7';
         let decisionCol = '#9ba2b0';
@@ -3214,25 +3436,25 @@ function drawAll() {
             if (mktBuyPct >= 56 && (c.close <= c.open || upperWick > bodySize * 0.75)) cBear += 34;
             if (mktBuyPct >= 58 && c.close > c.open && closePos >= 0.6) cBull += 30;
             if (mktSellPct >= 58 && c.close < c.open && closePos <= 0.4) cBear += 30;
-            if (botSummary && closePos >= 0.45) cBull += 24;
-            if (topSummary && closePos <= 0.55) cBear += 24;
+            if (botSummary && closePos >= 0.42) cBull += 26;
+            if (topSummary && closePos <= 0.58) cBear += 26;
             if (candlePullDelta < 0 && c.close > c.open) cBull += 20;
             if (candlePullDelta > 0 && c.close < c.open) cBear += 20;
-            if (whaleBuyCount > whaleSellCount) cBull += 22;
-            else if (whaleSellCount > whaleBuyCount) cBear += 22;
+            if (whaleBuyCount > whaleSellCount || cWhaleBuyVol > cWhaleSellVol * 1.3) cBull += 22;
+            else if (whaleSellCount > whaleBuyCount || cWhaleSellVol > cWhaleBuyVol * 1.3) cBear += 22;
 
-            if (sweptSwingLow && c.close > prevSwingLow && isRetailLotBurst && cBidPullSum < cVol * 0.25) {
-                flowVerdict = `🎯SSL-SWEEP: Retail SLs Eaten ➔ Reversal!`; verdictCol = '#00e5ff'; isHighConviction = true; cBull += 25;
-            } else if (sweptSwingHigh && c.close < prevSwingHigh && isRetailLotBurst && cAskPullSum < cVol * 0.25) {
-                flowVerdict = `🎯BSL-SWEEP: Retail SLs Eaten ➔ Reject!`; verdictCol = '#ff9100'; isHighConviction = true; cBear += 25;
+            if (sweptSwingLow && c.close > prevSwingLow && (botSummary || isRetailLotBurst)) {
+                flowVerdict = `🎯SSL-SWEEP: Liquidity Grabbed ➔ Reversal!`; verdictCol = '#00e5ff'; isHighConviction = true; cBull += 28;
+            } else if (sweptSwingHigh && c.close < prevSwingHigh && (topSummary || isRetailLotBurst)) {
+                flowVerdict = `🎯BSL-SWEEP: Liquidity Grabbed ➔ Reject!`; verdictCol = '#ff9100'; isHighConviction = true; cBear += 28;
             } else if (candlePullDelta < -avgV * 0.6 && cApPct >= 55 && c.close > c.open) {
                 flowVerdict = `⚠️FAKE-ASK WALL PULLED ➔ BULL BREAK!`; verdictCol = '#e040fb'; isHighConviction = true;
             } else if (candlePullDelta > avgV * 0.6 && cBpPct >= 55 && c.close < c.open) {
                 flowVerdict = `⚠️FAKE-BID WALL PULLED ➔ BEAR DUMP!`; verdictCol = '#ff4081'; isHighConviction = true;
             } else if (topSummary && cAskPullSum < topSummary.val * 0.3 && c.close <= c.open) {
-                flowVerdict = `🛡️SOLID-ASK WALL: Absorbed & Capped!`; verdictCol = '#ff9100'; isHighConviction = true;
+                flowVerdict = `🛡️CLUSTER-ASK CAP: Absorbed & Stopped!`; verdictCol = '#ff9100'; isHighConviction = true;
             } else if (botSummary && cBidPullSum < botSummary.val * 0.3 && c.close >= c.open) {
-                flowVerdict = `🛡️SOLID-BID WALL: Absorbed & Held!`; verdictCol = '#00e5ff'; isHighConviction = true;
+                flowVerdict = `🛡️CLUSTER-BID HOLD: Absorbed & Stopped!`; verdictCol = '#00e5ff'; isHighConviction = true;
             }
 
             const cNet = cBull - cBear;
@@ -3247,7 +3469,7 @@ function drawAll() {
                 candleDecision = `${whalePrefix}🔴 SELLERS WIN (${cPct}%)`;
                 decisionCol = '#ff5252';
             } else {
-                candleDecision = `${whalePrefix}⚖️ TWO-WAY FIGHT`;
+                candleDecision = `${whalePrefix}⚖️ CLUSTER BUILDUP`;
                 decisionCol = '#ffca28';
             }
         }
@@ -3316,7 +3538,7 @@ function drawAll() {
         }
     });
 
-    const hudW = Math.min(chartW - 12, 480);
+    const hudW = Math.min(chartW - 12, 510);
     ctx.fillStyle = 'rgba(17, 21, 31, 0.92)';
     ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
     ctx.strokeStyle = '#2962ff';
@@ -3329,9 +3551,9 @@ function drawAll() {
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
         ctx.fillStyle = '#ffeb3b';
-        ctx.fillText(`Px:${h.price.toFixed(dec)} | MS:${fmt(h.sellV)}(${h.bAbsPct}%) | MB:${fmt(h.buyV)}(${h.aAbsPct}%)`, 12, 33);
+        ctx.fillText(`Px:${h.price.toFixed(dec)} | 🐋Whale B:${fmt(h.wBuy)} S:${fmt(h.wSell)} | 🐑Retail B:${fmt(h.rBuy)} S:${fmt(h.rSell)}`, 12, 33);
         ctx.fillStyle = '#ff80ab';
-        ctx.fillText(`BPull:${fmt(h.bPull)}(${h.bPullPct}%) | APull:${fmt(h.aPull)}(${h.aPullPct}%) | PΔ:${h.lvlPullDelta >= 0 ? '+' : ''}${fmt(h.lvlPullDelta)}`, 12, 47);
+        ctx.fillText(`10sBPull:${fmt(h.bPull)}(${h.bPullPct}%) | 10sAPull:${fmt(h.aPull)}(${h.aPullPct}%) | PΔ:${h.lvlPullDelta >= 0 ? '+' : ''}${fmt(h.lvlPullDelta)}`, 12, 47);
         ctx.fillStyle = h.isWhaleLot ? '#ffd700' : '#b0bec5';
         const playerTag = h.isWhaleLot ? '🐋 WHALE BLOCK!' : (h.lotRatio < 1.2 ? '🐑 RETAIL / BOT SPLIT' : '⚡ STANDARD FLOW');
         ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 61);
@@ -3359,11 +3581,12 @@ function drawAll() {
     }
 
     // =========================================================================
-    // SPINE-SPLIT BATTLE DOM (ORIGINAL HEADER + 2 FINAL BIAS WINDOWS)
+    // MULTI-ROW CLUSTER DOM + DYNAMIC TIMEFRAME PRE-BREAKOUT PREDICTOR
     // =========================================================================
     const domStep = effStep;
     const bidsArr = obData.bids || [];
     const asksArr = obData.asks || [];
+    const rawDomArr = obData.dom_raw || [];
     const liveCenterP = Math.floor(lastC.close / domStep + 1e-9) * domStep;
 
     const bidMap = new Map();
@@ -3379,6 +3602,28 @@ function drawAll() {
         askMap.set(k, (askMap.get(k) || 0) + a.quantity);
     });
 
+    const rawDomCluster = new Map();
+    rawDomArr.forEach(d => {
+        const b = Math.floor(d.price / domStep + 1e-9) * domStep;
+        const k = b.toFixed(6);
+        let cur = rawDomCluster.get(k) || {
+            wBuy: 0, wSell: 0, rBuy: 0, rSell: 0,
+            flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0,
+            iceBid: 0, iceAsk: 0
+        };
+        cur.wBuy += (d.w_buy || 0);
+        cur.wSell += (d.w_sell || 0);
+        cur.rBuy += (d.r_buy || 0);
+        cur.rSell += (d.r_sell || 0);
+        cur.flashBp += (d.flash_bid_pull || 0);
+        cur.flashAp += (d.flash_ask_pull || 0);
+        cur.agedBp += (d.aged_bid_pull || 0);
+        cur.agedAp += (d.aged_ask_pull || 0);
+        cur.iceBid += (d.iceberg_bid || 0);
+        cur.iceAsk += (d.iceberg_ask || 0);
+        rawDomCluster.set(k, cur);
+    });
+
     const domMagnetMap = new Map();
     nakedPocs.forEach(np => {
         const b = Math.floor(np.price / domStep + 1e-9) * domStep;
@@ -3389,89 +3634,129 @@ function drawAll() {
         domMagnetMap.set(b.toFixed(6), { type: ub.type, lbl: ub.type === 'UB-HIGH' ? '🎯UB-HI' : '🎯UB-LO' });
     });
 
+    // Analyze Active Structure Cluster (Last 6 Candles of Selected Timeframe for Horizontal/Diagonal/Triangle/Arc Buildup)
+    const structSet = candles.slice(-6);
     const stickyMap = new Map();
     let minActivePrice = lastC.low;
     let maxActivePrice = lastC.high;
     let rBidAbs = 0, rAskAbs = 0;
 
-    // Hard Institutional Density Floor so low-volume retail noise is NEVER counted as Institutional Absorption!
     const minInstCellFloor = (avgFlowVol / 12.0) * 0.85;
     const effCellBench = Math.max(tfAvgCellVol, minInstCellFloor);
 
-    candles.slice(-3).forEach(rc => {
-        if (rc.low < minActivePrice) minActivePrice = rc.low;
-        if (rc.high > maxActivePrice) maxActivePrice = rc.high;
+    // Recent 3-candle DOM execution map + 6-candle Multi-Swing Cluster Absorption count
+    structSet.forEach((rc, sIdx) => {
+        const isRecent3 = sIdx >= Math.max(0, structSet.length - 3);
+        if ( isRecent3 ) {
+            if (rc.low < minActivePrice) minActivePrice = rc.low;
+            if (rc.high > maxActivePrice) maxActivePrice = rc.high;
+        }
         const rcRange = Math.max(rc.high - rc.low, rawStep * 0.5);
         const rcClosePos = (rc.close - rc.low) / rcRange;
-        const rcMid = (rc.high + rc.low) * 0.5;
+        const lowerSwingZone = rc.low + rcRange * 0.45;
+        const upperSwingZone = rc.high - rcRange * 0.45;
         const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
 
-        gList.forEach(gl => {
+        for (let i = 0; i < gList.length; i++) {
+            const gl = gList[i];
             const k = gl.price.toFixed(6);
-            let cur = stickyMap.get(k) || { buy: 0, sell: 0, bp: 0, ap: 0 };
-            cur.buy += gl.buy;
-            cur.sell += gl.sell;
-            cur.bp += gl.bid_pulled;
-            cur.ap += gl.ask_pulled;
-            stickyMap.set(k, cur);
+            if (isRecent3) {
+                let cur = stickyMap.get(k) || { buy: 0, sell: 0, wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, bp: 0, ap: 0 };
+                cur.buy += gl.buy;
+                cur.sell += gl.sell;
+                cur.wBuy += (gl.whale_buy || 0);
+                cur.wSell += (gl.whale_sell || 0);
+                cur.rBuy += (gl.retail_buy || 0);
+                cur.rSell += (gl.retail_sell || 0);
+                cur.bp += gl.bid_pulled;
+                cur.ap += gl.ask_pulled;
+                stickyMap.set(k, cur);
+            }
 
-            const tot = gl.volume || 0;
-            const bPct = tot > 0 ? (gl.sell / tot) * 100 : 0;
-            const aPct = tot > 0 ? (gl.buy / tot) * 100 : 0;
-            const isChurn = tot >= effCellBench * 1.9 && bPct >= 42 && aPct >= 42;
+            // 3-Row Sliding Cluster Sum (Captures multi-tick cluster stopping along horizontal/diagonal/curved boundaries)
+            let clusSell = gl.sell || 0, clusBuy = gl.buy || 0;
+            if (i > 0 && Math.abs(gList[i - 1].price - gl.price) <= domStep * 1.5) {
+                clusSell += (gList[i - 1].sell || 0);
+                clusBuy += (gList[i - 1].buy || 0);
+            }
+            if (i + 1 < gList.length && Math.abs(gList[i + 1].price - gl.price) <= domStep * 1.5) {
+                clusSell += (gList[i + 1].sell || 0);
+                clusBuy += (gList[i + 1].buy || 0);
+            }
+            const clusTot = clusSell + clusBuy;
+            const clusBPct = clusTot > 0 ? (clusSell / clusTot) * 100 : 0;
+            const clusAPct = clusTot > 0 ? (clusBuy / clusTot) * 100 : 0;
+            const isChurn = clusTot >= effCellBench * 2.1 && clusBPct >= 42 && clusAPct >= 42;
             const bRestHere = bidMap.get(k) || 0;
             const aRestHere = askMap.get(k) || 0;
+            const rawD = rawDomCluster.get(k);
 
-            // STRICT INSTITUTIONAL ABSORPTION: Must happen in extreme zone AND price must actually bounce/reject away from the level!
-            // Never count bottom of a bearish dump candle as Bid Absorption, or top of a bullish breakout candle as Ask Absorption!
-            const bidDefended = (rc.close >= rc.open || rcClosePos >= 0.55) && (rc.close >= gl.price + domStep * 0.8);
-            const askCapped = (rc.close <= rc.open || rcClosePos <= 0.45) && (rc.close <= gl.price - domStep * 0.8);
+            const bidRotatedUp = (rc.close >= rc.open || rcClosePos >= 0.45) && (rc.close > gl.price + domStep * 0.4);
+            const askRotatedDn = (rc.close <= rc.open || rcClosePos <= 0.55) && (rc.close < gl.price - domStep * 0.4);
 
-            const isBidAbsLvl = gl.price <= rcMid && bidDefended && (
-                (gl.sell >= effCellBench * 1.30 && bPct >= 62)
+            const isBidClusterAbs = gl.price <= lowerSwingZone && bidRotatedUp && (
+                (clusSell >= effCellBench * 1.6 && clusBPct >= 58 && gl.sell >= effCellBench * 0.7)
                 || isChurn
-                || (gl.sell >= effCellBench * 1.15 && bRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
+                || (gl.sell >= effCellBench * 1.0 && bRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
+                || (rawD && rawD.iceBid >= effCellBench * 0.5)
             );
 
-            const isAskAbsLvl = gl.price >= rcMid && askCapped && (
-                (gl.buy >= effCellBench * 1.30 && aPct >= 62)
+            const isAskClusterAbs = gl.price >= upperSwingZone && askRotatedDn && (
+                (clusBuy >= effCellBench * 1.6 && clusAPct >= 58 && gl.buy >= effCellBench * 0.7)
                 || isChurn
-                || (gl.buy >= effCellBench * 1.15 && aRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
+                || (gl.buy >= effCellBench * 1.0 && aRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
+                || (rawD && rawD.iceAsk >= effCellBench * 0.5)
             );
 
-            if (isBidAbsLvl) rBidAbs++;
-            if (isAskAbsLvl) rAskAbs++;
-        });
+            if (isBidClusterAbs) rBidAbs++;
+            if (isAskClusterAbs) rAskAbs++;
+        }
     });
 
-    const minVisibleBucket = Math.floor((minActivePrice - domStep * 4) / domStep) * domStep;
-    const maxVisibleBucket = Math.ceil((maxActivePrice + domStep * 4) / domStep) * domStep;
+    const minVisibleBucket = Math.floor((minActivePrice - domStep * 5) / domStep) * domStep;
+    const maxVisibleBucket = Math.ceil((maxActivePrice + domStep * 5) / domStep) * domStep;
 
     const activeDomRows = [];
     for (let p = maxVisibleBucket; p >= minVisibleBucket; p -= domStep) {
         const k = p.toFixed(6);
         const bRest = bidMap.get(k) || 0;
         const aRest = askMap.get(k) || 0;
-        const st = stickyMap.get(k) || { buy: 0, sell: 0, bp: 0, ap: 0 };
+        const st = stickyMap.get(k) || { buy: 0, sell: 0, wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, bp: 0, ap: 0 };
+        const rawD = rawDomCluster.get(k) || { wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0, iceBid: 0, iceAsk: 0 };
         const mag = domMagnetMap.get(k) || null;
         const distTicks = Math.round(Math.abs(p - liveCenterP) / domStep);
 
-        if (st.buy > 0 || st.sell > 0 || mag !== null || distTicks <= 4 || ((bRest > 0 || aRest > 0) && distTicks <= 14)) {
-            activeDomRows.push({ p, k, bRest, aRest, st, mag });
+        const totRawBp = Math.max(st.bp, rawD.agedBp) + rawD.flashBp;
+        const totRawAp = Math.max(st.ap, rawD.agedAp) + rawD.flashAp;
+
+        if (st.buy > 0 || st.sell > 0 || totRawBp > 0 || totRawAp > 0 || mag !== null || distTicks <= 5 || ((bRest > 0 || aRest > 0) && distTicks <= 15)) {
+            activeDomRows.push({ p, k, bRest, aRest, st, rawD, totRawBp, totRawAp, mag });
         }
     }
 
     let maxRowVal = 1;
     let totExecBuy = 0, totExecSell = 0, totPullB = 0, totPullA = 0;
+    let totFlashPullB = 0, totFlashPullA = 0, totIceBid = 0, totIceAsk = 0;
+    let totWhaleBuy = 0, totWhaleSell = 0, totRetailBuy = 0, totRetailSell = 0;
     let nearBidRest = 0, nearAskRest = 0;
+
     activeDomRows.forEach(r => {
         totExecBuy += r.st.buy;
         totExecSell += r.st.sell;
-        totPullB += r.st.bp;
-        totPullA += r.st.ap;
-        if (r.p <= liveCenterP && r.p >= liveCenterP - domStep * 6) nearBidRest += r.bRest;
-        if (r.p >= liveCenterP && r.p <= liveCenterP + domStep * 6) nearAskRest += r.aRest;
-        maxRowVal = Math.max(maxRowVal, r.st.buy, r.st.sell, r.st.bp, r.st.ap, r.bRest, r.aRest);
+        totWhaleBuy += Math.max(r.st.wBuy, r.rawD.wBuy);
+        totWhaleSell += Math.max(r.st.wSell, r.rawD.wSell);
+        totRetailBuy += Math.max(r.st.rBuy, r.rawD.rBuy);
+        totRetailSell += Math.max(r.st.rSell, r.rawD.rSell);
+        totPullB += r.totRawBp;
+        totPullA += r.totRawAp;
+        totFlashPullB += r.rawD.flashBp;
+        totFlashPullA += r.rawD.flashAp;
+        totIceBid += r.rawD.iceBid;
+        totIceAsk += r.rawD.iceAsk;
+
+        if (r.p <= liveCenterP && r.p >= liveCenterP - domStep * 8) nearBidRest += r.bRest;
+        if (r.p >= liveCenterP && r.p <= liveCenterP + domStep * 8) nearAskRest += r.aRest;
+        maxRowVal = Math.max(maxRowVal, r.st.buy, r.st.sell, r.totRawBp, r.totRawAp, r.bRest, r.aRest);
     });
 
     const domPullDelta = totPullB - totPullA;
@@ -3485,7 +3770,6 @@ function drawAll() {
     const prevPoc = prevC.poc != null ? prevC.poc : (prevC.high + prevC.low) * 0.5;
     const curPoc = lastC.poc != null ? lastC.poc : (lastC.high + lastC.low) * 0.5;
 
-    // 4-Candle Structure & POC Stepping Tracker
     let sPocUp = 0, sPocDn = 0, hhCount = 0, llCount = 0;
     const last4 = candles.slice(-4);
     for (let m = 1; m < last4.length; m++) {
@@ -3497,52 +3781,71 @@ function drawAll() {
         if (last4[m].low < last4[m - 1].low && last4[m].high <= last4[m - 1].high) llCount++;
     }
 
-    // 1. INSTITUTIONAL INITIATION DRIVE (Effort + Displacement Result in Same Direction!)
-    const instBullDrive = (totExecBuy > totExecSell * 1.15 || lastC.delta > effCellBench * 0.40)
-        && lastC.close > lastC.open && closePos >= 0.58
-        && lastC.close >= curPoc && (lastC.close >= prevPoc || hhCount > llCount);
+    let prev5High = -Infinity, prev5Low = Infinity;
+    for (let k = Math.max(0, candles.length - 6); k < candles.length - 1; k++) {
+        if (candles[k].high > prev5High) prev5High = candles[k].high;
+        if (candles[k].low < prev5Low) prev5Low = candles[k].low;
+    }
 
-    const instBearDrive = (totExecSell > totExecBuy * 1.15 || lastC.delta < -effCellBench * 0.40)
-        && lastC.close < lastC.open && closePos <= 0.42
-        && lastC.close <= curPoc && (lastC.close <= prevPoc || llCount > hhCount);
+    // =========================================================================
+    // 4-SCENARIO CLUSTER & BOUNDARY MACHINE DECODER (Buildup vs Sweep vs Breakout)
+    // =========================================================================
+    // Scenario 1: Fakeout Liquidity Sweep at Cluster Boundary (Pokes out, Retail trapped, Absorbed & Reversing)
+    const bullSweepReject = lastC.low < prev5Low && lastC.close > prev5Low && (closePos >= 0.50 || rBidAbs > 0 || totIceBid > 0);
+    const bearSweepReject = lastC.high > prev5High && lastC.close < prev5High && (closePos <= 0.50 || rAskAbs > 0 || totIceAsk > 0);
 
-    // 2. TRUE TRAPPED RETAIL DETECTOR (Only When Effort Fails & Reverses OR Previous Volume Node is Underwater!)
-    const trappedBuyersUnderwater = (prevC.delta > effCellBench * 0.35 && lastC.close < prevPoc - domStep * 0.5 && lastC.close < lastC.open && lastC.delta < 0);
-    const trappedSellersUnderwater = (prevC.delta < -effCellBench * 0.35 && lastC.close > prevPoc + domStep * 0.5 && lastC.close > lastC.open && lastC.delta > 0);
+    // Scenario 2: Genuine Breakout Expansion (Breaks boundary/POC with Whale Drive + Opposite Wall Pulled)
+    const instBullDrive = (totExecBuy > totExecSell * 1.15 || totWhaleBuy > totWhaleSell * 1.20)
+        && lastC.close > lastC.open && closePos >= 0.58 && lastC.close >= curPoc && !bearSweepReject;
 
+    const instBearDrive = (totExecSell > totExecBuy * 1.15 || totWhaleSell > totWhaleBuy * 1.20)
+        && lastC.close < lastC.open && closePos <= 0.42 && lastC.close <= curPoc && !bullSweepReject;
+
+    // Scenario 3: Inside-Cluster Accumulation vs Distribution (Before Breakout!)
+    const clusterLongBuildup = (
+        (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25)
+        && (totWhaleBuy >= totWhaleSell || domPullDelta < -effCellBench * 0.25 || nearBidRest > nearAskRest * 1.25)
+    );
+    const clusterShortBuildup = (
+        (rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25)
+        && (totWhaleSell >= totWhaleBuy || domPullDelta > effCellBench * 0.25 || nearAskRest > nearBidRest * 1.25)
+    );
+
+    // Scenario 4: Silent Cluster Absorption Stopping Retail Momentum
     const retailBuysTrapped = !instBullDrive && (
-        trappedBuyersUnderwater
-        || (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.42)
-        || (rAskAbs > rBidAbs && upperWick > bodySize * 1.0 && closePos <= 0.45 && lastC.close <= curPoc)
+        bearSweepReject
+        || (totRetailBuy > totWhaleBuy * 1.15 && (totIceAsk > effCellBench * 0.35 || rAskAbs > rBidAbs) && closePos <= 0.52)
+        || (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.44)
+        || (prevC.delta > effCellBench * 0.35 && lastC.close < prevPoc - domStep * 0.5 && lastC.close < lastC.open)
     );
 
     const retailSellsTrapped = !instBearDrive && (
-        trappedSellersUnderwater
-        || (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.58)
-        || (rBidAbs > rAskAbs && lowerWick > bodySize * 1.0 && closePos >= 0.55 && lastC.close >= curPoc)
+        bullSweepReject
+        || (totRetailSell > totWhaleSell * 1.15 && (totIceBid > effCellBench * 0.35 || rBidAbs > rAskAbs) && closePos >= 0.48)
+        || (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.56)
+        || (prevC.delta < -effCellBench * 0.35 && lastC.close > prevPoc + domStep * 0.5 && lastC.close > lastC.open)
     );
 
-    // 3. TRUE INSTITUTIONAL DOM BATTLE WINNER REASON LINE
-    let battleWinner = '⚖️ TWO-WAY BATTLE (WAIT FOR BREAK)';
+    let battleWinner = `⚖️ [${tf.toUpperCase()}] TWO-WAY CLUSTER FIGHT (MONITORING BUILDUP)`;
     let bwCol = '#ffd700';
-    if (instBearDrive) {
-        battleWinner = '🔴 INSTITUTIONAL SELL MARKDOWN (POC BREAK + DISPLACEMENT)';
-        bwCol = '#ff1744';
-    } else if (instBullDrive) {
-        battleWinner = '🟢 INSTITUTIONAL BUY MARKUP (POC BREAK + DISPLACEMENT)';
-        bwCol = '#00e676';
-    } else if (retailBuysTrapped) {
-        battleWinner = `🛡️ RETAIL BUYERS TRAPPED BELOW POC (${rAskAbs}x Cap) ➔ SHORT`;
-        bwCol = '#ff9100';
-    } else if (retailSellsTrapped) {
-        battleWinner = `🛡️ RETAIL SELLERS TRAPPED ABOVE POC (${rBidAbs}x Hold) ➔ LONG`;
+    if (bullSweepReject) {
+        battleWinner = `🎯 [${tf.toUpperCase()}] SSL FAKEOUT SWEEP + BID CLUSTER ABSORBED ➔ LONG REVERSAL!`;
         bwCol = '#00e5ff';
-    } else if (totExecBuy > totExecSell * 1.15 && domPullDelta < -effCellBench * 0.25 && closePos >= 0.55) {
-        battleWinner = '🟢 BUYERS WINNING (ASK SPOOF PULLED + DISPLACEMENT)';
+    } else if (bearSweepReject) {
+        battleWinner = `🎯 [${tf.toUpperCase()}] BSL FAKEOUT SWEEP + ASK CLUSTER ABSORBED ➔ SHORT REVERSAL!`;
+        bwCol = '#ff9100';
+    } else if (instBullDrive) {
+        battleWinner = `🚀 [${tf.toUpperCase()}] GENUINE BULL BREAKOUT (🐋W.Buy:${fmt(totWhaleBuy)} + AskPulled:${fmt(totPullA)})`;
         bwCol = '#00e676';
-    } else if (totExecSell > totExecBuy * 1.15 && domPullDelta > effCellBench * 0.25 && closePos <= 0.45) {
-        battleWinner = '🔴 SELLERS WINNING (BID SPOOF PULLED + DISPLACEMENT)';
-        bwCol = '#ff5252';
+    } else if (instBearDrive) {
+        battleWinner = `🚀 [${tf.toUpperCase()}] GENUINE BEAR BREAKDOWN (🐋W.Sell:${fmt(totWhaleSell)} + BidPulled:${fmt(totPullB)})`;
+        bwCol = '#ff1744';
+    } else if (clusterLongBuildup || retailSellsTrapped) {
+        battleWinner = `🏦 [${tf.toUpperCase()}] CLUSTER LONG ACCUMULATION (BidAbs:${rBidAbs} 🧊Ice:${fmt(totIceBid)}) ➔ UP PROB HIGH`;
+        bwCol = '#00e5ff';
+    } else if (clusterShortBuildup || retailBuysTrapped) {
+        battleWinner = `🏦 [${tf.toUpperCase()}] CLUSTER SHORT DISTRIBUTION (AskAbs:${rAskAbs} 🧊Ice:${fmt(totIceAsk)}) ➔ DN PROB HIGH`;
+        bwCol = '#ff9100';
     }
 
     let recentWhaleB = 0, recentWhaleS = 0;
@@ -3550,20 +3853,13 @@ function drawAll() {
         const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
         gList.forEach(gl => {
             const trd = Math.max(gl.trades || 1, 1);
-            if (gl.volume >= effCellBench * 1.20 && ((gl.volume / trd) / baselineLotSize) >= 2.8) {
-                if (gl.buy > gl.sell && rc.close >= gl.price - domStep * 0.5) recentWhaleB++;
-                else if (gl.sell >= gl.buy && rc.close <= gl.price + domStep * 0.5) recentWhaleS++;
+            const hasTickW = (gl.whale_buy || 0) + (gl.whale_sell || 0) > 0;
+            if (hasTickW || (gl.volume >= effCellBench * 1.20 && ((gl.volume / trd) / baselineLotSize) >= 2.8)) {
+                if ((gl.whale_buy || gl.buy) > (gl.whale_sell || gl.sell) && rc.close >= gl.price - domStep * 0.5) recentWhaleB++;
+                else if ((gl.whale_sell || gl.sell) >= (gl.whale_buy || gl.buy) && rc.close <= gl.price + domStep * 0.5) recentWhaleS++;
             }
         });
     });
-
-    let prev5High = -Infinity, prev5Low = Infinity;
-    for (let k = Math.max(0, candles.length - 6); k < candles.length - 1; k++) {
-        if (candles[k].high > prev5High) prev5High = candles[k].high;
-        if (candles[k].low < prev5Low) prev5Low = candles[k].low;
-    }
-    const bullSweepReject = lastC.low < prev5Low && lastC.close > prev5Low && closePos >= 0.55 && lastC.close >= lastC.open;
-    const bearSweepReject = lastC.high > prev5High && lastC.close < prev5High && closePos <= 0.45 && lastC.close <= lastC.open;
 
     const recent20 = candles.slice(-20);
     const r20Hi = Math.max(...recent20.map(x => x.high));
@@ -3571,133 +3867,127 @@ function drawAll() {
     const r20Span = Math.max(r20Hi - r20Lo, rawStep);
     const rangeLocation = (lastC.close - r20Lo) / r20Span;
 
-    // --- A. TRUE INSTITUTIONAL SCALP 12-PARAMETER SCORING MATRIX ---
+    // --- A. 12-PARAMETER DYNAMIC TIMEFRAME SCALP & CLUSTER SCORING MATRIX ---
     let scalpPts = 0;
     let scalpFactors = [];
 
-    // 1. Institutional Drive vs Trapped Retail
+    // 1. Cluster Buildup / Breakout / Trap Core
     if (instBullDrive) {
-        scalpPts += 30;
-        scalpFactors.push('InstBullDrive');
+        scalpPts += 28;
+        scalpFactors.push('TrueBullBreak');
     } else if (instBearDrive) {
-        scalpPts -= 30;
-        scalpFactors.push('InstBearDrive');
-    } else if (retailBuysTrapped) {
-        scalpPts -= 26;
-        scalpFactors.push('TrappedBuyers');
-    } else if (retailSellsTrapped) {
-        scalpPts += 26;
-        scalpFactors.push('TrappedSellers');
+        scalpPts -= 28;
+        scalpFactors.push('TrueBearBreak');
+    } else if (retailBuysTrapped || clusterShortBuildup) {
+        scalpPts -= 25;
+        scalpFactors.push('ClusterShortBuildup');
+    } else if (retailSellsTrapped || clusterLongBuildup) {
+        scalpPts += 25;
+        scalpFactors.push('ClusterLongBuildup');
     }
 
-    // 2. Defended Absorption Dominance (Only counts if aligned with price rejection, never against active drive!)
-    if (rBidAbs > rAskAbs && !instBearDrive) {
-        scalpPts += Math.min(22, 12 + (rBidAbs - rAskAbs) * 5);
-        scalpFactors.push(`BidAbs(${rBidAbs}v${rAskAbs})`);
-    } else if (rAskAbs > rBidAbs && !instBullDrive) {
-        scalpPts -= Math.min(22, 12 + (rAskAbs - rBidAbs) * 5);
-        scalpFactors.push(`AskAbs(${rAskAbs}v${rBidAbs})`);
+    // 2. Multi-Swing Cluster & Raw DOM Iceberg Absorption
+    if ((rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) && !instBearDrive) {
+        scalpPts += Math.min(24, 14 + (rBidAbs - rAskAbs) * 4);
+        scalpFactors.push(`ClusterBidAbs(${rBidAbs}v${rAskAbs})`);
+    } else if ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) && !instBullDrive) {
+        scalpPts -= Math.min(24, 14 + (rAskAbs - rBidAbs) * 4);
+        scalpFactors.push(`ClusterAskAbs(${rAskAbs}v${rBidAbs})`);
     }
 
-    // 3. 10s+ Aged Spoof Pulling Delta
-    if (domPullDelta < -effCellBench * 0.35 && lastC.close >= lastC.open) {
+    // 3. Raw Flash + 10s Aged Spoof Pulling Delta
+    if (domPullDelta < -effCellBench * 0.28) {
         scalpPts += 18;
-        scalpFactors.push(`AskSpoofPulled(PΔ${fmt(domPullDelta)})`);
-    } else if (domPullDelta > effCellBench * 0.35 && lastC.close <= lastC.open) {
+        scalpFactors.push(`AskWallPulled(PΔ${fmt(domPullDelta)})`);
+    } else if (domPullDelta > effCellBench * 0.28) {
         scalpPts -= 18;
-        scalpFactors.push(`BidSpoofPulled(PΔ+${fmt(domPullDelta)})`);
+        scalpFactors.push(`BidWallPulled(PΔ+${fmt(domPullDelta)})`);
     }
 
-    // 4. Live Resting Book Wall
-    const minBookFloor = effCellBench * 1.5;
-    if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.35) {
+    // 4. 8-Step Cluster Resting Book Density
+    const minBookFloor = effCellBench * 1.3;
+    if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) {
         scalpPts += 12;
-        scalpFactors.push(`BidWall(${fmt(nearBidRest)}v${fmt(nearAskRest)})`);
-    } else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.35) {
+        scalpFactors.push(`BidBookCluster(${fmt(nearBidRest)}v${fmt(nearAskRest)})`);
+    } else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) {
         scalpPts -= 12;
-        scalpFactors.push(`AskWall(${fmt(nearAskRest)}v${fmt(nearBidRest)})`);
+        scalpFactors.push(`AskBookCluster(${fmt(nearAskRest)}v${fmt(nearBidRest)})`);
     }
 
-    // 5. Delta Efficiency & Stuffing
+    // 5. Delta Displacement vs Cluster Stuffing
     let deltaState = 'NEU';
-    if (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.42) {
+    if (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.44) {
         scalpPts -= 18;
         deltaState = 'BEAR';
-        scalpFactors.push('+ΔStuffedAtTop');
-    } else if (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.58) {
+        scalpFactors.push('+ΔStuffedInAskCluster');
+    } else if (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.56) {
         scalpPts += 18;
         deltaState = 'BULL';
-        scalpFactors.push('-ΔAbsorbedAtBot');
-    } else if (lastC.delta > effCellBench * 0.30 && lastC.close > lastC.open && closePos >= 0.58) {
-        scalpPts += 16;
+        scalpFactors.push('-ΔAbsorbedInBidCluster');
+    } else if (lastC.delta > effCellBench * 0.30 && lastC.close > lastC.open && closePos >= 0.56) {
+        scalpPts += 15;
         deltaState = 'BULL';
-        scalpFactors.push('+ΔDisplacement');
-    } else if (lastC.delta < -effCellBench * 0.30 && lastC.close < lastC.open && closePos <= 0.42) {
-        scalpPts -= 16;
+    } else if (lastC.delta < -effCellBench * 0.30 && lastC.close < lastC.open && closePos <= 0.44) {
+        scalpPts -= 15;
         deltaState = 'BEAR';
-        scalpFactors.push('-ΔDisplacement');
     }
 
-    // 6. Whale Block Executions
-    if (recentWhaleB > recentWhaleS && !instBearDrive) { scalpPts += 15; scalpFactors.push(`◆WhaleBuy(${recentWhaleB})`); }
-    else if (recentWhaleS > recentWhaleB && !instBullDrive) { scalpPts -= 15; scalpFactors.push(`◆WhaleSell(${recentWhaleS})`); }
+    // 6. Tick-Separated Whale vs Retail Execution Flow
+    let whaleVsRetailState = 'NEU';
+    if ((totWhaleBuy > totWhaleSell * 1.20 || recentWhaleB > recentWhaleS) && !instBearDrive) {
+        scalpPts += 18;
+        whaleVsRetailState = 'BULL';
+        scalpFactors.push(`🐋WhaleBuy(${fmt(totWhaleBuy)}v${fmt(totWhaleSell)})`);
+    } else if ((totWhaleSell > totWhaleBuy * 1.20 || recentWhaleS > recentWhaleB) && !instBullDrive) {
+        scalpPts -= 18;
+        whaleVsRetailState = 'BEAR';
+        scalpFactors.push(`🐋WhaleSell(${fmt(totWhaleSell)}v${fmt(totWhaleBuy)})`);
+    }
 
-    // 7. POC & Value Area Structure Control (Crucial Anti-Falling-Knife Filter!)
+    // 7. Cluster POC Control
     let locState = 'NEU';
-    if (lastC.close > curPoc && lastC.close > prevPoc && lastC.close >= lastC.open) {
-        scalpPts += 16;
-        locState = 'BULL';
-        scalpFactors.push('AbovePOCs');
-    } else if (lastC.close < curPoc && lastC.close < prevPoc && lastC.close <= lastC.open) {
-        scalpPts -= 16;
-        locState = 'BEAR';
-        scalpFactors.push('BelowPOCs');
-    }
-
-    // 8. Stop-Sweep Reversal (SSL / BSL)
-    if (bullSweepReject) { scalpPts += 20; scalpFactors.push('SSL-SweepReversal'); }
-    else if (bearSweepReject) { scalpPts -= 20; scalpFactors.push('BSL-SweepReversal'); }
-
-    // 9. 4-Candle POC & Structure Stepping Migration
-    if (sPocUp > sPocDn && hhCount >= llCount) {
+    if (lastC.close > curPoc && (lastC.close >= prevPoc || clusterLongBuildup)) {
         scalpPts += 14;
-        scalpFactors.push(`POC-StepUp(${sPocUp}↑)`);
-    } else if (sPocDn > sPocUp && llCount >= hhCount) {
+        locState = 'BULL';
+    } else if (lastC.close < curPoc && (lastC.close <= prevPoc || clusterShortBuildup)) {
         scalpPts -= 14;
-        scalpFactors.push(`POC-StepDn(${sPocDn}↓)`);
+        locState = 'BEAR';
     }
+
+    // 8. Boundary Fakeout Sweep Reversal
+    if (bullSweepReject) { scalpPts += 22; scalpFactors.push('SSL-FakeoutSweep'); }
+    else if (bearSweepReject) { scalpPts -= 22; scalpFactors.push('BSL-FakeoutSweep'); }
+
+    // 9. 4-Candle POC Migration
+    if (sPocUp > sPocDn) scalpPts += 12;
+    else if (sPocDn > sPocUp) scalpPts -= 12;
 
     // 10. SMT Divergence Radar
-    if (smtState.bias === 1) { scalpPts += 10; scalpFactors.push('BullSMT'); }
-    else if (smtState.bias === -1) { scalpPts -= 10; scalpFactors.push('BearSMT'); }
+    if (smtState.bias === 1) scalpPts += 10;
+    else if (smtState.bias === -1) scalpPts -= 10;
 
-    // HARD ANTI-KNIFE VETO: Never show BUY if price is dumping below both current & previous POC in a red candle!
-    if (lastC.close < lastC.open && lastC.close < curPoc && lastC.close < prevPoc && !bullSweepReject && scalpPts > 0) {
-        scalpPts = -18;
-        scalpFactors.push('⚠️BearStructureVeto');
-    } else if (lastC.close > lastC.open && lastC.close > curPoc && lastC.close > prevPoc && !bearSweepReject && scalpPts < 0) {
-        scalpPts = 18;
-        scalpFactors.push('⚠️BullStructureVeto');
+    // Anti-Knife Veto: Only veto if there is NO cluster absorption/sweep and price is free-falling below POCs
+    if (instBearDrive && lastC.close < curPoc && lastC.close < prevPoc && !bullSweepReject && scalpPts > 0) {
+        scalpPts = -22;
+    } else if (instBullDrive && lastC.close > curPoc && lastC.close > prevPoc && !bearSweepReject && scalpPts < 0) {
+        scalpPts = 22;
     }
 
-    if (curRvol < 0.65 && recentWhaleB === 0 && recentWhaleS === 0 && !bullSweepReject && !bearSweepReject) {
-        scalpPts = Math.round(scalpPts * 0.50);
-    }
-
-    let scalpFinalTxt = '⚪ SIDEWAYS';
+    const scalpProb = Math.min(96, Math.round(50 + (Math.abs(scalpPts) / 110) * 46));
+    let scalpFinalTxt = `⚪ ${tf.toUpperCase()} EQUILIBRIUM`;
     let scalpFinalCol = '#ffca28';
-    if (scalpPts >= 50) { scalpFinalTxt = '🟢 STRONG BUY'; scalpFinalCol = '#00e676'; }
-    else if (scalpPts >= 26) { scalpFinalTxt = '🟢 BUY'; scalpFinalCol = '#69f0ae'; }
-    else if (scalpPts >= 14) { scalpFinalTxt = '🟡 WEAK BUY'; scalpFinalCol = '#00e5ff'; }
-    else if (scalpPts <= -50) { scalpFinalTxt = '🔴 STRONG SELL'; scalpFinalCol = '#ff1744'; }
-    else if (scalpPts <= -26) { scalpFinalTxt = '🔴 SELL'; scalpFinalCol = '#ff5252'; }
-    else if (scalpPts <= -14) { scalpFinalTxt = '🟠 WEAK SELL'; scalpFinalCol = '#ff9100'; }
+    if (scalpPts >= 48) { scalpFinalTxt = `🟢 STRONG LONG (${scalpProb}%)`; scalpFinalCol = '#00e676'; }
+    else if (scalpPts >= 24) { scalpFinalTxt = `🟢 LONG BUILDUP (${scalpProb}%)`; scalpFinalCol = '#69f0ae'; }
+    else if (scalpPts >= 12) { scalpFinalTxt = `🟡 LEAN LONG (${scalpProb}%)`; scalpFinalCol = '#00e5ff'; }
+    else if (scalpPts <= -48) { scalpFinalTxt = `🔴 STRONG SHORT (${scalpProb}%)`; scalpFinalCol = '#ff1744'; }
+    else if (scalpPts <= -24) { scalpFinalTxt = `🔴 SHORT BUILDUP (${scalpProb}%)`; scalpFinalCol = '#ff5252'; }
+    else if (scalpPts <= -12) { scalpFinalTxt = `🟠 LEAN SHORT (${scalpProb}%)`; scalpFinalCol = '#ff9100'; }
 
-    // --- B. INTRADAY 10-PARAMETER INSTITUTIONAL SCORING MATRIX ---
+    // --- B. INTRADAY / STRUCTURE 10-PARAMETER SCORING MATRIX (DYNAMIC TO SELECTED TF) ---
     let intraPts = macroInfo ? macroInfo.netMacro : 0;
     if (macroInfo) {
-        if (sPocUp > sPocDn && lastC.close > prevPoc) intraPts += 18;
-        else if (sPocDn > sPocUp && lastC.close < prevPoc) intraPts -= 18;
+        if (sPocUp > sPocDn) intraPts += 14;
+        else if (sPocDn > sPocUp) intraPts -= 14;
 
         if (smtState.bias === 1) intraPts += 12;
         else if (smtState.bias === -1) intraPts -= 12;
@@ -3705,57 +3995,58 @@ function drawAll() {
         const sessionPocs = candles.slice(-15).map(x => x.poc).filter(x => x != null);
         if (sessionPocs.length > 0) {
             const avgSessionPoc = sessionPocs.reduce((a, b) => a + b, 0) / sessionPocs.length;
-            if (lastC.close > avgSessionPoc + domStep) intraPts += 14;
-            else if (lastC.close < avgSessionPoc - domStep) intraPts -= 14;
+            if (lastC.close > avgSessionPoc + domStep) intraPts += 12;
+            else if (lastC.close < avgSessionPoc - domStep) intraPts -= 12;
         }
 
-        if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.3) intraPts += 10;
-        else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.3) intraPts -= 10;
+        if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) intraPts += 10;
+        else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) intraPts -= 10;
     }
 
-    let intraFinalTxt = '⚪ SIDEWAYS';
+    const intraProb = Math.min(96, Math.round(50 + (Math.abs(intraPts) / 110) * 46));
+    let intraFinalTxt = `⚪ ${tf.toUpperCase()} BALANCED`;
     let intraFinalCol = '#ffca28';
-    if (intraPts >= 50) { intraFinalTxt = '🟢 STRONG BUY'; intraFinalCol = '#00e676'; }
-    else if (intraPts >= 26) { intraFinalTxt = '🟢 BUY'; intraFinalCol = '#69f0ae'; }
-    else if (intraPts >= 12) { intraFinalTxt = '🟡 WEAK BUY'; intraFinalCol = '#00e5ff'; }
-    else if (intraPts <= -50) { intraFinalTxt = '🔴 STRONG SELL'; intraFinalCol = '#ff1744'; }
-    else if (intraPts <= -26) { intraFinalTxt = '🔴 SELL'; intraFinalCol = '#ff5252'; }
-    else if (intraPts <= -12) { intraFinalTxt = '🟠 WEAK SELL'; intraFinalCol = '#ff9100'; }
+    if (intraPts >= 48) { intraFinalTxt = `🟢 STRONG LONG (${intraProb}%)`; intraFinalCol = '#00e676'; }
+    else if (intraPts >= 24) { intraFinalTxt = `🟢 ACCUMULATING LONG (${intraProb}%)`; intraFinalCol = '#69f0ae'; }
+    else if (intraPts >= 12) { intraFinalTxt = `🟡 LEAN LONG (${intraProb}%)`; intraFinalCol = '#00e5ff'; }
+    else if (intraPts <= -48) { intraFinalTxt = `🔴 STRONG SHORT (${intraProb}%)`; intraFinalCol = '#ff1744'; }
+    else if (intraPts <= -24) { intraFinalTxt = `🔴 DISTRIBUTING SHORT (${intraProb}%)`; intraFinalCol = '#ff5252'; }
+    else if (intraPts <= -12) { intraFinalTxt = `🟠 LEAN SHORT (${intraProb}%)`; intraFinalCol = '#ff9100'; }
 
     // --- C. EXACT 12 SCALP & 10 INTRADAY PARAMETER TALLY ---
-    const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : (retailBuysTrapped ? 'BEAR' : (retailSellsTrapped ? 'BULL' : 'NEU')));
-    const execVsAbsLbl = instBullDrive ? `BullDrive(B:${fmt(totExecBuy)})` : (instBearDrive ? `BearDrive(S:${fmt(totExecSell)})` : (retailBuysTrapped ? 'BuyersTrapped!' : (retailSellsTrapped ? 'SellersTrapped!' : `B:${fmt(totExecBuy)} vs S:${fmt(totExecSell)}`)));
+    const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : ((retailBuysTrapped || clusterShortBuildup) ? 'BEAR' : ((retailSellsTrapped || clusterLongBuildup) ? 'BULL' : 'NEU')));
+    const execVsAbsLbl = instBullDrive ? `BullBreak(B:${fmt(totExecBuy)})` : (instBearDrive ? `BearBreak(S:${fmt(totExecSell)})` : ((retailBuysTrapped || clusterShortBuildup) ? 'ShortClusterBuildup' : ((retailSellsTrapped || clusterLongBuildup) ? 'LongClusterBuildup' : `B:${fmt(totExecBuy)} vs S:${fmt(totExecSell)}`)));
 
     const scalpMeterList = [
-        { name: '1. Institutional Drive vs Trapped Retail', state: execVsAbsState, val: execVsAbsLbl },
-        { name: '2. Defended Iceberg Absorption (3-Cdl)', state: (rBidAbs > rAskAbs && !instBearDrive) ? 'BULL' : ((rAskAbs > rBidAbs && !instBullDrive) ? 'BEAR' : 'NEU'), val: `BidAbs:${rBidAbs} vs AskAbs:${rAskAbs}` },
-        { name: '3. 10s+ Spoof Pulling Delta (PΔ)', state: (domPullDelta < -effCellBench * 0.35 && lastC.close >= lastC.open) ? 'BULL' : ((domPullDelta > effCellBench * 0.35 && lastC.close <= lastC.open) ? 'BEAR' : 'NEU'), val: `PΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}` },
-        { name: '4. Live Resting Book Density (6-Step)', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `Bid:${fmt(nearBidRest)} vs Ask:${fmt(nearAskRest)}` },
-        { name: '5. Delta Displacement vs Stuffing (Δ)', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)} (Cls:${Math.round(closePos * 100)}%)` },
-        { name: '6. POC Structure Control (Cur & Prev POC)', state: locState, val: `Px:${lastC.close.toFixed(dec)} vs POC:${curPoc.toFixed(dec)}` },
-        { name: '7. Whale Block Executions (◆)', state: (recentWhaleB > recentWhaleS && !instBearDrive) ? 'BULL' : ((recentWhaleS > recentWhaleB && !instBullDrive) ? 'BEAR' : 'NEU'), val: `◆Buy:${recentWhaleB} vs ◆Sell:${recentWhaleS}` },
-        { name: '8. Value Area Breakout (VAH/VAL)', state: (lastC.vah != null && lastC.close > lastC.vah && lastC.close > lastC.open) ? 'BULL' : ((lastC.val != null && lastC.close < lastC.val && lastC.close < lastC.open) ? 'BEAR' : 'NEU'), val: `RangeLoc:${Math.round(rangeLocation * 100)}%` },
-        { name: '9. 4-Candle POC Stepping Migration', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
-        { name: '10. Retail Stop-Sweep (BSL/SSL)', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'SSL-Sweep Bounce' : (bearSweepReject ? 'BSL-Sweep Reject' : 'None') },
+        { name: '1. Cluster Buildup vs Breakout Intent', state: execVsAbsState, val: execVsAbsLbl },
+        { name: '2. Multi-Row Cluster + Iceberg Abs', state: ((rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) && !instBearDrive) ? 'BULL' : (((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) && !instBullDrive) ? 'BEAR' : 'NEU'), val: `BidClus:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskClus:${rAskAbs}(🧊${fmt(totIceAsk)})` },
+        { name: '3. Raw Flash + 10s Spoof Pull (PΔ)', state: domPullDelta < -effCellBench * 0.28 ? 'BULL' : (domPullDelta > effCellBench * 0.28 ? 'BEAR' : 'NEU'), val: `RawPΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)} (⚡F:${fmt(totFlashPullB - totFlashPullA)})` },
+        { name: '4. 8-Step Cluster Resting Book Depth', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `Bid:${fmt(nearBidRest)} vs Ask:${fmt(nearAskRest)}` },
+        { name: '5. Delta Displacement vs Cluster Cap', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)} (Cls:${Math.round(closePos * 100)}%)` },
+        { name: '6. Cluster POC Structure Control', state: locState, val: `Px:${lastC.close.toFixed(dec)} vs POC:${curPoc.toFixed(dec)}` },
+        { name: '7. Tick Whale (🐋) vs Retail (🐑) Flow', state: whaleVsRetailState, val: `🐋W B:${fmt(totWhaleBuy)}/S:${fmt(totWhaleSell)} | 🐑R B:${fmt(totRetailBuy)}/S:${fmt(totRetailSell)}` },
+        { name: '8. Value Area Zone (VAH/VAL)', state: (lastC.vah != null && lastC.close > lastC.vah && lastC.close > lastC.open) ? 'BULL' : ((lastC.val != null && lastC.close < lastC.val && lastC.close < lastC.open) ? 'BEAR' : 'NEU'), val: `RangeLoc:${Math.round(rangeLocation * 100)}%` },
+        { name: '9. 4-Candle POC Stepping Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
+        { name: '10. Boundary Fakeout Sweep (BSL/SSL)', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'SSL-Fakeout Reversal' : (bearSweepReject ? 'BSL-Fakeout Reject' : 'None') },
         { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
         { name: '12. RVOL Institutional Participation', state: curRvol >= 0.85 ? (execVsAbsState !== 'NEU' ? execVsAbsState : (lastC.close >= lastC.open ? 'BULL' : 'BEAR')) : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
     ];
 
     const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
-    const avgSessPoc = sessionPocsList.length > 0 ? sessionPocsList.reduce((a, b) => a + b, 0) / sessionPocsList.length : lastC.close;
+    const avgSessPoc = sessionPocsList.length > 0 ? sessionPocsList.reduce((a, b) => a + b, 0) / sessionPocs.length : lastC.close;
     const ubHiCnt = unfinishedLevels.filter(u => u.type === 'UB-HIGH' && u.price > lastC.close).length;
     const ubLoCnt = unfinishedLevels.filter(u => u.type === 'UB-LOW' && u.price < lastC.close).length;
 
     const intraMeterList = [
-        { name: '1. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0 && lastC.close >= recent20[0].open) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0 && lastC.close <= recent20[0].open) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
-        { name: '2. Session POC Migration (Stepping)', state: (macroInfo && macroInfo.netMacro > 10) ? 'BULL' : ((macroInfo && macroInfo.netMacro < -10) ? 'BEAR' : 'NEU'), val: macroInfo ? (macroInfo.macroNotes[0] || 'Balanced') : '--' },
-        { name: '3. Short-Term 4-Cdl Structure Shift', state: (sPocUp > sPocDn && lastC.close > prevPoc) ? 'BULL' : ((sPocDn > sPocUp && lastC.close < prevPoc) ? 'BEAR' : 'NEU'), val: `HH:${hhCount} vs LL:${llCount}` },
-        { name: '4. Session 10s+ Spoof Campaign (PΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `SessPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
-        { name: '5. Session Whale Block Inventory (◆)', state: (macroInfo && macroInfo.whaleBuyLots > macroInfo.whaleSellLots) ? 'BULL' : ((macroInfo && macroInfo.whaleSellLots > macroInfo.whaleBuyLots) ? 'BEAR' : 'NEU'), val: `◆B:${macroInfo ? macroInfo.whaleBuyLots : 0} vs ◆S:${macroInfo ? macroInfo.whaleSellLots : 0}` },
-        { name: '6. Price vs Session Mean POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
+        { name: '1. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
+        { name: '2. Multi-Swing Cluster Absorption', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidClus:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskClus:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
+        { name: '3. 4-Candle Structure & POC Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `POC Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
+        { name: '4. Session Wall Pulling Campaign (PΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `SessPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
+        { name: '5. Session Whale Net Inventory (🐋)', state: (macroInfo && macroInfo.sessWhaleBuyVol > macroInfo.sessWhaleSellVol) ? 'BULL' : ((macroInfo && macroInfo.sessWhaleSellVol > macroInfo.sessWhaleBuyVol) ? 'BEAR' : 'NEU'), val: `🐋B:${macroInfo ? fmt(macroInfo.sessWhaleBuyVol) : 0} vs 🐋S:${macroInfo ? fmt(macroInfo.sessWhaleSellVol) : 0}` },
+        { name: '6. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
         { name: '7. Unfinished Business Magnet Draw', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} vs UB-LO:${ubLoCnt}` },
         { name: '8. Untouched nPOC Gravity', state: nakedPocs.filter(n => n.price > lastC.close).length > nakedPocs.filter(n => n.price < lastC.close).length ? 'BULL' : (nakedPocs.filter(n => n.price < lastC.close).length > nakedPocs.filter(n => n.price > lastC.close).length ? 'BEAR' : 'NEU'), val: `nPOCs:${nakedPocs.length}` },
-        { name: '9. Orderbook Macro Depth Support', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.3) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.3) ? 'BEAR' : 'NEU'), val: `B:${fmt(nearBidRest)} vs A:${fmt(nearAskRest)}` },
+        { name: '9. Orderbook Macro Depth Support', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `B:${fmt(nearBidRest)} vs A:${fmt(nearAskRest)}` },
         { name: '10. SMT Divergence Alignment', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text }
     ];
 
@@ -3780,11 +4071,11 @@ function drawAll() {
 
         document.getElementById('meterModalBody').innerHTML = `
             <div class="rule-sec" style="border-color:${scalpFinalCol};">
-                <h4 style="color:${scalpFinalCol};">⚡ SCALP 12-PARAMETER METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
+                <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] SCALP & CLUSTER METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
                 ${renderRows(scalpMeterList)}
             </div>
             <div class="rule-sec" style="border-color:${intraFinalCol};">
-                <h4 style="color:${intraFinalCol};">🌊 INTRADAY 10-PARAMETER METER: ${intraFinalTxt} (🟢${iBullCnt} Bull | 🔴${iBearCnt} Bear | ⚪${iNeuCnt} Neu)</h4>
+                <h4 style="color:${intraFinalCol};">🌊 [${tf.toUpperCase()}] MACRO CAMPAIGN METER: ${intraFinalTxt} (🟢${iBullCnt} Bull | 🔴${iBearCnt} Bear | ⚪${iNeuCnt} Neu)</h4>
                 ${renderRows(intraMeterList)}
             </div>
         `;
@@ -3794,8 +4085,10 @@ function drawAll() {
         time: new Date(kc.start).toTimeString().slice(0, 5),
         open: kc.open, high: kc.high, low: kc.low, close: kc.close,
         vol: Math.round(kc.volume || 0),
-        buy_vol: Math.round(kc.buy_volume || 0),
-        sell_vol: Math.round(kc.sell_volume || 0),
+        whale_buy: Math.round(kc.whale_buy_vol || 0),
+        whale_sell: Math.round(kc.whale_sell_vol || 0),
+        retail_buy: Math.round(kc.retail_buy_vol || 0),
+        retail_sell: Math.round(kc.retail_sell_vol || 0),
         delta: Math.round(kc.delta || 0),
         poc: kc.poc, vah: kc.vah, val: kc.val
     }));
@@ -3827,15 +4120,21 @@ function drawAll() {
         dom_orderflow_matrix: {
             active_buy_executed: Number(totExecBuy.toFixed(2)),
             active_sell_executed: Number(totExecSell.toFixed(2)),
-            aged_10s_bid_pulled: Number(totPullB.toFixed(2)),
-            aged_10s_ask_pulled: Number(totPullA.toFixed(2)),
+            whale_buy_executed: Number(totWhaleBuy.toFixed(2)),
+            whale_sell_executed: Number(totWhaleSell.toFixed(2)),
+            retail_buy_executed: Number(totRetailBuy.toFixed(2)),
+            retail_sell_executed: Number(totRetailSell.toFixed(2)),
+            raw_total_bid_pulled: Number(totPullB.toFixed(2)),
+            raw_total_ask_pulled: Number(totPullA.toFixed(2)),
+            flash_ms_bid_pulled: Number(totFlashPullB.toFixed(2)),
+            flash_ms_ask_pulled: Number(totFlashPullA.toFixed(2)),
+            silent_bid_iceberg_reload: Number(totIceBid.toFixed(2)),
+            silent_ask_iceberg_reload: Number(totIceAsk.toFixed(2)),
             net_pulling_delta_PDelta: Number(domPullDelta.toFixed(2)),
-            near_6step_bid_resting_wall: Number(nearBidRest.toFixed(2)),
-            near_6step_ask_resting_wall: Number(nearAskRest.toFixed(2)),
-            recent_3candle_bid_absorptions: rBidAbs,
-            recent_3candle_ask_absorptions: rAskAbs,
-            recent_3candle_whale_buys: recentWhaleB,
-            recent_3candle_whale_sells: recentWhaleS
+            near_8step_bid_resting_wall: Number(nearBidRest.toFixed(2)),
+            near_8step_ask_resting_wall: Number(nearAskRest.toFixed(2)),
+            recent_cluster_bid_absorptions: rBidAbs,
+            recent_cluster_ask_absorptions: rAskAbs
         },
         untouched_magnets: {
             unfinished_business_high_low: unfinishedLevels.slice(-5),
@@ -3859,11 +4158,11 @@ function drawAll() {
     ctx.strokeStyle = '#263147';
     ctx.beginPath(); ctx.moveTo(domX, headerH); ctx.lineTo(domX + domW, headerH); ctx.stroke();
 
-    ctx.font = 'bold 10px monospace';
+    ctx.font = 'bold 9.5px monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#00e5ff';
-    ctx.fillText(`⚔️ REAL EXEC: B:${fmt(totExecBuy)} vs S:${fmt(totExecSell)} | PΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}`, domX + 6, 11);
+    ctx.fillText(`🐋W:${fmt(totWhaleBuy)}B/${fmt(totWhaleSell)}S | 🐑R:${fmt(totRetailBuy)}B/${fmt(totRetailSell)}S | 🧊Ice:${fmt(totIceBid)}B/${fmt(totIceAsk)}A | RawPΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}`, domX + 6, 11);
 
     ctx.fillStyle = bwCol;
     ctx.fillText(battleWinner, domX + 6, 25);
@@ -3875,7 +4174,7 @@ function drawAll() {
     const bY = 35;
     const bH = 36;
 
-    // Box 1: SCALP FINAL BIAS + LIVE TALLY (🟢Bull 🔴Bear ⚪Neu)
+    // Box 1: DYNAMIC TF SCALP / CLUSTER VERDICT
     ctx.fillStyle = '#0e131d';
     ctx.fillRect(b1X, bY, halfBoxW, bH);
     ctx.strokeStyle = scalpFinalCol;
@@ -3885,12 +4184,12 @@ function drawAll() {
     ctx.textAlign = 'center';
     ctx.font = 'bold 8px monospace';
     ctx.fillStyle = '#cfd8dc';
-    ctx.fillText(`⚡SCALP [🟢${sBullCnt} 🔴${sBearCnt} ⚪${sNeuCnt}]`, b1X + halfBoxW * 0.5, bY + 10);
-    ctx.font = 'bold 10.5px monospace';
+    ctx.fillText(`⚡${tf.toUpperCase()} CLUSTER [🟢${sBullCnt} 🔴${sBearCnt} ⚪${sNeuCnt}]`, b1X + halfBoxW * 0.5, bY + 10);
+    ctx.font = 'bold 10px monospace';
     ctx.fillStyle = scalpFinalCol;
     ctx.fillText(scalpFinalTxt, b1X + halfBoxW * 0.5, bY + 25);
 
-    // Box 2: INTRADAY FINAL BIAS + LIVE TALLY (🟢Bull 🔴Bear ⚪Neu)
+    // Box 2: DYNAMIC TF MACRO / INTRADAY VERDICT
     ctx.fillStyle = '#0e131d';
     ctx.fillRect(b2X, bY, halfBoxW, bH);
     ctx.strokeStyle = intraFinalCol;
@@ -3899,8 +4198,8 @@ function drawAll() {
 
     ctx.font = 'bold 8px monospace';
     ctx.fillStyle = '#cfd8dc';
-    ctx.fillText(`🌊INTRA [🟢${iBullCnt} 🔴${iBearCnt} ⚪${iNeuCnt}]`, b2X + halfBoxW * 0.5, bY + 10);
-    ctx.font = 'bold 10.5px monospace';
+    ctx.fillText(`🌊${tf.toUpperCase()} MACRO [🟢${iBullCnt} 🔴${iBearCnt} ⚪${iNeuCnt}]`, b2X + halfBoxW * 0.5, bY + 10);
+    ctx.font = 'bold 10px monospace';
     ctx.fillStyle = intraFinalCol;
     ctx.fillText(intraFinalTxt, b2X + halfBoxW * 0.5, bY + 25);
 
@@ -3912,10 +4211,10 @@ function drawAll() {
     const domPxScaleX = domX + battleAreaW;
 
     ctx.fillStyle = '#90a4ae';
-    ctx.font = 'bold 8.5px monospace';
+    ctx.font = 'bold 8px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('◀ BID [REAL SELL vs 10s SPOOF]', domX + halfBattleW * 0.5, 82);
-    ctx.fillText('ASK [REAL BUY vs 10s SPOOF] ▶', domSpineX + halfBattleW * 0.5, 82);
+    ctx.fillText('◀ BID [🐋W/🐑R SELL | 🧊ICE | ⚡RAW PULL]', domX + halfBattleW * 0.5, 82);
+    ctx.fillText('ASK [🐋W/🐑R BUY | 🧊ICE | ⚡RAW PULL] ▶', domSpineX + halfBattleW * 0.5, 82);
     ctx.fillStyle = '#ffeb3b';
     ctx.fillText('PRICE', domPxScaleX + pxScaleW * 0.5, 82);
 
@@ -3927,38 +4226,42 @@ function drawAll() {
     let ry = headerH + 2;
 
     visibleSlice.forEach((row, idx) => {
-        const { p, bRest, aRest, st, mag } = row;
+        const { p, bRest, aRest, st, rawD, totRawBp, totRawAp, mag } = row;
         const isCurrentRow = Math.abs(p - liveCenterP) < domStep * 0.4;
 
         ctx.fillStyle = isCurrentRow ? 'rgba(255, 235, 59, 0.16)' : (idx % 2 === 0 ? '#0c1018' : '#101520');
         ctx.fillRect(domX + 1, ry, domW - 1, rH);
 
-        const bSpoofPct = (st.bp + st.sell) > 0 ? Math.round((st.bp / (st.bp + st.sell)) * 100) : 0;
-        const aSpoofPct = (st.ap + st.buy) > 0 ? Math.round((st.ap / (st.ap + st.buy)) * 100) : 0;
-        const rowPDelta = st.bp - st.ap;
+        const bSpoofPct = (totRawBp + st.sell) > 0 ? Math.round((totRawBp / (totRawBp + st.sell)) * 100) : 0;
+        const aSpoofPct = (totRawAp + st.buy) > 0 ? Math.round((totRawAp / (totRawAp + st.buy)) * 100) : 0;
+        const rowPDelta = totRawBp - totRawAp;
 
         const execSellRatio = Math.min(1, st.sell / maxRowVal);
         if (st.sell > 0) {
             ctx.fillStyle = 'rgba(255, 23, 68, 0.55)';
             ctx.fillRect(domSpineX - halfBattleW * execSellRatio, ry + 2, halfBattleW * execSellRatio, 10);
         }
-        const pullBidRatio = Math.min(1, st.bp / maxRowVal);
-        if (st.bp > 0) {
+        const pullBidRatio = Math.min(1, totRawBp / maxRowVal);
+        if (totRawBp > 0) {
             ctx.fillStyle = 'rgba(255, 64, 129, 0.40)';
             ctx.fillRect(domSpineX - halfBattleW * pullBidRatio, ry + 12, halfBattleW * pullBidRatio, 10);
         }
 
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.font = 'bold 8.5px monospace';
+        ctx.font = 'bold 8px monospace';
         ctx.fillStyle = '#ff8a80';
-        const winBidTag = (st.sell > st.buy * 1.4 && lastC.close >= p + domStep * 0.5 && lastC.close >= lastC.open) ? '🛡️ABS ' : '';
-        ctx.fillText(`${winBidTag}Exec:${fmt(st.sell)} (Rest:${fmt(bRest)})`, domSpineX - 4, ry + 7);
+        const wSellHere = Math.max(st.wSell, rawD.wSell);
+        const winBidTag = (rawD.iceBid > effCellBench * 0.35 || (st.sell > st.buy * 1.4 && lastC.close >= p + domStep * 0.4)) ? '🧊ABS ' : '';
+        const wSellTag = wSellHere > 0 ? `🐋${fmt(wSellHere)} ` : '';
+        ctx.fillText(`${winBidTag}${wSellTag}S:${fmt(st.sell)} (Rest:${fmt(bRest)})`, domSpineX - 4, ry + 7);
 
-        if (st.bp > 0) {
-            ctx.font = bSpoofPct >= 60 ? 'bold 8px monospace' : '8px monospace';
-            ctx.fillStyle = bSpoofPct >= 60 ? '#ff4081' : '#ff80ab';
-            ctx.fillText(`BID SPOOF:${fmt(st.bp)} (${bSpoofPct}%)`, domSpineX - 4, ry + 18);
+        if (totRawBp > 0 || rawD.iceBid > 0) {
+            ctx.font = bSpoofPct >= 55 ? 'bold 7.5px monospace' : '7.5px monospace';
+            ctx.fillStyle = rawD.flashBp > 0 ? '#ff4081' : '#ff80ab';
+            const fTag = rawD.flashBp > 0 ? `⚡F:${fmt(rawD.flashBp)} ` : '';
+            const iceTag = rawD.iceBid > 0 ? `🧊+${fmt(rawD.iceBid)} ` : '';
+            ctx.fillText(`${iceTag}${fTag}Pull:${fmt(totRawBp)}(${bSpoofPct}%)`, domSpineX - 4, ry + 18);
         }
 
         const execBuyRatio = Math.min(1, st.buy / maxRowVal);
@@ -3966,22 +4269,26 @@ function drawAll() {
             ctx.fillStyle = 'rgba(0, 230, 118, 0.55)';
             ctx.fillRect(domSpineX, ry + 2, halfBattleW * execBuyRatio, 10);
         }
-        const pullAskRatio = Math.min(1, st.ap / maxRowVal);
-        if (st.ap > 0) {
+        const pullAskRatio = Math.min(1, totRawAp / maxRowVal);
+        if (totRawAp > 0) {
             ctx.fillStyle = 'rgba(224, 64, 251, 0.40)';
             ctx.fillRect(domSpineX, ry + 12, halfBattleW * pullAskRatio, 10);
         }
 
         ctx.textAlign = 'left';
-        ctx.font = 'bold 8.5px monospace';
+        ctx.font = 'bold 8px monospace';
         ctx.fillStyle = '#69f0ae';
-        const winAskTag = (st.buy > st.sell * 1.4 && lastC.close <= p - domStep * 0.5 && lastC.close <= lastC.open) ? ' 🛡️CAP' : '';
-        ctx.fillText(`Exec:${fmt(st.buy)} (Rest:${fmt(aRest)})${winAskTag}`, domSpineX + 4, ry + 7);
+        const wBuyHere = Math.max(st.wBuy, rawD.wBuy);
+        const winAskTag = (rawD.iceAsk > effCellBench * 0.35 || (st.buy > st.sell * 1.4 && lastC.close <= p - domStep * 0.4)) ? ' 🧊CAP' : '';
+        const wBuyTag = wBuyHere > 0 ? ` 🐋${fmt(wBuyHere)}` : '';
+        ctx.fillText(`B:${fmt(st.buy)}${wBuyTag} (Rest:${fmt(aRest)})${winAskTag}`, domSpineX + 4, ry + 7);
 
-        if (st.ap > 0) {
-            ctx.font = aSpoofPct >= 60 ? 'bold 8px monospace' : '8px monospace';
-            ctx.fillStyle = aSpoofPct >= 60 ? '#e040fb' : '#ea80fc';
-            ctx.fillText(`ASK SPOOF:${fmt(st.ap)} (${aSpoofPct}%)`, domSpineX + 4, ry + 18);
+        if (totRawAp > 0 || rawD.iceAsk > 0) {
+            ctx.font = aSpoofPct >= 55 ? 'bold 7.5px monospace' : '7.5px monospace';
+            ctx.fillStyle = rawD.flashAp > 0 ? '#e040fb' : '#ea80fc';
+            const fTag = rawD.flashAp > 0 ? `⚡F:${fmt(rawD.flashAp)} ` : '';
+            const iceTag = rawD.iceAsk > 0 ? `🧊+${fmt(rawD.iceAsk)} ` : '';
+            ctx.fillText(`${iceTag}${fTag}Pull:${fmt(totRawAp)}(${aSpoofPct}%)`, domSpineX + 4, ry + 18);
         }
 
         ctx.fillStyle = isCurrentRow ? '#ffeb3b' : (mag ? 'rgba(224, 64, 251, 0.22)' : '#161c2b');
@@ -3996,6 +4303,10 @@ function drawAll() {
         let subCol = isCurrentRow ? '#000' : '#ffd700';
         if (mag) {
             subLbl = mag.lbl; subCol = isCurrentRow ? '#000' : '#ffeb3b';
+        } else if (rawD.iceBid > rawD.iceAsk && rawD.iceBid > effCellBench * 0.3) {
+            subLbl = '🧊BID CLUS'; subCol = isCurrentRow ? '#004d40' : '#00e5ff';
+        } else if (rawD.iceAsk > rawD.iceBid && rawD.iceAsk > effCellBench * 0.3) {
+            subLbl = '🧊ASK CLUS'; subCol = isCurrentRow ? '#b71c1c' : '#ff9100';
         } else if (st.buy > st.sell * 1.3) {
             subLbl = '🟢BUY WIN'; subCol = isCurrentRow ? '#004d40' : '#00e676';
         } else if (st.sell > st.buy * 1.3) {
@@ -4029,7 +4340,7 @@ function drawAll() {
     ctx.stroke();
 }
 
-// SMART BANDWIDTH-SAVER POLLING: Auto-pauses when browser tab is minimized/backgrounded!
+// SMART BANDWIDTH-SAVER POLLING: Auto-pauses when browser tab is minimized!
 setInterval(() => {
     if (!document.hidden) fetchData();
 }, 3200);
@@ -4196,8 +4507,16 @@ def api_orderbook():
 
     with lock:
         state = orderbook[symbol]
+        live_px = last_trade.get(symbol, {}).get("price")
+        step = PRICE_STEP.get(symbol, 1.0)
         bids = sorted(state["bids"].items(), key=lambda x: float(x[0]), reverse=True)[:limit]
         asks = sorted(state["asks"].items(), key=lambda x: float(x[0]))[:limit]
+
+        raw_list = []
+        for px_k, d_obj in dom_raw_telemetry[symbol].items():
+            if live_px is None or abs(float(px_k) - float(live_px)) <= step * 25.0:
+                raw_list.append({"price": float(px_k), **d_obj})
+
         return jsonify({
             "status": "ok",
             "symbol": symbol,
@@ -4212,6 +4531,7 @@ def api_orderbook():
             "ask_count": len(state["asks"]),
             "bids": [{"price": float(p), "quantity": q} for p, q in bids],
             "asks": [{"price": float(p), "quantity": q} for p, q in asks],
+            "dom_raw": raw_list,
         })
 
 
@@ -4495,7 +4815,7 @@ def compress_response(response):
     return response
 
 # ============================================================
-# START 24/7 SERVER-SIDE $10 DEMO PAPER BOT (INSTITUTIONAL V4)
+# START 24/7 SERVER-SIDE $10 DEMO PAPER BOT (CLUSTER V5)
 # ============================================================
 
 paper_bot_lock = threading.Lock()
@@ -4504,7 +4824,7 @@ _last_self_ping = 0
 
 def _default_paper_state():
     return {
-        "enabled": False,  # Default OFF so Render can sleep & save 100% bandwidth when you are not testing!
+        "enabled": False,  # Default OFF to save 100% bandwidth when not testing
         "symbol": "BTCUSDT",
         "tf": "5m",
         "leverage": 10,
@@ -4545,15 +4865,23 @@ def _group_fp_server(fp_raw, low_px, high_px, eff_step, close_px, live_rest_benc
     buckets = {}
     for l in items:
         p = float(l.get("price", 0.0))
-        if p < low_px - eff_step * 1.1 or p > high_px + eff_step * 1.1:
+        if p < low_px - eff_step * 2.5 or p > high_px + eff_step * 2.5:
             continue
         b_px = round(int(p / eff_step + 1e-9) * eff_step, 6)
         g = buckets.get(b_px)
         if g is None:
-            g = {"price": b_px, "buy": 0.0, "sell": 0.0, "volume": 0.0, "trades": 0, "bid_pulled": 0.0, "ask_pulled": 0.0}
+            g = {
+                "price": b_px, "buy": 0.0, "sell": 0.0,
+                "whale_buy": 0.0, "whale_sell": 0.0, "retail_buy": 0.0, "retail_sell": 0.0,
+                "volume": 0.0, "trades": 0, "bid_pulled": 0.0, "ask_pulled": 0.0
+            }
             buckets[b_px] = g
         g["buy"] += float(l.get("buy", 0.0))
         g["sell"] += float(l.get("sell", 0.0))
+        g["whale_buy"] += float(l.get("whale_buy", 0.0))
+        g["whale_sell"] += float(l.get("whale_sell", 0.0))
+        g["retail_buy"] += float(l.get("retail_buy", 0.0))
+        g["retail_sell"] += float(l.get("retail_sell", 0.0))
         g["volume"] += float(l.get("volume", 0.0))
         g["trades"] += int(l.get("trades", 0))
         bp = float(l.get("bid_pulled", 0.0))
@@ -4567,12 +4895,12 @@ def _group_fp_server(fp_raw, low_px, high_px, eff_step, close_px, live_rest_benc
         g["bid_pulled"] += bp
         g["ask_pulled"] += ap
 
-    rest_cap = max((live_rest_bench or 15.0) * 3.2, 25.0)
+    rest_cap = max((live_rest_bench or 15.0) * 4.5, 45.0)
     out = []
     for g in buckets.values():
         if g["volume"] <= 0 and g["bid_pulled"] <= 0 and g["ask_pulled"] <= 0:
             continue
-        max_pull = max(g["volume"] * 2.5, rest_cap)
+        max_pull = max(g["volume"] * 3.5, rest_cap)
         g["bid_pulled"] = min(g["bid_pulled"], max_pull)
         g["ask_pulled"] = min(g["ask_pulled"], max_pull)
         out.append(g)
@@ -4595,7 +4923,7 @@ def _pick_server_magnet_tp(side, entry_px, sl_dist, min_rr, max_rr, magnets):
     return fallback_tp, f"{min_rr}R-Target"
 
 def _evaluate_server_orderflow(sym, tf_key):
-    """100% True Institutional Initiation + Underwater Trapped POC + Defended Iceberg Evaluator."""
+    """Multi-Row Cluster Buildup + Raw Millisecond DOM + Sweep vs Breakout Evaluator."""
     raw_step = PRICE_STEP.get(sym, 1.0)
     peer_sym = "ETHUSDT" if sym == "BTCUSDT" else "BTCUSDT"
 
@@ -4617,8 +4945,8 @@ def _evaluate_server_orderflow(sym, tf_key):
         live_px = float(last_c["close"])
         bids_dict = dict(orderbook[sym]["bids"])
         asks_dict = dict(orderbook[sym]["asks"])
+        raw_dom_snap = {k: dict(v) for k, v in dom_raw_telemetry[sym].items()}
 
-    # 1. Auto-Scale Cluster Step
     focus4 = c_list[-4:]
     f_lo = min(float(x["low"]) for x in focus4)
     f_hi = max(float(x["high"]) for x in focus4)
@@ -4631,7 +4959,6 @@ def _evaluate_server_orderflow(sym, tf_key):
         mult = next((s for s in nice_steps if s >= needed), int(needed) + 1)
     eff_step = raw_step * mult
 
-    # 2. Live Resting Book & Clustered Map
     bucket_book = defaultdict(float)
     bid_cluster_map = defaultdict(float)
     ask_cluster_map = defaultdict(float)
@@ -4643,7 +4970,7 @@ def _evaluate_server_orderflow(sym, tf_key):
         bid_cluster_map[b_k] += q
         if abs(pf - live_px) <= eff_step * 25:
             bucket_book[f"B{int(pf / eff_step)}"] += q
-        if (live_px - eff_step * 6) <= pf <= live_px:
+        if (live_px - eff_step * 8) <= pf <= live_px:
             near_bid_rest += q
 
     for p_s, q in asks_dict.items():
@@ -4652,13 +4979,28 @@ def _evaluate_server_orderflow(sym, tf_key):
         ask_cluster_map[a_k] += q
         if abs(pf - live_px) <= eff_step * 25:
             bucket_book[f"A{int(pf / eff_step)}"] += q
-        if live_px <= pf <= (live_px + eff_step * 6):
+        if live_px <= pf <= (live_px + eff_step * 8):
             near_ask_rest += q
+
+    raw_dom_cluster = defaultdict(lambda: {"w_buy": 0.0, "w_sell": 0.0, "r_buy": 0.0, "r_sell": 0.0, "flash_bp": 0.0, "flash_ap": 0.0, "aged_bp": 0.0, "aged_ap": 0.0, "ice_bid": 0.0, "ice_ask": 0.0})
+    for px_k, d_obj in raw_dom_snap.items():
+        if abs(float(px_k) - live_px) <= eff_step * 25:
+            ck = round(int(float(px_k) / eff_step + 1e-9) * eff_step, 6)
+            rc_d = raw_dom_cluster[ck]
+            rc_d["w_buy"] += float(d_obj.get("w_buy", 0.0))
+            rc_d["w_sell"] += float(d_obj.get("w_sell", 0.0))
+            rc_d["r_buy"] += float(d_obj.get("r_buy", 0.0))
+            rc_d["r_sell"] += float(d_obj.get("r_sell", 0.0))
+            rc_d["flash_bp"] += float(d_obj.get("flash_bid_pull", 0.0))
+            rc_d["flash_ap"] += float(d_obj.get("flash_ask_pull", 0.0))
+            rc_d["aged_bp"] += float(d_obj.get("aged_bid_pull", 0.0))
+            rc_d["aged_ap"] += float(d_obj.get("aged_ask_pull", 0.0))
+            rc_d["ice_bid"] += float(d_obj.get("iceberg_bid", 0.0))
+            rc_d["ice_ask"] += float(d_obj.get("iceberg_ask", 0.0))
 
     vals = [v for v in bucket_book.values() if v > 0]
     live_rest_bench = (sum(vals) / len(vals)) if vals else 0.0
 
-    # 3. Hard Institutional Density Baselines
     hist_c = c_list[:-1]
     avg_flow_vol = max(sum(float(x.get("volume", 0)) for x in hist_c) / max(1, len(hist_c)), 0.001)
     tot_hist_trades = sum(int(x.get("trades", 1)) for x in hist_c)
@@ -4675,21 +5017,15 @@ def _evaluate_server_orderflow(sym, tf_key):
     eff_cell_bench = max(tf_avg_cell_vol, min_inst_cell_floor)
     heavy_lvl_bench = max(eff_cell_bench * 1.40, min(eff_cell_bench * 2.1, live_rest_bench * 1.20)) if live_rest_bench > 0 else eff_cell_bench * 1.60
 
-    # 4. SMT Divergence Radar
     smt_bias = 0
     if len(peer_list) >= 6:
         c6 = c_list[-6:]
         p6 = peer_list[-6:]
-        c_swept_lo = float(c6[-1]["low"]) <= min(float(x["low"]) for x in c6[:-1])
-        p_swept_lo = float(p6[-1]["low"]) <= min(float(x["low"]) for x in p6[:-1])
-        c_swept_hi = float(c6[-1]["high"]) >= max(float(x["high"]) for x in c6[:-1])
-        p_swept_hi = float(p6[-1]["high"]) >= max(float(x["high"]) for x in p6[:-1])
-        if c_swept_lo != p_swept_lo:
+        if (float(c6[-1]["low"]) <= min(float(x["low"]) for x in c6[:-1])) != (float(p6[-1]["low"]) <= min(float(x["low"]) for x in p6[:-1])):
             smt_bias = 1
-        elif c_swept_hi != p_swept_hi:
+        elif (float(c6[-1]["high"]) >= max(float(x["high"]) for x in c6[:-1])) != (float(p6[-1]["high"]) >= max(float(x["high"]) for x in p6[:-1])):
             smt_bias = -1
 
-    # 5. Macro 20-Candle Session Stats
     macro_hi = max(float(x["high"]) for x in c_list)
     macro_lo = min(float(x["low"]) for x in c_list)
     macro_span = max(macro_hi - macro_lo, raw_step)
@@ -4703,9 +5039,12 @@ def _evaluate_server_orderflow(sym, tf_key):
     macro_bid_abs, macro_ask_abs = 0, 0
     macro_bp, macro_ap = 0.0, 0.0
     macro_whale_b, macro_whale_s = 0, 0
+    sess_w_buy, sess_w_sell = 0.0, 0.0
 
     for idx, mc in enumerate(c_list):
         tot_cvd += float(mc.get("delta", 0.0))
+        sess_w_buy += float(mc.get("whale_buy_vol", 0.0))
+        sess_w_sell += float(mc.get("whale_sell_vol", 0.0))
         if idx > 0 and mc.get("poc") and c_list[idx - 1].get("poc"):
             if float(mc["poc"]) > float(c_list[idx - 1]["poc"]):
                 poc_up += 1
@@ -4715,93 +5054,127 @@ def _evaluate_server_orderflow(sym, tf_key):
         mfp = _group_fp_server(mc.get("footprint"), float(mc["low"]), float(mc["high"]), eff_step, float(mc["close"]), live_rest_bench)
         act_cells = [x for x in mfp if x["volume"] > 0]
         c_avg_v = max(float(mc.get("volume", 1.0)) / max(len(act_cells), 1), min_inst_cell_floor)
-        c_heavy_cut = max(c_avg_v * 1.35, heavy_lvl_bench * 0.50)
-        mc_mid = (float(mc["high"]) + float(mc["low"])) * 0.5
-        mc_cls = float(mc["close"])
-        mc_opn = float(mc["open"])
+        c_heavy_cut = max(c_avg_v * 1.25, heavy_lvl_bench * 0.45)
+        mc_hi, mc_lo, mc_cls = float(mc["high"]), float(mc["low"]), float(mc["close"])
+        mc_span = max(mc_hi - mc_lo, eff_step)
+        lo_swing_top = mc_lo + mc_span * 0.42
+        hi_swing_bot = mc_hi - mc_span * 0.42
 
-        for l in mfp:
+        for i_l, l in enumerate(mfp):
             sv, bv, tv = l["sell"], l["buy"], l["volume"]
             bp, ap = l["bid_pulled"], l["ask_pulled"]
-            b_abs_pct = (sv / tv) * 100.0 if tv > 0 else 0.0
-            a_abs_pct = (bv / tv) * 100.0 if tv > 0 else 0.0
-            is_churn = tv >= max(c_avg_v * 2.0, heavy_lvl_bench * 0.85) and b_abs_pct >= 42.0 and a_abs_pct >= 42.0
+            clus_s, clus_b = sv, bv
+            if i_l > 0 and abs(mfp[i_l - 1]["price"] - l["price"]) <= eff_step * 1.5:
+                clus_s += mfp[i_l - 1]["sell"]
+                clus_b += mfp[i_l - 1]["buy"]
+            if i_l + 1 < len(mfp) and abs(mfp[i_l + 1]["price"] - l["price"]) <= eff_step * 1.5:
+                clus_s += mfp[i_l + 1]["sell"]
+                clus_b += mfp[i_l + 1]["buy"]
+            clus_tot = clus_s + clus_b
+            clus_b_pct = (clus_s / clus_tot) * 100.0 if clus_tot > 0 else 0.0
+            clus_a_pct = (clus_b / clus_tot) * 100.0 if clus_tot > 0 else 0.0
 
             macro_bp += bp
             macro_ap += ap
-            if l["price"] <= mc_mid and mc_cls >= mc_opn and mc_cls >= l["price"] + eff_step * 0.8:
-                if (sv >= c_heavy_cut and b_abs_pct >= 65.0) or is_churn:
-                    macro_bid_abs += 1
-            if l["price"] >= mc_mid and mc_cls <= mc_opn and mc_cls <= l["price"] - eff_step * 0.8:
-                if (bv >= c_heavy_cut and a_abs_pct >= 65.0) or is_churn:
-                    macro_ask_abs += 1
+            if l["price"] <= lo_swing_top and clus_s >= c_heavy_cut * 1.3 and clus_b_pct >= 58.0 and mc_cls > l["price"] + eff_step * 0.4:
+                macro_bid_abs += 1
+            if l["price"] >= hi_swing_bot and clus_b >= c_heavy_cut * 1.3 and clus_a_pct >= 58.0 and mc_cls < l["price"] - eff_step * 0.4:
+                macro_ask_abs += 1
 
             lt = max(l["trades"], 1)
             lot_ratio = (tv / lt) / base_lot
-            if tv >= max(c_avg_v * 1.15, heavy_lvl_bench * 0.50) and ((lot_ratio >= 2.8 and lt <= 48) or lot_ratio >= 4.5):
-                if bv > sv:
+            has_tw = (l["whale_buy"] + l["whale_sell"]) > 0
+            if has_tw or (tv >= max(c_avg_v * 1.15, heavy_lvl_bench * 0.50) and ((lot_ratio >= 2.8 and lt <= 48) or lot_ratio >= 4.5)):
+                if (l["whale_buy"] or bv) > (l["whale_sell"] or sv):
                     macro_whale_b += 1
                 else:
                     macro_whale_s += 1
 
     macro_pull_delta = macro_bp - macro_ap
-    bull_m, bear_m = 0, 0
-    if net_move > macro_span * 0.20 and poc_up > poc_dn:
-        bull_m += 24
-    elif net_move < -macro_span * 0.20 and poc_dn > poc_up:
-        bear_m += 24
-    if tot_cvd > 0 and net_move > 0:
-        bull_m += 20
-    elif tot_cvd < 0 and net_move < 0:
-        bear_m += 20
-    if macro_pull_delta < 0 and net_move > 0:
-        bull_m += 22
-    elif macro_pull_delta > 0 and net_move < 0:
-        bear_m += 22
-    if macro_whale_b > macro_whale_s:
-        bull_m += 18
-    elif macro_whale_s > macro_whale_b:
-        bear_m += 18
-    net_macro = bull_m - bear_m
+    net_w_vol = sess_w_buy - sess_w_sell
+    net_macro = 0
+    if macro_bid_abs > macro_ask_abs:
+        net_macro += min(28, 12 + (macro_bid_abs - macro_ask_abs) * 4)
+    elif macro_ask_abs > macro_bid_abs:
+        net_macro -= min(28, 12 + (macro_ask_abs - macro_bid_abs) * 4)
+    if macro_whale_b > macro_whale_s or net_w_vol > avg_flow_vol * 0.3:
+        net_macro += 24
+    elif macro_whale_s > macro_whale_b or net_w_vol < -avg_flow_vol * 0.3:
+        net_macro -= 24
+    if macro_pull_delta < -avg_flow_vol * 0.15:
+        net_macro += 18
+    elif macro_pull_delta > avg_flow_vol * 0.15:
+        net_macro -= 18
+    if poc_up > poc_dn:
+        net_macro += 16
+    elif poc_dn > poc_up:
+        net_macro -= 16
+    if tot_cvd > 0 and (net_move >= 0 or macro_bid_abs > macro_ask_abs):
+        net_macro += 14
+    elif tot_cvd < 0 and (net_move <= 0 or macro_ask_abs > macro_bid_abs):
+        net_macro -= 14
 
-    # 6. Recent 3-Candle Sticky DOM & Strictly Defended Absorption Matrix
+    # 6-Candle Structure Cluster Evaluation
     tot_exec_buy, tot_exec_sell, tot_pull_b, tot_pull_a = 0.0, 0.0, 0.0, 0.0
+    tot_w_buy, tot_w_sell, tot_r_buy, tot_r_sell = 0.0, 0.0, 0.0, 0.0
+    tot_ice_bid = sum(v["ice_bid"] for v in raw_dom_cluster.values())
+    tot_ice_ask = sum(v["ice_ask"] for v in raw_dom_cluster.values())
+    tot_flash_bp = sum(v["flash_bp"] for v in raw_dom_cluster.values())
+    tot_flash_ap = sum(v["flash_ap"] for v in raw_dom_cluster.values())
     r_bid_abs, r_ask_abs, recent_whale_b, recent_whale_s = 0, 0, 0, 0
     lowest_bid_abs_px, highest_ask_abs_px = None, None
 
-    for rc in c_list[-3:]:
+    struct_set = c_list[-6:]
+    for s_idx, rc in enumerate(struct_set):
+        is_rec3 = s_idx >= len(struct_set) - 3
         rc_hi, rc_lo = float(rc["high"]), float(rc["low"])
         rc_cls, rc_opn = float(rc["close"]), float(rc["open"])
         rc_rng = max(rc_hi - rc_lo, raw_step * 0.5)
         rc_cls_pos = (rc_cls - rc_lo) / rc_rng
-        rc_mid = (rc_hi + rc_lo) * 0.5
+        lo_zone = rc_lo + rc_rng * 0.45
+        hi_zone = rc_hi - rc_rng * 0.45
 
         g_list = _group_fp_server(rc.get("footprint"), rc_lo, rc_hi, eff_step, rc_cls, live_rest_bench)
-        for gl in g_list:
-            tot_exec_buy += gl["buy"]
-            tot_exec_sell += gl["sell"]
-            tot_pull_b += gl["bid_pulled"]
-            tot_pull_a += gl["ask_pulled"]
+        for i_g, gl in enumerate(g_list):
+            if is_rec3:
+                tot_exec_buy += gl["buy"]
+                tot_exec_sell += gl["sell"]
+                tot_w_buy += gl["whale_buy"]
+                tot_w_sell += gl["whale_sell"]
+                tot_r_buy += gl["retail_buy"]
+                tot_r_sell += gl["retail_sell"]
+                tot_pull_b += gl["bid_pulled"]
+                tot_pull_a += gl["ask_pulled"]
 
-            tot_v = gl["volume"]
-            b_pct = (gl["sell"] / tot_v) * 100.0 if tot_v > 0 else 0.0
-            a_pct = (gl["buy"] / tot_v) * 100.0 if tot_v > 0 else 0.0
-            churn = tot_v >= eff_cell_bench * 1.9 and b_pct >= 42.0 and a_pct >= 42.0
+            clus_s, clus_b = gl["sell"], gl["buy"]
+            if i_g > 0 and abs(g_list[i_g - 1]["price"] - gl["price"]) <= eff_step * 1.5:
+                clus_s += g_list[i_g - 1]["sell"]
+                clus_b += g_list[i_g - 1]["buy"]
+            if i_g + 1 < len(g_list) and abs(g_list[i_g + 1]["price"] - gl["price"]) <= eff_step * 1.5:
+                clus_s += g_list[i_g + 1]["sell"]
+                clus_b += g_list[i_g + 1]["buy"]
+            clus_tot = clus_s + clus_b
+            clus_b_pct = (clus_s / clus_tot) * 100.0 if clus_tot > 0 else 0.0
+            clus_a_pct = (clus_b / clus_tot) * 100.0 if clus_tot > 0 else 0.0
+            churn = clus_tot >= eff_cell_bench * 2.1 and clus_b_pct >= 42.0 and clus_a_pct >= 42.0
             b_rest_here = bid_cluster_map.get(gl["price"], 0.0)
             a_rest_here = ask_cluster_map.get(gl["price"], 0.0)
+            raw_d = raw_dom_cluster.get(gl["price"])
 
-            bid_defended = (rc_cls >= rc_opn or rc_cls_pos >= 0.55) and (rc_cls >= gl["price"] + eff_step * 0.8)
-            ask_capped = (rc_cls <= rc_opn or rc_cls_pos <= 0.45) and (rc_cls <= gl["price"] - eff_step * 0.8)
+            bid_rot_up = (rc_cls >= rc_opn or rc_cls_pos >= 0.45) and (rc_cls > gl["price"] + eff_step * 0.4)
+            ask_rot_dn = (rc_cls <= rc_opn or rc_cls_pos <= 0.55) and (rc_cls < gl["price"] - eff_step * 0.4)
 
-            is_bid_abs = gl["price"] <= rc_mid and bid_defended and (
-                (gl["sell"] >= eff_cell_bench * 1.30 and b_pct >= 62.0)
+            is_bid_abs = gl["price"] <= lo_zone and bid_rot_up and (
+                (clus_s >= eff_cell_bench * 1.6 and clus_b_pct >= 58.0 and gl["sell"] >= eff_cell_bench * 0.7)
                 or churn
-                or (gl["sell"] >= eff_cell_bench * 1.15 and b_rest_here >= max(live_rest_bench * 1.3, eff_cell_bench))
+                or (gl["sell"] >= eff_cell_bench * 1.0 and b_rest_here >= max(live_rest_bench * 1.3, eff_cell_bench))
+                or (raw_d and raw_d["ice_bid"] >= eff_cell_bench * 0.5)
             )
-            is_ask_abs = gl["price"] >= rc_mid and ask_capped and (
-                (gl["buy"] >= eff_cell_bench * 1.30 and a_pct >= 62.0)
+            is_ask_abs = gl["price"] >= hi_zone and ask_rot_dn and (
+                (clus_b >= eff_cell_bench * 1.6 and clus_a_pct >= 58.0 and gl["buy"] >= eff_cell_bench * 0.7)
                 or churn
-                or (gl["buy"] >= eff_cell_bench * 1.15 and a_rest_here >= max(live_rest_bench * 1.3, eff_cell_bench))
+                or (gl["buy"] >= eff_cell_bench * 1.0 and a_rest_here >= max(live_rest_bench * 1.3, eff_cell_bench))
+                or (raw_d and raw_d["ice_ask"] >= eff_cell_bench * 0.5)
             )
 
             if is_bid_abs:
@@ -4814,26 +5187,28 @@ def _evaluate_server_orderflow(sym, tf_key):
                 if highest_ask_abs_px is None or gl["price"] > highest_ask_abs_px:
                     highest_ask_abs_px = gl["price"]
 
-            trd = max(gl["trades"], 1)
-            if tot_v >= eff_cell_bench * 1.20 and ((tot_v / trd) / base_lot) >= 2.8:
-                if gl["buy"] > gl["sell"] and rc_cls >= gl["price"] - eff_step * 0.5:
-                    recent_whale_b += 1
-                elif gl["sell"] >= gl["buy"] and rc_cls <= gl["price"] + eff_step * 0.5:
-                    recent_whale_s += 1
+            if is_rec3:
+                trd = max(gl["trades"], 1)
+                has_tw = (gl["whale_buy"] + gl["whale_sell"]) > 0
+                if has_tw or (gl["volume"] >= eff_cell_bench * 1.20 and ((gl["volume"] / trd) / base_lot) >= 2.8):
+                    if (gl["whale_buy"] or gl["buy"]) > (gl["whale_sell"] or gl["sell"]) and rc_cls >= gl["price"] - eff_step * 0.5:
+                        recent_whale_b += 1
+                    elif (gl["whale_sell"] or gl["sell"]) >= (gl["whale_buy"] or gl["buy"]) and rc_cls <= gl["price"] + eff_step * 0.5:
+                        recent_whale_s += 1
 
+    tot_pull_b += tot_flash_bp
+    tot_pull_a += tot_flash_ap
     dom_pull_delta = tot_pull_b - tot_pull_a
+
     c_range = max(float(last_c["high"]) - float(last_c["low"]), raw_step * 0.5)
     close_pos = (live_px - float(last_c["low"])) / c_range
-    body_size = abs(live_px - float(last_c["open"]))
-    upper_wick = float(last_c["high"]) - max(float(last_c["open"]), live_px)
-    lower_wick = min(float(last_c["open"]), live_px) - float(last_c["low"])
     last_delta = float(last_c.get("delta", 0.0))
     prev_delta = float(prev_c.get("delta", 0.0))
 
     cur_poc = float(last_c["poc"]) if last_c.get("poc") is not None else (float(last_c["high"]) + float(last_c["low"])) * 0.5
     prev_poc = float(prev_c["poc"]) if prev_c.get("poc") is not None else (float(prev_c["high"]) + float(prev_c["low"])) * 0.5
 
-    s_poc_up, s_poc_dn, hh_cnt, ll_cnt = 0, 0, 0, 0
+    s_poc_up, s_poc_dn = 0, 0
     last4 = c_list[-4:]
     for m in range(1, len(last4)):
         if last4[m].get("poc") is not None and last4[m - 1].get("poc") is not None:
@@ -4841,175 +5216,148 @@ def _evaluate_server_orderflow(sym, tf_key):
                 s_poc_up += 1
             elif float(last4[m]["poc"]) < float(last4[m - 1]["poc"]):
                 s_poc_dn += 1
-        if float(last4[m]["high"]) > float(last4[m - 1]["high"]) and float(last4[m]["low"]) >= float(last4[m - 1]["low"]):
-            hh_cnt += 1
-        if float(last4[m]["low"]) < float(last4[m - 1]["low"]) and float(last4[m]["high"]) <= float(last4[m - 1]["high"]):
-            ll_cnt += 1
 
     prev5_hi = max(float(x["high"]) for x in c_list[-6:-1])
     prev5_lo = min(float(x["low"]) for x in c_list[-6:-1])
-    bull_sweep_reject = float(last_c["low"]) < prev5_lo and live_px > prev5_lo and close_pos >= 0.55 and live_px >= float(last_c["open"])
-    bear_sweep_reject = float(last_c["high"]) > prev5_hi and live_px < prev5_hi and close_pos <= 0.45 and live_px <= float(last_c["open"])
+    bull_sweep_reject = float(last_c["low"]) < prev5_lo and live_px > prev5_lo and (close_pos >= 0.50 or r_bid_abs > 0 or tot_ice_bid > 0)
+    bear_sweep_reject = float(last_c["high"]) > prev5_hi and live_px < prev5_hi and (close_pos <= 0.50 or r_ask_abs > 0 or tot_ice_ask > 0)
 
-    # Institutional Initiation Drive vs Underwater Trapped Retail
-    inst_bull_drive = (
-        (tot_exec_buy > tot_exec_sell * 1.15 or last_delta > eff_cell_bench * 0.40)
-        and live_px > float(last_c["open"]) and close_pos >= 0.58
-        and live_px >= cur_poc and (live_px >= prev_poc or hh_cnt > ll_cnt)
-    )
-    inst_bear_drive = (
-        (tot_exec_sell > tot_exec_buy * 1.15 or last_delta < -eff_cell_bench * 0.40)
-        and live_px < float(last_c["open"]) and close_pos <= 0.42
-        and live_px <= cur_poc and (live_px <= prev_poc or ll_cnt > hh_cnt)
-    )
+    inst_bull_drive = (tot_exec_buy > tot_exec_sell * 1.15 or tot_w_buy > tot_w_sell * 1.20) and live_px > float(last_c["open"]) and close_pos >= 0.58 and live_px >= cur_poc and not bear_sweep_reject
+    inst_bear_drive = (tot_exec_sell > tot_exec_buy * 1.15 or tot_w_sell > tot_w_buy * 1.20) and live_px < float(last_c["open"]) and close_pos <= 0.42 and live_px <= cur_poc and not bull_sweep_reject
 
-    trapped_buyers_underwater = prev_delta > eff_cell_bench * 0.35 and live_px < prev_poc - eff_step * 0.5 and live_px < float(last_c["open"]) and last_delta < 0
-    trapped_sellers_underwater = prev_delta < -eff_cell_bench * 0.35 and live_px > prev_poc + eff_step * 0.5 and live_px > float(last_c["open"]) and last_delta > 0
+    cluster_long_buildup = (r_bid_abs > r_ask_abs or tot_ice_bid > tot_ice_ask * 1.25) and (tot_w_buy >= tot_w_sell or dom_pull_delta < -eff_cell_bench * 0.25 or near_bid_rest > near_ask_rest * 1.25)
+    cluster_short_buildup = (r_ask_abs > r_bid_abs or tot_ice_ask > tot_ice_bid * 1.25) and (tot_w_sell >= tot_w_buy or dom_pull_delta > eff_cell_bench * 0.25 or near_ask_rest > near_bid_rest * 1.25)
 
     retail_buys_trapped = not inst_bull_drive and (
-        trapped_buyers_underwater
-        or (last_delta > eff_cell_bench * 0.45 and live_px <= float(last_c["open"]) and close_pos <= 0.42)
-        or (r_ask_abs > r_bid_abs and upper_wick > body_size * 1.0 and close_pos <= 0.45 and live_px <= cur_poc)
+        bear_sweep_reject
+        or (tot_r_buy > tot_w_buy * 1.15 and (tot_ice_ask > eff_cell_bench * 0.35 or r_ask_abs > r_bid_abs) and close_pos <= 0.52)
+        or (last_delta > eff_cell_bench * 0.45 and live_px <= float(last_c["open"]) and close_pos <= 0.44)
+        or (prev_delta > eff_cell_bench * 0.35 and live_px < prev_poc - eff_step * 0.5 and live_px < float(last_c["open"]))
     )
     retail_sells_trapped = not inst_bear_drive and (
-        trapped_sellers_underwater
-        or (last_delta < -eff_cell_bench * 0.45 and live_px >= float(last_c["open"]) and close_pos >= 0.58)
-        or (r_bid_abs > r_ask_abs and lower_wick > body_size * 1.0 and close_pos >= 0.55 and live_px >= cur_poc)
+        bull_sweep_reject
+        or (tot_r_sell > tot_w_sell * 1.15 and (tot_ice_bid > eff_cell_bench * 0.35 or r_bid_abs > r_ask_abs) and close_pos >= 0.48)
+        or (last_delta < -eff_cell_bench * 0.45 and live_px >= float(last_c["open"]) and close_pos >= 0.56)
+        or (prev_delta < -eff_cell_bench * 0.35 and live_px > prev_poc + eff_step * 0.5 and live_px > float(last_c["open"]))
     )
 
-    # 7. Untouched nPOC & Clustered UB-HIGH/LOW Magnets
-    naked_pocs = []
-    unfinished_levels = []
+    naked_pocs, unfinished_levels = [], []
     min_ub_vol = max(base_lot * 0.8, 0.05)
     for i in range(len(c_list) - 1):
         hc = c_list[i]
         pc = hc.get("poc")
-        if pc is not None:
-            touched = any(float(c_list[j]["low"]) <= float(pc) <= float(c_list[j]["high"]) for j in range(i + 1, len(c_list)))
-            if not touched:
-                naked_pocs.append(float(pc))
-
+        if pc is not None and not any(float(c_list[j]["low"]) <= float(pc) <= float(c_list[j]["high"]) for j in range(i + 1, len(c_list))):
+            naked_pocs.append(float(pc))
         g_fp = _group_fp_server(hc.get("footprint"), float(hc["low"]), float(hc["high"]), eff_step, float(hc["close"]), live_rest_bench)
         act_fp = [x for x in g_fp if x["volume"] > 0]
         if act_fp:
-            hi_l = max(act_fp, key=lambda x: x["price"])
-            lo_l = min(act_fp, key=lambda x: x["price"])
-            if hi_l["buy"] >= min_ub_vol and hi_l["sell"] >= min_ub_vol:
-                swept_hi = any(float(c_list[j]["high"]) > hi_l["price"] + eff_step * 0.2 for j in range(i + 1, len(c_list)))
-                if not swept_hi:
-                    unfinished_levels.append((hi_l["price"], "UB-HIGH"))
-            if lo_l["buy"] >= min_ub_vol and lo_l["sell"] >= min_ub_vol:
-                swept_lo = any(float(c_list[j]["low"]) < lo_l["price"] - eff_step * 0.2 for j in range(i + 1, len(c_list)))
-                if not swept_lo:
-                    unfinished_levels.append((lo_l["price"], "UB-LOW"))
-
+            hi_l, lo_l = max(act_fp, key=lambda x: x["price"]), min(act_fp, key=lambda x: x["price"])
+            if hi_l["buy"] >= min_ub_vol and hi_l["sell"] >= min_ub_vol and not any(float(c_list[j]["high"]) > hi_l["price"] + eff_step * 0.2 for j in range(i + 1, len(c_list))):
+                unfinished_levels.append((hi_l["price"], "UB-HIGH"))
+            if lo_l["buy"] >= min_ub_vol and lo_l["sell"] >= min_ub_vol and not any(float(c_list[j]["low"]) < lo_l["price"] - eff_step * 0.2 for j in range(i + 1, len(c_list))):
+                unfinished_levels.append((lo_l["price"], "UB-LOW"))
     magnets = [(p, "nPOC") for p in naked_pocs] + unfinished_levels
 
-    # 8. TRUE INSTITUTIONAL 12-PARAMETER SCALP SCORING
     scalp_pts = 0
     if inst_bull_drive:
-        scalp_pts += 30
+        scalp_pts += 28
     elif inst_bear_drive:
-        scalp_pts -= 30
-    elif retail_buys_trapped:
-        scalp_pts -= 26
-    elif retail_sells_trapped:
-        scalp_pts += 26
+        scalp_pts -= 28
+    elif retail_buys_trapped or cluster_short_buildup:
+        scalp_pts -= 25
+    elif retail_sells_trapped or cluster_long_buildup:
+        scalp_pts += 25
 
-    if r_bid_abs > r_ask_abs and not inst_bear_drive:
-        scalp_pts += min(22, 12 + (r_bid_abs - r_ask_abs) * 5)
-    elif r_ask_abs > r_bid_abs and not inst_bull_drive:
-        scalp_pts -= min(22, 12 + (r_ask_abs - r_bid_abs) * 5)
+    if (r_bid_abs > r_ask_abs or tot_ice_bid > tot_ice_ask * 1.25) and not inst_bear_drive:
+        scalp_pts += min(24, 14 + (r_bid_abs - r_ask_abs) * 4)
+    elif (r_ask_abs > r_bid_abs or tot_ice_ask > tot_ice_bid * 1.25) and not inst_bull_drive:
+        scalp_pts -= min(24, 14 + (r_ask_abs - r_bid_abs) * 4)
 
-    if dom_pull_delta < -eff_cell_bench * 0.35 and live_px >= float(last_c["open"]):
+    if dom_pull_delta < -eff_cell_bench * 0.28:
         scalp_pts += 18
-    elif dom_pull_delta > eff_cell_bench * 0.35 and live_px <= float(last_c["open"]):
+    elif dom_pull_delta > eff_cell_bench * 0.28:
         scalp_pts -= 18
 
-    min_book_floor = eff_cell_bench * 1.5
-    if near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.35:
+    min_book_floor = eff_cell_bench * 1.3
+    if near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.25:
         scalp_pts += 12
-    elif near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.35:
+    elif near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.25:
         scalp_pts -= 12
 
     delta_state = "NEU"
-    if last_delta > eff_cell_bench * 0.45 and live_px <= float(last_c["open"]) and close_pos <= 0.42:
+    if last_delta > eff_cell_bench * 0.45 and live_px <= float(last_c["open"]) and close_pos <= 0.44:
         scalp_pts -= 18
         delta_state = "BEAR"
-    elif last_delta < -eff_cell_bench * 0.45 and live_px >= float(last_c["open"]) and close_pos >= 0.58:
+    elif last_delta < -eff_cell_bench * 0.45 and live_px >= float(last_c["open"]) and close_pos >= 0.56:
         scalp_pts += 18
         delta_state = "BULL"
-    elif last_delta > eff_cell_bench * 0.30 and live_px > float(last_c["open"]) and close_pos >= 0.58:
-        scalp_pts += 16
+    elif last_delta > eff_cell_bench * 0.30 and live_px > float(last_c["open"]) and close_pos >= 0.56:
+        scalp_pts += 15
         delta_state = "BULL"
-    elif last_delta < -eff_cell_bench * 0.30 and live_px < float(last_c["open"]) and close_pos <= 0.42:
-        scalp_pts -= 16
+    elif last_delta < -eff_cell_bench * 0.30 and live_px < float(last_c["open"]) and close_pos <= 0.44:
+        scalp_pts -= 15
         delta_state = "BEAR"
 
-    if recent_whale_b > recent_whale_s and not inst_bear_drive:
-        scalp_pts += 15
-    elif recent_whale_s > recent_whale_b and not inst_bull_drive:
-        scalp_pts -= 15
+    whale_state = "NEU"
+    if (tot_w_buy > tot_w_sell * 1.20 or recent_whale_b > recent_whale_s) and not inst_bear_drive:
+        scalp_pts += 18
+        whale_state = "BULL"
+    elif (tot_w_sell > tot_w_buy * 1.20 or recent_whale_s > recent_whale_b) and not inst_bull_drive:
+        scalp_pts -= 18
+        whale_state = "BEAR"
 
-    vah, val = last_c.get("vah"), last_c.get("val")
     loc_state = "NEU"
-    if live_px > cur_poc and live_px > prev_poc and live_px >= float(last_c["open"]):
-        scalp_pts += 16
+    if live_px > cur_poc and (live_px >= prev_poc or cluster_long_buildup):
+        scalp_pts += 14
         loc_state = "BULL"
-    elif live_px < cur_poc and live_px < prev_poc and live_px <= float(last_c["open"]):
-        scalp_pts -= 16
+    elif live_px < cur_poc and (live_px <= prev_poc or cluster_short_buildup):
+        scalp_pts -= 14
         loc_state = "BEAR"
 
     if bull_sweep_reject:
-        scalp_pts += 20
+        scalp_pts += 22
     elif bear_sweep_reject:
-        scalp_pts -= 20
+        scalp_pts -= 22
 
-    if s_poc_up > s_poc_dn and hh_cnt >= ll_cnt:
-        scalp_pts += 14
-    elif s_poc_dn > s_poc_up and ll_cnt >= hh_cnt:
-        scalp_pts -= 14
+    if s_poc_up > s_poc_dn:
+        scalp_pts += 12
+    elif s_poc_dn > s_poc_up:
+        scalp_pts -= 12
 
     if smt_bias == 1:
         scalp_pts += 10
     elif smt_bias == -1:
         scalp_pts -= 10
 
-    # Hard Anti-Falling-Knife & Anti-Rocket-Fade Veto
-    if live_px < float(last_c["open"]) and live_px < cur_poc and live_px < prev_poc and not bull_sweep_reject and scalp_pts > 0:
-        scalp_pts = -18
-    elif live_px > float(last_c["open"]) and live_px > cur_poc and live_px > prev_poc and not bear_sweep_reject and scalp_pts < 0:
-        scalp_pts = 18
+    if inst_bear_drive and live_px < cur_poc and live_px < prev_poc and not bull_sweep_reject and scalp_pts > 0:
+        scalp_pts = -22
+    elif inst_bull_drive and live_px > cur_poc and live_px > prev_poc and not bear_sweep_reject and scalp_pts < 0:
+        scalp_pts = 22
 
-    if cur_rvol < 0.65 and recent_whale_b == 0 and recent_whale_s == 0 and not bull_sweep_reject and not bear_sweep_reject:
-        scalp_pts = int(round(scalp_pts * 0.50))
-
-    exec_vs_abs_state = "BULL" if inst_bull_drive else ("BEAR" if inst_bear_drive else ("BEAR" if retail_buys_trapped else ("BULL" if retail_sells_trapped else "NEU")))
+    exec_vs_abs_state = "BULL" if inst_bull_drive else ("BEAR" if inst_bear_drive else ("BEAR" if (retail_buys_trapped or cluster_short_buildup) else ("BULL" if (retail_sells_trapped or cluster_long_buildup) else "NEU")))
+    vah, val = last_c.get("vah"), last_c.get("val")
 
     s_states = [
         exec_vs_abs_state,
-        "BULL" if (r_bid_abs > r_ask_abs and not inst_bear_drive) else ("BEAR" if (r_ask_abs > r_bid_abs and not inst_bull_drive) else "NEU"),
-        "BULL" if (dom_pull_delta < -eff_cell_bench * 0.35 and live_px >= float(last_c["open"])) else ("BEAR" if (dom_pull_delta > eff_cell_bench * 0.35 and live_px <= float(last_c["open"])) else "NEU"),
+        "BULL" if ((r_bid_abs > r_ask_abs or tot_ice_bid > tot_ice_ask * 1.25) and not inst_bear_drive) else ("BEAR" if ((r_ask_abs > r_bid_abs or tot_ice_ask > tot_ice_bid * 1.25) and not inst_bull_drive) else "NEU"),
+        "BULL" if dom_pull_delta < -eff_cell_bench * 0.28 else ("BEAR" if dom_pull_delta > eff_cell_bench * 0.28 else "NEU"),
         "BULL" if (near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.25) else ("BEAR" if (near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.25) else "NEU"),
         delta_state,
         loc_state,
-        "BULL" if (recent_whale_b > recent_whale_s and not inst_bear_drive) else ("BEAR" if (recent_whale_s > recent_whale_b and not inst_bull_drive) else "NEU"),
+        whale_state,
         "BULL" if (vah is not None and live_px > float(vah) and live_px > float(last_c["open"])) else ("BEAR" if (val is not None and live_px < float(val) and live_px < float(last_c["open"])) else "NEU"),
         "BULL" if s_poc_up > s_poc_dn else ("BEAR" if s_poc_dn > s_poc_up else "NEU"),
         "BULL" if bull_sweep_reject else ("BEAR" if bear_sweep_reject else "NEU"),
         "BULL" if smt_bias == 1 else ("BEAR" if smt_bias == -1 else "NEU"),
         "BULL" if (cur_rvol >= 0.85 and exec_vs_abs_state == "BULL") else ("BEAR" if (cur_rvol >= 0.85 and exec_vs_abs_state == "BEAR") else "NEU"),
     ]
-    s_bull = s_states.count("BULL")
-    s_bear = s_states.count("BEAR")
-    s_neu = s_states.count("NEU")
+    s_bull, s_bear, s_neu = s_states.count("BULL"), s_states.count("BEAR"), s_states.count("NEU")
 
-    # 9. TRUE INSTITUTIONAL 10-PARAMETER INTRADAY SCORING
     intra_pts = net_macro
-    if s_poc_up > s_poc_dn and live_px > prev_poc:
-        intra_pts += 18
-    elif s_poc_dn > s_poc_up and live_px < prev_poc:
-        intra_pts -= 18
+    if s_poc_up > s_poc_dn:
+        intra_pts += 14
+    elif s_poc_dn > s_poc_up:
+        intra_pts -= 14
     if smt_bias == 1:
         intra_pts += 12
     elif smt_bias == -1:
@@ -5018,13 +5366,13 @@ def _evaluate_server_orderflow(sym, tf_key):
     sess_pocs = [float(x["poc"]) for x in c_list[-15:] if x.get("poc") is not None]
     avg_sess_poc = (sum(sess_pocs) / len(sess_pocs)) if sess_pocs else live_px
     if live_px > avg_sess_poc + eff_step:
-        intra_pts += 14
+        intra_pts += 12
     elif live_px < avg_sess_poc - eff_step:
-        intra_pts -= 14
+        intra_pts -= 12
 
-    if near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.3:
+    if near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.25:
         intra_pts += 10
-    elif near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.3:
+    elif near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.25:
         intra_pts -= 10
 
     ub_hi_cnt = sum(1 for px, t in unfinished_levels if t == "UB-HIGH" and px > live_px)
@@ -5033,20 +5381,18 @@ def _evaluate_server_orderflow(sym, tf_key):
     npoc_below = sum(1 for px in naked_pocs if px < live_px)
 
     i_states = [
-        "BULL" if (tot_cvd > 0 and net_move >= 0) else ("BEAR" if (tot_cvd < 0 and net_move <= 0) else "NEU"),
-        "BULL" if net_macro > 10 else ("BEAR" if net_macro < -10 else "NEU"),
-        "BULL" if (s_poc_up > s_poc_dn and live_px > prev_poc) else ("BEAR" if (s_poc_dn > s_poc_up and live_px < prev_poc) else "NEU"),
+        "BULL" if tot_cvd > 0 else ("BEAR" if tot_cvd < 0 else "NEU"),
+        "BULL" if macro_bid_abs > macro_ask_abs else ("BEAR" if macro_ask_abs > macro_bid_abs else "NEU"),
+        "BULL" if s_poc_up > s_poc_dn else ("BEAR" if s_poc_dn > s_poc_up else "NEU"),
         "BULL" if macro_pull_delta < 0 else ("BEAR" if macro_pull_delta > 0 else "NEU"),
-        "BULL" if macro_whale_b > macro_whale_s else ("BEAR" if macro_whale_s > macro_whale_b else "NEU"),
+        "BULL" if sess_w_buy > sess_w_sell else ("BEAR" if sess_w_sell > sess_w_buy else "NEU"),
         "BULL" if live_px > avg_sess_poc + eff_step else ("BEAR" if live_px < avg_sess_poc - eff_step else "NEU"),
         "BULL" if ub_hi_cnt > ub_lo_cnt else ("BEAR" if ub_lo_cnt > ub_hi_cnt else "NEU"),
         "BULL" if npoc_above > npoc_below else ("BEAR" if npoc_below > npoc_above else "NEU"),
-        "BULL" if (near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.3) else ("BEAR" if (near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.3) else "NEU"),
+        "BULL" if (near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.25) else ("BEAR" if (near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.25) else "NEU"),
         "BULL" if smt_bias == 1 else ("BEAR" if smt_bias == -1 else "NEU"),
     ]
-    i_bull = i_states.count("BULL")
-    i_bear = i_states.count("BEAR")
-    i_neu = i_states.count("NEU")
+    i_bull, i_bear, i_neu = i_states.count("BULL"), i_states.count("BEAR"), i_states.count("NEU")
 
     candle_age_sec = (now_ms() - int(last_c["start"])) / 1000.0
 
@@ -5069,6 +5415,8 @@ def _evaluate_server_orderflow(sym, tf_key):
         "candle_age_sec": candle_age_sec,
         "inst_bull_drive": inst_bull_drive,
         "inst_bear_drive": inst_bear_drive,
+        "cluster_long_buildup": cluster_long_buildup,
+        "cluster_short_buildup": cluster_short_buildup,
         "retail_buys_trapped": retail_buys_trapped,
         "retail_sells_trapped": retail_sells_trapped,
         "bull_sweep_reject": bull_sweep_reject,
@@ -5090,7 +5438,6 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
     init_risk = float(act.get("init_risk", abs(entry_px - float(act["sl"]))))
     dec = 4 if sig["step"] < 0.01 else (2 if sig["step"] < 1 else 1)
 
-    # TWO-STAGE PROFIT LOCK (Covers 0.07% Fee + Real Profit): +0.90R -> Lock +0.20R | +1.35R -> Trail +0.75R
     if init_risk > 0:
         fee_plus_prof = max(entry_px * 0.0009, init_risk * 0.20)
         if act["side"] == "LONG":
@@ -5159,7 +5506,6 @@ def _paper_bot_worker():
                 tf_key = paper_bot_state.get("tf", "5m")
                 lev = int(paper_bot_state.get("leverage", 10))
 
-            # BANDWIDTH SAVER: When BOT is OFF, sleep 8 seconds and do ZERO pings, ZERO calculations, ZERO DB writes!
             if not enabled:
                 time.sleep(8.0)
                 continue
@@ -5190,22 +5536,22 @@ def _paper_bot_worker():
                     changed = True
 
                 if enabled and sig["candle_age_sec"] >= 25:
-                    # 1. SCALP AUTO-ENTRY: Strictly Requires POC Structure Alignment + Institutional Drive or Verified Trap Reclaim!
+                    # 1. SCALP AUTO-ENTRY: Triggers on Cluster Buildup Reclaim, Boundary Fakeout Sweep, or Genuine Breakout
                     sb = paper_bot_state["scalp"]
                     if not sb["active"] and sb["balance"] >= 1.0 and (now_s - sb.get("last_close", 0) > 45):
                         s_long = (
                             sig["s_pts"] >= 42 and sig["s_bull"] >= 6 and (sig["s_bull"] - sig["s_bear"] >= 3)
                             and not sig["inst_bear_drive"] and not sig["retail_buys_trapped"]
                             and sig["i_pts"] >= -15 and sig["range_location"] <= 0.85
-                            and sig["live_px"] > sig["open"] and sig["live_px"] >= sig["cur_poc"]
-                            and (sig["inst_bull_drive"] or sig["retail_sells_trapped"] or sig["bull_sweep_reject"])
+                            and sig["live_px"] >= sig["cur_poc"]
+                            and (sig["inst_bull_drive"] or sig["cluster_long_buildup"] or sig["bull_sweep_reject"])
                         )
                         s_short = (
                             sig["s_pts"] <= -42 and sig["s_bear"] >= 6 and (sig["s_bear"] - sig["s_bull"] >= 3)
                             and not sig["inst_bull_drive"] and not sig["retail_sells_trapped"]
                             and sig["i_pts"] <= 15 and sig["range_location"] >= 0.15
-                            and sig["live_px"] < sig["open"] and sig["live_px"] <= sig["cur_poc"]
-                            and (sig["inst_bear_drive"] or sig["retail_buys_trapped"] or sig["bear_sweep_reject"])
+                            and sig["live_px"] <= sig["cur_poc"]
+                            and (sig["inst_bear_drive"] or sig["cluster_short_buildup"] or sig["bear_sweep_reject"])
                         )
 
                         if s_long or s_short:
@@ -5237,20 +5583,18 @@ def _paper_bot_worker():
                             }
                             changed = True
 
-                    # 2. INTRADAY AUTO-ENTRY: Strictly Requires Macro Campaign + POC Breakout Alignment
+                    # 2. INTRADAY AUTO-ENTRY: Triggers on Macro Cluster Accumulation/Distribution + Structure Breakout
                     ib = paper_bot_state["intraday"]
                     if not ib["active"] and ib["balance"] >= 1.0 and (now_s - ib.get("last_close", 0) > 60):
                         i_long = (
                             sig["i_pts"] >= 40 and sig["i_bull"] >= 6 and (sig["i_bull"] - sig["i_bear"] >= 3)
-                            and sig["s_pts"] >= 30 and not sig["inst_bear_drive"] and not sig["retail_buys_trapped"]
-                            and sig["live_px"] > sig["open"] and sig["live_px"] > sig["prev_poc"]
-                            and sig["range_location"] <= 0.85
+                            and sig["s_pts"] >= 28 and not sig["inst_bear_drive"] and not sig["retail_buys_trapped"]
+                            and sig["live_px"] >= sig["cur_poc"] and sig["range_location"] <= 0.85
                         )
                         i_short = (
                             sig["i_pts"] <= -40 and sig["i_bear"] >= 6 and (sig["i_bear"] - sig["i_bull"] >= 3)
-                            and sig["s_pts"] <= -30 and not sig["inst_bull_drive"] and not sig["retail_sells_trapped"]
-                            and sig["live_px"] < sig["open"] and sig["live_px"] < sig["prev_poc"]
-                            and sig["range_location"] >= 0.15
+                            and sig["s_pts"] <= -28 and not sig["inst_bull_drive"] and not sig["retail_sells_trapped"]
+                            and sig["live_px"] <= sig["cur_poc"] and sig["range_location"] >= 0.15
                         )
 
                         if i_long or i_short:
@@ -5317,7 +5661,7 @@ def api_paper_action():
                 paper_bot_state["leverage"] = int(data["leverage"])
         elif act == "reset":
             sym, tf_k, lev = paper_bot_state["symbol"], paper_bot_state["tf"], paper_bot_state["leverage"]
-             en_state = paper_bot_state.get("enabled", False)
+            en_state = paper_bot_state.get("enabled", False)
             paper_bot_state.clear()
             paper_bot_state.update(_default_paper_state())
             paper_bot_state["symbol"], paper_bot_state["tf"], paper_bot_state["leverage"] = sym, tf_k, lev
