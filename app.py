@@ -4003,6 +4003,63 @@ function drawAll() {
             `;
         }
 
+        latestEngineSummary = {
+            symbol: symbol,
+            timeframe: tf,
+            live_price: lastC.close,
+            current_candle: {
+                open: lastC.open,
+                high: lastC.high,
+                low: lastC.low,
+                close: lastC.close,
+                delta: Math.round(lastC.delta || 0),
+                volume: Math.round(lastC.volume || 0),
+                rvol: Number(curRvol.toFixed(2)),
+                poc: curPoc,
+                vah: lastC.vah,
+                val: lastC.val
+            },
+            dom_and_clusters: {
+                battle_verdict: battleWinner,
+                exec_buy_3c: Math.round(totExecBuy),
+                exec_sell_3c: Math.round(totExecSell),
+                whale_buy_vol: Math.round(totWhaleBuy),
+                whale_sell_vol: Math.round(totWhaleSell),
+                retail_buy_vol: Math.round(totRetailBuy),
+                retail_sell_vol: Math.round(totRetailSell),
+                bid_cluster_absorptions: rBidAbs,
+                ask_cluster_absorptions: rAskAbs,
+                iceberg_bid_reloads: Math.round(totIceBid),
+                iceberg_ask_reloads: Math.round(totIceAsk),
+                bid_pulled_10s_plus_flash: Math.round(totPullB),
+                ask_pulled_10s_plus_flash: Math.round(totPullA),
+                pull_delta: Math.round(domPullDelta),
+                near_resting_bid_wall: Math.round(nearBidRest),
+                near_resting_ask_wall: Math.round(nearAskRest)
+            },
+            magnets: {
+                untouched_naked_pocs: nakedPocs.slice(-5).map(n => n.price),
+                unfinished_business: unfinishedLevels.slice(-5).map(u => `${u.type}@${u.price}`)
+            },
+            scalp_10factor_verdict: {
+                final_bias: scalpFinalTxt,
+                quant_score: scalpPts,
+                bull_factors: sBullCnt,
+                bear_factors: sBearCnt,
+                neutral_factors: sNeuCnt,
+                parameters: scalpMeterList
+            },
+            intraday_10factor_verdict: {
+                final_bias: intraFinalTxt,
+                quant_score: intraPts,
+                bull_factors: iBullCnt,
+                bear_factors: iBearCnt,
+                neutral_factors: iNeuCnt,
+                session_cvd: macroInfo ? Math.round(macroInfo.totalCvd) : 0,
+                parameters: intraMeterList
+            }
+        };
+
         if (!showDOM || domW <= 0) return;
 
         const domX = chartW + yAxisW;
