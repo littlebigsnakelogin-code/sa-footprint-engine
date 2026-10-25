@@ -4679,6 +4679,12 @@ def api_orderbook():
         })
 
 
+@app.route("/api/oi-debug")
+def api_oi_debug():
+    with lock:
+        return jsonify({"status": "ok", "oi_telemetry": oi_telemetry})
+
+
 @app.route("/api/liquidity-debug")
 def liquidity_debug():
     symbol = request.args.get("symbol", "BTCUSDT").upper()
