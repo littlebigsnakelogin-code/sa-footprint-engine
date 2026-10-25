@@ -397,63 +397,57 @@ def classify_candle_oi_intent(candle):
 
 
 def _oi_poller_loop():
-    """100% PURE BINANCE FUTURES LIVE OI ENGINE (Zero Synthetic/Fake Math)."""
+    """100% PURE BINANCE FUTURES OI ONLY (No other exchange, no synthetic math)."""
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0"})
-    hist_synced = {s: False for s in SYMBOLS}
 
     while True:
+        bot_on = paper_bot_state.get("enabled", False)
+        sleep_gap = 5.0 if bot_on else 8.0
+
         for sym in SYMBOLS:
-            # STEP A: One-time Real Binance Historical OI sync on boot (for past 5m/15m/1h candles)
-            if not hist_synced[sym]:
-                for tf_h in ("5m", "15m", "30m", "1h", "4h"):
-                    try:
-                        r_hist = session.get(
-                            "https://fapi.binance.com/futures/data/openInterestHist",
-                            params={"symbol": sym, "period": tf_h, "limit": 30},
-                            timeout=4.0,
-                        )
-                        if r_hist.status_code == 200:
-                            h_list = r_hist.json()
-                            if isinstance(h_list, list) and len(h_list) >= 2:
-                                oi_map = {}
-                                for idx_h in range(1, len(h_list)):
-                                    ts_bucket = floor_timestamp(int(h_list[idx_h]["timestamp"]), TIMEFRAMES[tf_h])
-                                    prev_v = float(h_list[idx_h - 1]["sumOpenInterest"])
-                                    cur_v = float(h_list[idx_h]["sumOpenInterest"])
-                                    oi_map[ts_bucket] = (prev_v, cur_v, round(cur_v - prev_v, 3))
-                                with lock:
-                                    for c_obj in candles[sym][tf_h]:
-                                        b_ts = int(c_obj["start"])
-                                        if b_ts in oi_map:
-                                            o_op, o_cl, o_dl = oi_map[b_ts]
-                                            c_obj["oi_open"] = o_op
-                                            c_obj["oi_close"] = o_cl
-                                            c_obj["oi_delta"] = o_dl
-                                            sc, sl, sp = classify_candle_oi_intent(c_obj)
-                                            c_obj["oi_state"], c_obj["oi_label"], c_obj["oi_score"] = sc, sl, sp
-                    except Exception:
-                        pass
-                hist_synced[sym] = True
-
-            # STEP B: Every 5s Live Real-Time Binance Futures OI Polling
             live_val = 0.0
-            for host in ("https://fapi.binance.com", "https://fapi1.binance.com", "https://fapi2.binance.com"):
-                try:
-                    resp = session.get(f"{host}/fapi/v1/openInterest", params={"symbol": sym}, timeout=3.0)
-                    if resp.status_code == 200:
-                        live_val = float(resp.json().get("openInterest", 0.0))
-                        if live_val > 0:
-                            break
-                except Exception:
-                    pass
+            last_http_status = None
+            last_err = None
 
-            if live_val > 0:
-                with lock:
-                    st = oi_telemetry[sym]
+            # ONLY Official Binance Futures Endpoints
+            for host in (
+                "https://fapi.binance.com",
+                "https://fapi1.binance.com",
+                "https://fapi2.binance.com",
+                "https://fapi3.binance.com",
+            ):
+                try:
+                    resp = session.get(
+                        f"{host}/fapi/v1/openInterest",
+                        params={"symbol": sym},
+                        timeout=3.0,
+                    )
+                    last_http_status = resp.status_code
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        live_val = float(data.get("openInterest", 0.0))
+                        if live_val > 0:
+                            last_err = f"OK ({host})"
+                            break
+                    else:
+                        last_err = f"HTTP {resp.status_code}: {resp.text[:80]}"
+                except Exception as e:
+                    last_err = str(e)
+
+            with lock:
+                st = oi_telemetry[sym]
+                st["http_status"] = last_http_status
+                st["debug_msg"] = last_err
+
+                if live_val > 0:
                     if st["session_open_oi"] <= 0:
                         st["session_open_oi"] = live_val
-                    st["prev_oi"] = st["live_oi"] if st["live_oi"] > 0 else live_val
+                    if st["live_oi"] > 0 and live_val != st["live_oi"]:
+                        st["prev_oi"] = st["live_oi"]
+                    elif st["prev_oi"] <= 0:
+                        st["prev_oi"] = live_val
+
                     st["live_oi"] = live_val
                     st["session_oi_delta"] = round(live_val - st["session_open_oi"], 3)
                     st["last_update_ms"] = now_ms()
@@ -461,14 +455,13 @@ def _oi_poller_loop():
                     for tf_k in TIMEFRAMES:
                         curr = current_candles[sym][tf_k]
                         if curr is not None:
-                            # Agar heal_recent_candles_via_ws ne oi_open gayab kiya ho toh pichli candle ka close ya session baseline lagao
                             c_open_oi = float(curr.get("oi_open") or 0.0)
                             if c_open_oi <= 0:
-                                prev_c_list = candles[sym][tf_k]
-                                if prev_c_list and float(prev_c_list[-1].get("oi_close") or 0.0) > 0:
-                                    c_open_oi = float(prev_c_list[-1]["oi_close"])
+                                prev_list = candles[sym][tf_k]
+                                if prev_list and float(prev_list[-1].get("oi_close") or 0.0) > 0:
+                                    c_open_oi = float(prev_list[-1]["oi_close"])
                                 else:
-                                    c_open_oi = st["prev_oi"] if st["prev_oi"] > 0 else live_val
+                                    c_open_oi = live_val
                                 curr["oi_open"] = c_open_oi
 
                             curr["oi_close"] = live_val
@@ -477,12 +470,10 @@ def _oi_poller_loop():
                             curr["oi_delta"] = round(live_val - c_open_oi, 3)
 
                             sc, sl, sp = classify_candle_oi_intent(curr)
-                            curr["oi_state"] = sc
-                            curr["oi_label"] = sl
-                            curr["oi_score"] = sp
+                            curr["oi_state"], curr["oi_label"], curr["oi_score"] = sc, sl, sp
 
             time.sleep(0.25)
-        time.sleep(5.0)
+        time.sleep(sleep_gap)
 
 
 def ensure_oi_worker_started():
