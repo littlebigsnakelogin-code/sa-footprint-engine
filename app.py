@@ -397,7 +397,7 @@ def classify_candle_oi_intent(candle):
 
 
 def _oi_poller_loop():
-    """Fetches Binance Futures Open Interest every 10s (Ultra-lightweight REST call)."""
+    """Fetches Binance Futures Open Interest with proper baseline locking & debug logs."""
     session = requests.Session()
     while True:
         bot_on = paper_bot_state.get("enabled", False)
@@ -407,7 +407,7 @@ def _oi_poller_loop():
                 resp = session.get(
                     "https://fapi.binance.com/fapi/v1/openInterest",
                     params={"symbol": sym},
-                    timeout=3.5,
+                    timeout=4.0,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -425,18 +425,28 @@ def _oi_poller_loop():
                             for tf in TIMEFRAMES:
                                 curr = current_candles[sym][tf]
                                 if curr is not None:
-                                    if float(curr.get("oi_open", 0.0)) <= 0:
+                                    current_oi_open = float(curr.get("oi_open", 0.0))
+                                    if current_oi_open <= 0:
+                                        # Pehli baar baseline set karo (Delta 0 se shuru hoga)
                                         curr["oi_open"] = val
-                                    curr["oi_close"] = val
-                                    curr["oi_high"] = max(float(curr.get("oi_high", val)), val)
-                                    curr["oi_low"] = min(float(curr.get("oi_low", val)), val) if float(curr.get("oi_low", 0.0)) > 0 else val
-                                    curr["oi_delta"] = round(val - float(curr["oi_open"]), 4)
+                                        curr["oi_high"] = val
+                                        curr["oi_low"] = val
+                                        curr["oi_close"] = val
+                                        curr["oi_delta"] = 0.0
+                                    else:
+                                        curr["oi_close"] = val
+                                        curr["oi_high"] = max(float(curr.get("oi_high", val)), val)
+                                        curr["oi_low"] = min(float(curr.get("oi_low", val)), val)
+                                        curr["oi_delta"] = round(val - current_oi_open, 4)
+
                                     st_code, st_lbl, st_pts = classify_candle_oi_intent(curr)
                                     curr["oi_state"] = st_code
                                     curr["oi_label"] = st_lbl
                                     curr["oi_score"] = st_pts
-            except Exception:
-                pass
+                else:
+                    print(f"[OI-DEBUG] {sym} API Error: status {resp.status_code}")
+            except Exception as e:
+                print(f"[OI-DEBUG] {sym} Exception: {e}")
             time.sleep(0.4)
         time.sleep(sleep_gap)
 
@@ -453,7 +463,8 @@ def ensure_oi_worker_started():
 
 
 def create_empty_candle(symbol, timeframe, start, open_price):
-    live_oi = float(oi_telemetry.get(symbol, {}).get("live_oi", 0.0))
+    st = oi_telemetry.get(symbol, {})
+    live_oi = float(st.get("live_oi", 0.0))
     return {
         "symbol": symbol,
         "timeframe": timeframe,
