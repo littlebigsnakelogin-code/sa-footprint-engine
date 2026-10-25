@@ -339,7 +339,121 @@ dom_raw_telemetry = {sym: defaultdict(lambda: {
 }) for sym in SYMBOLS}
 
 
+# ============================================================
+# LIVE OPEN INTEREST (OI) & DELTA-OI (ΔOI) TELEMETRY ENGINE
+# ============================================================
+oi_telemetry = {
+    sym: {
+        "live_oi": 0.0,
+        "prev_oi": 0.0,
+        "session_open_oi": 0.0,
+        "session_oi_delta": 0.0,
+        "last_update_ms": 0,
+    }
+    for sym in SYMBOLS
+}
+oi_worker_started = False
+oi_worker_lock = threading.Lock()
+
+
+def classify_candle_oi_intent(candle):
+    """4 Institutional OI States combined with Price, Delta, Whale Flow & Cluster Absorption."""
+    oi_d = float(candle.get("oi_delta", 0.0))
+    c_open = float(candle.get("open", 0.0))
+    c_close = float(candle.get("close", 0.0))
+    c_high = float(candle.get("high", 0.0))
+    c_low = float(candle.get("low", 0.0))
+    c_delta = float(candle.get("delta", 0.0))
+    w_buy = float(candle.get("whale_buy_vol", 0.0))
+    w_sell = float(candle.get("whale_sell_vol", 0.0))
+    rng = max(c_high - c_low, 1e-8)
+    close_pos = (c_close - c_low) / rng
+
+    if abs(oi_d) <= 1e-8:
+        return "NEUTRAL_OI", "⚪ OI FLAT", 0
+
+    px_up = c_close >= c_open
+    if px_up and oi_d > 0:
+        if close_pos <= 0.46 and (c_delta > 0 or w_sell > w_buy):
+            return "OI_LONG_TRAP", "⚠️ OI↑ + PX CAPPED (NEW LONGS TRAPPED AT ASK!)", -22
+        return "NEW_LONGS", "🟢 OI↑ + PX↑ (NEW LONGS BUILDING)", +20
+
+    if (not px_up) and oi_d > 0:
+        if close_pos >= 0.54 and (c_delta < 0 or w_buy > w_sell):
+            return "OI_SHORT_TRAP", "⚠️ OI↑ + PX HELD (NEW SHORTS TRAPPED AT BID!)", +22
+        return "NEW_SHORTS", "🔴 OI↑ + PX↓ (NEW SHORTS BUILDING)", -20
+
+    if px_up and oi_d < 0:
+        if w_buy > w_sell * 1.3:
+            return "SHORT_SQUEEZE", "⚡ OI↓ + PX↑ (AGGRESSIVE SHORT SQUEEZE)", +12
+        return "SHORT_COVERING", "🟡 OI↓ + PX↑ (SHORT COVERING / PROFIT BOOKING)", -8
+
+    if (not px_up) and oi_d < 0:
+        if w_sell > w_buy * 1.3:
+            return "LONG_LIQ_FLUSH", "🩸 OI↓ + PX↓ (HEAVY LONG LIQUIDATION FLUSH)", -12
+        return "LONG_UNWIND", "🟠 OI↓ + PX↓ (LONG UNWIND / PROFIT BOOKING)", +8
+
+    return "NEUTRAL_OI", "⚪ OI FLAT", 0
+
+
+def _oi_poller_loop():
+    """Fetches Binance Futures Open Interest every 10s (Ultra-lightweight REST call)."""
+    session = requests.Session()
+    while True:
+        bot_on = paper_bot_state.get("enabled", False)
+        sleep_gap = 9.0 if bot_on else 14.0
+        for sym in SYMBOLS:
+            try:
+                resp = session.get(
+                    "https://fapi.binance.com/fapi/v1/openInterest",
+                    params={"symbol": sym},
+                    timeout=3.5,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    val = float(data.get("openInterest", 0.0))
+                    if val > 0:
+                        with lock:
+                            st = oi_telemetry[sym]
+                            if st["session_open_oi"] <= 0:
+                                st["session_open_oi"] = val
+                            st["prev_oi"] = st["live_oi"] if st["live_oi"] > 0 else val
+                            st["live_oi"] = val
+                            st["session_oi_delta"] = val - st["session_open_oi"]
+                            st["last_update_ms"] = now_ms()
+
+                            for tf in TIMEFRAMES:
+                                curr = current_candles[sym][tf]
+                                if curr is not None:
+                                    if float(curr.get("oi_open", 0.0)) <= 0:
+                                        curr["oi_open"] = val
+                                    curr["oi_close"] = val
+                                    curr["oi_high"] = max(float(curr.get("oi_high", val)), val)
+                                    curr["oi_low"] = min(float(curr.get("oi_low", val)), val) if float(curr.get("oi_low", 0.0)) > 0 else val
+                                    curr["oi_delta"] = round(val - float(curr["oi_open"]), 4)
+                                    st_code, st_lbl, st_pts = classify_candle_oi_intent(curr)
+                                    curr["oi_state"] = st_code
+                                    curr["oi_label"] = st_lbl
+                                    curr["oi_score"] = st_pts
+            except Exception:
+                pass
+            time.sleep(0.4)
+        time.sleep(sleep_gap)
+
+
+def ensure_oi_worker_started():
+    global oi_worker_started
+    if oi_worker_started:
+        return
+    with oi_worker_lock:
+        if oi_worker_started:
+            return
+        threading.Thread(target=_oi_poller_loop, name="binance-oi-poller", daemon=True).start()
+        oi_worker_started = True
+
+
 def create_empty_candle(symbol, timeframe, start, open_price):
+    live_oi = float(oi_telemetry.get(symbol, {}).get("live_oi", 0.0))
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -357,10 +471,17 @@ def create_empty_candle(symbol, timeframe, start, open_price):
         "retail_buy_vol": 0.0,
         "retail_sell_vol": 0.0,
         "delta": 0.0,
+        "oi_open": live_oi,
+        "oi_high": live_oi,
+        "oi_low": live_oi,
+        "oi_close": live_oi,
+        "oi_delta": 0.0,
+        "oi_state": "NEUTRAL_OI",
+        "oi_label": "⚪ OI FLAT",
+        "oi_score": 0,
         "trades": 0,
         "footprint": {},
     }
-
 
 def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
     candle["high"] = max(candle["high"], price)
@@ -1617,6 +1738,7 @@ def ensure_collector_started():
         
         # Ensure Turso background worker & historical hydration starts on boot
         ensure_turso_worker_started()
+        ensure_oi_worker_started()
 
         collector_thread = threading.Thread(
             target=collector_loop,
@@ -1909,6 +2031,8 @@ def home():
         <span id="bmLvl" style="color:#00e5ff;font-weight:bold;">RestBook:--</span>
         <span style="color:#444;">|</span>
         <span id="bmCur" style="color:#fff;">Cur:--</span>
+        <span style="color:#444;">|</span>
+        <span id="bmOi" style="color:#00e5ff;font-weight:bold;">OI:-- (Δ:--)</span>
     </div>
     <div class="smt-box" id="smtRadarBox">🔗 SMT: SCANNING...</div>
     <div class="verdict-box" id="masterVerdictBox" style="flex-direction:row;justify-content:space-between;align-items:center;">
@@ -2304,7 +2428,7 @@ let pinchDist = null;
 let needsRender = true;
 
 const TIME_H = 26;
-const PILL_SAFE_H = 78;
+const PILL_SAFE_H = 88;
 
 function toggleViewMode() {
     proViewMode = !proViewMode;
@@ -3491,9 +3615,38 @@ function drawAll() {
             }
         }
 
+        const cOiDelta = Number(c.oi_delta || 0);
+        let oiPillText = `OI Δ: 0 (Flat)`;
+        let oiPillCol = '#90a4ae';
+        if (Math.abs(cOiDelta) > 0) {
+            if (c.close >= c.open && cOiDelta > 0) {
+                if (closePos <= 0.46 && (topSummary || c.delta > 0)) {
+                    oiPillText = `OI:+${fmt(cOiDelta)} ⚠️LONGS TRAPPED AT ASK!`;
+                    oiPillCol = '#ff9100';
+                } else {
+                    oiPillText = `OI:+${fmt(cOiDelta)} 🟢NEW LONGS BUILDING`;
+                    oiPillCol = '#00e676';
+                }
+            } else if (c.close < c.open && cOiDelta > 0) {
+                if (closePos >= 0.54 && (botSummary || c.delta < 0)) {
+                    oiPillText = `OI:+${fmt(cOiDelta)} ⚠️SHORTS TRAPPED AT BID!`;
+                    oiPillCol = '#00e5ff';
+                } else {
+                    oiPillText = `OI:+${fmt(cOiDelta)} 🔴NEW SHORTS BUILDING`;
+                    oiPillCol = '#ff5252';
+                }
+            } else if (c.close >= c.open && cOiDelta < 0) {
+                oiPillText = `OI:${fmt(cOiDelta)} 🟡SHORT COVER / BOOKING`;
+                oiPillCol = '#ffca28';
+            } else {
+                oiPillText = `OI:${fmt(cOiDelta)} 🩸LONG LIQ / UNWIND`;
+                oiPillCol = '#ff80ab';
+            }
+        }
+
         if (candleW >= 65) {
-            const pillW = Math.min(candleW * 0.96, 198);
-            const pillH = 64;
+            const pillW = Math.min(candleW * 0.96, 204);
+            const pillH = 74;
             const maxAllowedY = H - TIME_H - pillH - 3;
             const pillY = Math.min(Math.max(botYBanner + 5, yL + 18), maxAllowedY);
             const pillX = cx - pillW * 0.5;
@@ -3515,15 +3668,19 @@ function drawAll() {
 
             ctx.font = 'bold 8.5px monospace';
             ctx.fillStyle = pullDeltaCol;
-            ctx.fillText(pullDeltaLine, cx, pillY + 31);
+            ctx.fillText(pullDeltaLine, cx, pillY + 30);
+
+            ctx.font = 'bold 8.5px monospace';
+            ctx.fillStyle = oiPillCol;
+            ctx.fillText(oiPillText, cx, pillY + 41);
 
             ctx.font = '8.5px monospace';
             ctx.fillStyle = verdictCol;
-            ctx.fillText(flowVerdict, cx, pillY + 43);
+            ctx.fillText(flowVerdict, cx, pillY + 53);
 
             ctx.fillStyle = decisionCol;
             ctx.font = 'bold 9px monospace';
-            ctx.fillText(candleDecision, cx, pillY + 55);
+            ctx.fillText(candleDecision, cx, pillY + 65);
         }
 
         if (candleW >= 40) {
@@ -4401,6 +4558,7 @@ def api_orderbook():
             "bids": [{"price": float(p), "quantity": q} for p, q in bids],
             "asks": [{"price": float(p), "quantity": q} for p, q in asks],
             "dom_raw": raw_list,
+            "oi": dict(oi_telemetry[symbol]),
         })
 
 
@@ -5264,6 +5422,37 @@ def _evaluate_server_orderflow(sym, tf_key):
     i_bull, i_bear, i_neu = i_states.count("BULL"), i_states.count("BEAR"), i_states.count("NEU")
 
     candle_age_sec = (now_ms() - int(last_c["start"])) / 1000.0
+    # Server Bot Open Interest (ΔOI) Integration
+    rec3_oi_delta = sum(float(x.get("oi_delta", 0.0)) for x in c_list[-3:])
+    sess_oi_delta = sum(float(x.get("oi_delta", 0.0)) for x in c_list)
+
+    oi_long_trap = rec3_oi_delta > 0 and live_px > float(last_c["open"]) and close_pos <= 0.46 and (r_ask_abs > r_bid_abs or tot_ice_ask > tot_ice_bid)
+    oi_short_trap = rec3_oi_delta > 0 and live_px < float(last_c["open"]) and close_pos >= 0.54 and (r_bid_abs > r_ask_abs or tot_ice_bid > tot_ice_ask)
+
+    if oi_short_trap:
+        scalp_pts += 20
+        s_bull += 1
+    elif oi_long_trap:
+        scalp_pts -= 20
+        s_bear += 1
+    elif rec3_oi_delta > 0 and live_px > float(last_c["open"]):
+        scalp_pts += 16
+        s_bull += 1
+    elif rec3_oi_delta > 0 and live_px < float(last_c["open"]):
+        scalp_pts -= 16
+        s_bear += 1
+
+    if sess_oi_delta > 0 and net_move > 0:
+        intra_pts += 16
+        i_bull += 1
+    elif sess_oi_delta > 0 and net_move < 0:
+        intra_pts -= 16
+        i_bear += 1
+
+    if oi_long_trap:
+        retail_buys_trapped = True
+    if oi_short_trap:
+        retail_sells_trapped = True
 
     return {
         "live_px": live_px,
