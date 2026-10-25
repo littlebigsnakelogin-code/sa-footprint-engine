@@ -397,43 +397,33 @@ def classify_candle_oi_intent(candle):
 
 
 def _oi_poller_loop():
-    """100% PURE BINANCE FUTURES OI ONLY (No other exchange, no synthetic math)."""
+    """100% Rate-Limit Safe Binance OI Engine (Prevents HTTP 429 errors)."""
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0"})
 
     while True:
-        bot_on = paper_bot_state.get("enabled", False)
-        sleep_gap = 5.0 if bot_on else 8.0
-
         for sym in SYMBOLS:
             live_val = 0.0
             last_http_status = None
             last_err = None
 
-            # ONLY Official Binance Futures Endpoints
-            for host in (
-                "https://fapi.binance.com",
-                "https://fapi1.binance.com",
-                "https://fapi2.binance.com",
-                "https://fapi3.binance.com",
-            ):
-                try:
-                    resp = session.get(
-                        f"{host}/fapi/v1/openInterest",
-                        params={"symbol": sym},
-                        timeout=3.0,
-                    )
-                    last_http_status = resp.status_code
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        live_val = float(data.get("openInterest", 0.0))
-                        if live_val > 0:
-                            last_err = f"OK ({host})"
-                            break
-                    else:
-                        last_err = f"HTTP {resp.status_code}: {resp.text[:80]}"
-                except Exception as e:
-                    last_err = str(e)
+            try:
+                # Safe request to official Binance Futures endpoint
+                resp = session.get(
+                    "https://fapi.binance.com/fapi/v1/openInterest",
+                    params={"symbol": sym},
+                    timeout=3.5,
+                )
+                last_http_status = resp.status_code
+                if resp.status_code == 200:
+                    data = resp.json()
+                    live_val = float(data.get("openInterest", 0.0))
+                    if live_val > 0:
+                        last_err = "OK"
+                else:
+                    last_err = f"HTTP {resp.status_code}"
+            except Exception as e:
+                last_err = str(e)
 
             with lock:
                 st = oi_telemetry[sym]
@@ -472,8 +462,11 @@ def _oi_poller_loop():
                             sc, sl, sp = classify_candle_oi_intent(curr)
                             curr["oi_state"], curr["oi_label"], curr["oi_score"] = sc, sl, sp
 
-            time.sleep(0.25)
-        time.sleep(sleep_gap)
+            # Bada gap taaki Binance rate-limit (429) na mare
+            time.sleep(3.5)
+
+        # Full loop khatam hone ke baad 30 second ka aaram
+        time.sleep(30.0)
 
 
 def ensure_oi_worker_started():
