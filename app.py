@@ -397,58 +397,92 @@ def classify_candle_oi_intent(candle):
 
 
 def _oi_poller_loop():
-    """Fetches Binance Futures Open Interest with proper baseline locking & debug logs."""
+    """100% PURE BINANCE FUTURES LIVE OI ENGINE (Zero Synthetic/Fake Math)."""
     session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    hist_synced = {s: False for s in SYMBOLS}
+
     while True:
-        bot_on = paper_bot_state.get("enabled", False)
-        sleep_gap = 9.0 if bot_on else 14.0
         for sym in SYMBOLS:
-            try:
-                resp = session.get(
-                    "https://fapi.binance.com/fapi/v1/openInterest",
-                    params={"symbol": sym},
-                    timeout=4.0,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    val = float(data.get("openInterest", 0.0))
-                    if val > 0:
-                        with lock:
-                            st = oi_telemetry[sym]
-                            if st["session_open_oi"] <= 0:
-                                st["session_open_oi"] = val
-                            st["prev_oi"] = st["live_oi"] if st["live_oi"] > 0 else val
-                            st["live_oi"] = val
-                            st["session_oi_delta"] = val - st["session_open_oi"]
-                            st["last_update_ms"] = now_ms()
+            # STEP A: One-time Real Binance Historical OI sync on boot (for past 5m/15m/1h candles)
+            if not hist_synced[sym]:
+                for tf_h in ("5m", "15m", "30m", "1h", "4h"):
+                    try:
+                        r_hist = session.get(
+                            "https://fapi.binance.com/futures/data/openInterestHist",
+                            params={"symbol": sym, "period": tf_h, "limit": 30},
+                            timeout=4.0,
+                        )
+                        if r_hist.status_code == 200:
+                            h_list = r_hist.json()
+                            if isinstance(h_list, list) and len(h_list) >= 2:
+                                oi_map = {}
+                                for idx_h in range(1, len(h_list)):
+                                    ts_bucket = floor_timestamp(int(h_list[idx_h]["timestamp"]), TIMEFRAMES[tf_h])
+                                    prev_v = float(h_list[idx_h - 1]["sumOpenInterest"])
+                                    cur_v = float(h_list[idx_h]["sumOpenInterest"])
+                                    oi_map[ts_bucket] = (prev_v, cur_v, round(cur_v - prev_v, 3))
+                                with lock:
+                                    for c_obj in candles[sym][tf_h]:
+                                        b_ts = int(c_obj["start"])
+                                        if b_ts in oi_map:
+                                            o_op, o_cl, o_dl = oi_map[b_ts]
+                                            c_obj["oi_open"] = o_op
+                                            c_obj["oi_close"] = o_cl
+                                            c_obj["oi_delta"] = o_dl
+                                            sc, sl, sp = classify_candle_oi_intent(c_obj)
+                                            c_obj["oi_state"], c_obj["oi_label"], c_obj["oi_score"] = sc, sl, sp
+                    except Exception:
+                        pass
+                hist_synced[sym] = True
 
-                            for tf in TIMEFRAMES:
-                                curr = current_candles[sym][tf]
-                                if curr is not None:
-                                    current_oi_open = float(curr.get("oi_open", 0.0))
-                                    if current_oi_open <= 0:
-                                        # Pehli baar baseline set karo (Delta 0 se shuru hoga)
-                                        curr["oi_open"] = val
-                                        curr["oi_high"] = val
-                                        curr["oi_low"] = val
-                                        curr["oi_close"] = val
-                                        curr["oi_delta"] = 0.0
-                                    else:
-                                        curr["oi_close"] = val
-                                        curr["oi_high"] = max(float(curr.get("oi_high", val)), val)
-                                        curr["oi_low"] = min(float(curr.get("oi_low", val)), val)
-                                        curr["oi_delta"] = round(val - current_oi_open, 4)
+            # STEP B: Every 5s Live Real-Time Binance Futures OI Polling
+            live_val = 0.0
+            for host in ("https://fapi.binance.com", "https://fapi1.binance.com", "https://fapi2.binance.com"):
+                try:
+                    resp = session.get(f"{host}/fapi/v1/openInterest", params={"symbol": sym}, timeout=3.0)
+                    if resp.status_code == 200:
+                        live_val = float(resp.json().get("openInterest", 0.0))
+                        if live_val > 0:
+                            break
+                except Exception:
+                    pass
 
-                                    st_code, st_lbl, st_pts = classify_candle_oi_intent(curr)
-                                    curr["oi_state"] = st_code
-                                    curr["oi_label"] = st_lbl
-                                    curr["oi_score"] = st_pts
-                else:
-                    print(f"[OI-DEBUG] {sym} API Error: status {resp.status_code}")
-            except Exception as e:
-                print(f"[OI-DEBUG] {sym} Exception: {e}")
-            time.sleep(0.4)
-        time.sleep(sleep_gap)
+            if live_val > 0:
+                with lock:
+                    st = oi_telemetry[sym]
+                    if st["session_open_oi"] <= 0:
+                        st["session_open_oi"] = live_val
+                    st["prev_oi"] = st["live_oi"] if st["live_oi"] > 0 else live_val
+                    st["live_oi"] = live_val
+                    st["session_oi_delta"] = round(live_val - st["session_open_oi"], 3)
+                    st["last_update_ms"] = now_ms()
+
+                    for tf_k in TIMEFRAMES:
+                        curr = current_candles[sym][tf_k]
+                        if curr is not None:
+                            # Agar heal_recent_candles_via_ws ne oi_open gayab kiya ho toh pichli candle ka close ya session baseline lagao
+                            c_open_oi = float(curr.get("oi_open") or 0.0)
+                            if c_open_oi <= 0:
+                                prev_c_list = candles[sym][tf_k]
+                                if prev_c_list and float(prev_c_list[-1].get("oi_close") or 0.0) > 0:
+                                    c_open_oi = float(prev_c_list[-1]["oi_close"])
+                                else:
+                                    c_open_oi = st["prev_oi"] if st["prev_oi"] > 0 else live_val
+                                curr["oi_open"] = c_open_oi
+
+                            curr["oi_close"] = live_val
+                            curr["oi_high"] = max(float(curr.get("oi_high") or live_val), live_val)
+                            curr["oi_low"] = min(float(curr.get("oi_low") or live_val), live_val)
+                            curr["oi_delta"] = round(live_val - c_open_oi, 3)
+
+                            sc, sl, sp = classify_candle_oi_intent(curr)
+                            curr["oi_state"] = sc
+                            curr["oi_label"] = sl
+                            curr["oi_score"] = sp
+
+            time.sleep(0.25)
+        time.sleep(5.0)
 
 
 def ensure_oi_worker_started():
@@ -528,6 +562,15 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
             candle["retail_buy_vol"] = float(candle.get("retail_buy_vol", 0.0)) + quantity
 
     candle["delta"] = candle["buy_volume"] - candle["sell_volume"]
+    candle["delta"] = candle["buy_volume"] - candle["sell_volume"]
+
+    # Stamp Live Binance OI on every trade tick so heal_recent_candles_via_ws never resets it to 0
+    live_oi_now = float(oi_telemetry.get(symbol, {}).get("live_oi", 0.0))
+    if live_oi_now > 0:
+        if float(candle.get("oi_open") or 0.0) <= 0:
+            candle["oi_open"] = live_oi_now
+        candle["oi_close"] = live_oi_now
+        candle["oi_delta"] = round(live_oi_now - float(candle["oi_open"]), 3)
 
     level = candle["footprint"].get(key)
     if level is None:
@@ -4072,6 +4115,78 @@ function drawAll() {
 
         if (smtState.bias === 1) scalpPts += 10;
         else if (smtState.bias === -1) scalpPts -= 10;
+
+        // =========================================================================
+        // 100% REAL BINANCE LIVE OI + ΔOI FINAL DECISION IMPACT (SCALP + INTRADAY)
+        // =========================================================================
+        const liveOiData = obData.oi || {};
+        const liveTotalOi = Number(liveOiData.live_oi || lastC.oi_close || 0);
+        const sessOiDeltaNow = Number(liveOiData.session_oi_delta || (macroInfo ? macroInfo.sessOiDelta : 0));
+        const curCandleOiD = Number(lastC.oi_delta || 0);
+        const recent3OiDelta = candles.slice(-3).reduce((acc, x) => acc + Number(x.oi_delta || 0), 0);
+        const activeOiDelta = Math.abs(curCandleOiD) > 0 ? curCandleOiD : recent3OiDelta;
+
+        let oiMeterState = 'NEU';
+        let oiDecisionTag = '⚪ OI FLAT';
+
+        if (Math.abs(activeOiDelta) > 0) {
+            if (activeOiDelta > 0) {
+                // STATE 1 & 2: OI UP (New Positions Entering Market!)
+                if (lastC.close < lastC.open && closePos >= 0.52 && (rBidAbs > rAskAbs || totIceBid > totIceAsk || bullSweepReject)) {
+                    // Shorts opened aggressively into Bid Iceberg & price held -> BULLISH SHORT TRAP!
+                    scalpPts += 24;
+                    oiMeterState = 'BULL';
+                    oiDecisionTag = `⚠️ OI↑(+${fmt(activeOiDelta)}) SHORTS TRAPPED AT BID ➔ LONG!`;
+                    battleWinner = `🔥 [${tf.toUpperCase()}] OI SHORT-TRAP: New Shorts Absorbed at Bid (OI+${fmt(activeOiDelta)}) ➔ BULL REVERSAL!`;
+                    bwCol = '#00e5ff';
+                } else if (lastC.close > lastC.open && closePos <= 0.48 && (rAskAbs > rBidAbs || totIceAsk > totIceBid || bearSweepReject)) {
+                    // Longs opened aggressively into Ask Iceberg & price capped -> BEARISH LONG TRAP!
+                    scalpPts -= 24;
+                    oiMeterState = 'BEAR';
+                    oiDecisionTag = `⚠️ OI↑(+${fmt(activeOiDelta)}) LONGS TRAPPED AT ASK ➔ SHORT!`;
+                    battleWinner = `🔥 [${tf.toUpperCase()}] OI LONG-TRAP: New Longs Capped at Ask (OI+${fmt(activeOiDelta)}) ➔ BEAR REJECT!`;
+                    bwCol = '#ff9100';
+                } else if (lastC.close >= lastC.open && closePos > 0.48) {
+                    // Genuine Bullish Initiation: Price Up + OI Up
+                    scalpPts += 20;
+                    oiMeterState = 'BULL';
+                    oiDecisionTag = `🟢 OI↑(+${fmt(activeOiDelta)}) NEW LONGS INITIATING`;
+                } else if (lastC.close < lastC.open && closePos < 0.52) {
+                    // Genuine Bearish Initiation: Price Down + OI Up
+                    scalpPts -= 20;
+                    oiMeterState = 'BEAR';
+                    oiDecisionTag = `🔴 OI↑(+${fmt(activeOiDelta)}) NEW SHORTS INITIATING`;
+                }
+            } else {
+                // STATE 3 & 4: OI DOWN (Positions Closing / Liquidations / Profit Booking)
+                if (lastC.close >= lastC.open) {
+                    // Price Up + OI Down = Short Covering
+                    if (totWhaleBuy > totWhaleSell * 1.35 && closePos >= 0.60) {
+                        scalpPts += 10;
+                        oiMeterState = 'BULL';
+                        oiDecisionTag = `⚡ OI↓(${fmt(activeOiDelta)}) SHORT SQUEEZE`;
+                    } else {
+                        // Weak Short-Covering Rally without Whale Buying -> Penalize fake bull score!
+                        if (scalpPts > 15) scalpPts -= 14;
+                        oiMeterState = 'NEU';
+                        oiDecisionTag = `🟡 OI↓(${fmt(activeOiDelta)}) SHORT COVER (WEAK RALLY)`;
+                    }
+                } else {
+                    // Price Down + OI Down = Long Liquidation / Unwinding
+                    if (totWhaleSell > totWhaleBuy * 1.35 && closePos <= 0.40) {
+                        scalpPts -= 10;
+                        oiMeterState = 'BEAR';
+                        oiDecisionTag = `🩸 OI↓(${fmt(activeOiDelta)}) LONG LIQ FLUSH`;
+                    } else {
+                        // Weak Long Unwind Dip without Whale Selling -> Penalize fake bear score!
+                        if (scalpPts < -15) scalpPts += 14;
+                        oiMeterState = 'NEU';
+                        oiDecisionTag = `🟠 OI↓(${fmt(activeOiDelta)}) LONG UNWIND (PROFIT BOOKING)`;
+                    }
+                }
+            }
+        }
+        const oiMeterDesc = `Live:${fmt(liveTotalOi)} | ${oiDecisionTag}`;
 
         if (instBearDrive && lastC.close < curPoc && lastC.close < prevPoc && !bullSweepReject && scalpPts > 0) scalpPts = -22;
         else if (instBullDrive && lastC.close > curPoc && lastC.close > prevPoc && !bearSweepReject && scalpPts < 0) scalpPts = 22;
