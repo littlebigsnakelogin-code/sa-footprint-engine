@@ -1,10 +1,9 @@
-import encodings.idna
 import json
 import os
 import queue
 import threading
 import time
-import uuid
+import gzip
 from collections import defaultdict, deque
 from decimal import Decimal, ROUND_FLOOR
 import requests
@@ -145,7 +144,7 @@ orderbook = {
             "bid": defaultdict(deque),
             "ask": defaultdict(deque),
         },
-        "trade_history": deque(maxlen=2500),
+        "trade_history": deque(maxlen=500),
         "trade_match_index": defaultdict(deque),
         "liquidity_match_index": defaultdict(deque),
         "trade_flow_diagnostics": deque(maxlen=50),
@@ -232,6 +231,10 @@ def heal_recent_candles_via_ws():
                                 "buy_volume": k_buy,
                                 "sell_volume": k_sell,
                                 "delta": k_delta,
+                                "whale_buy_vol": 0.0,
+                                "whale_sell_vol": 0.0,
+                                "retail_buy_vol": 0.0,
+                                "retail_sell_vol": 0.0,
                                 "trades": k_trades,
                                 "footprint": {},
                             }
@@ -274,6 +277,12 @@ def load_historical_candles_from_turso():
                     except Exception:
                         fp_dict = {}
 
+                    # Restore exact Whale vs Retail volumes from saved footprint cells on server restart
+                    w_buy_sum = sum(float(v.get("whale_buy", 0.0)) for v in fp_dict.values())
+                    w_sell_sum = sum(float(v.get("whale_sell", 0.0)) for v in fp_dict.values())
+                    r_buy_sum = sum(float(v.get("retail_buy", 0.0)) for v in fp_dict.values())
+                    r_sell_sum = sum(float(v.get("retail_sell", 0.0)) for v in fp_dict.values())
+
                     candle_obj = {
                         "symbol": sym,
                         "timeframe": tf,
@@ -286,6 +295,10 @@ def load_historical_candles_from_turso():
                         "volume": t_vol,
                         "buy_volume": b_vol,
                         "sell_volume": s_vol,
+                        "whale_buy_vol": round(w_buy_sum, 4),
+                        "whale_sell_vol": round(w_sell_sum, 4),
+                        "retail_buy_vol": round(r_buy_sum, 4),
+                        "retail_sell_vol": round(r_sell_sum, 4),
                         "delta": delta,
                         "trades": trades,
                         "poc": poc,
@@ -303,7 +316,7 @@ def load_historical_candles_from_turso():
         print(f"[TURSO] Hydration failed: {e}")
 
 # ============================================================
-# HELPERS & FOOTPRINT STAMPING
+# HELPERS, DYNAMIC WHALE DETECTOR & FOOTPRINT STAMPING
 # ============================================================
 
 def now_ms():
@@ -326,9 +339,18 @@ def round_price_to_step(price, step):
         return float(price)
 
 
-# Rolling per-symbol trade size tracker & Raw Millisecond Multi-Tick DOM Telemetry
-rolling_lot_tracker = {"BTCUSDT": 0.06, "ETHUSDT": 0.60, "SOLUSDT": 6.0, "XRPUSDT": 1200.0}
-MIN_WHALE_LOT = {"BTCUSDT": 0.35, "ETHUSDT": 3.5, "SOLUSDT": 35.0, "XRPUSDT": 6000.0}
+# 100% Dynamic Orderflow Relative Trackers (Adapts to Current Market Liquidity & Book Depth!)
+rolling_lot_tracker = {"BTCUSDT": 0.04, "ETHUSDT": 0.40, "SOLUSDT": 4.0, "XRPUSDT": 800.0}
+rolling_book_depth_tracker = {"BTCUSDT": 1.2, "ETHUSDT": 10.0, "SOLUSDT": 60.0, "XRPUSDT": 12000.0}
+burst_flow_tracker = {
+    sym: {"ts": 0, "side": None, "price_bucket": 0.0, "cum_qty": 0.0, "count": 0}
+    for sym in SYMBOLS
+}
+paper_post_entry_bounds = {
+    "scalp": {"high": None, "low": None},
+    "intraday": {"high": None, "low": None},
+}
+
 dom_raw_telemetry = {sym: defaultdict(lambda: {
     "w_buy": 0.0, "w_sell": 0.0, "r_buy": 0.0, "r_sell": 0.0,
     "ms_bid_add": 0.0, "ms_ask_add": 0.0,
@@ -362,7 +384,36 @@ def create_empty_candle(symbol, timeframe, start, open_price):
     }
 
 
-def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
+# Behavioral Institutional Tracker (Tracks Cluster Sticking/Absorption vs Aggressive Price Displacement)
+cluster_behavior_tracker = {
+    sym: {
+        "anchor_px": None,
+        "stuck_start_ms": 0,
+        "stuck_buy_vol": 0.0,
+        "stuck_sell_vol": 0.0,
+        "stuck_trades": 0,
+        "last_px": None,
+        "last_ts": 0,
+        "disp_start_px": None,
+        "disp_ts": 0,
+        "disp_vol": 0.0,
+        "disp_trades": 0,
+        "disp_dir": 0,
+    }
+    for sym in SYMBOLS
+}
+
+
+def add_trade_to_candle(
+    candle, price, quantity, is_buyer_maker, price_level=None,
+    inst_mode="RETAIL", absorbed_vol=0.0
+):
+    """
+    inst_mode:
+      - 'DISP_WHALE': Big chunks + Fast Price Displacement (Aggressive Whale)
+      - 'ABS_WHALE': Price stuck in cluster while eating opposing retail orders (Passive Whale)
+      - 'RETAIL': Standard retail/noise flow
+    """
     candle["high"] = max(candle["high"], price)
     candle["low"] = min(candle["low"], price)
     candle["close"] = price
@@ -371,31 +422,9 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
 
     symbol = candle["symbol"]
     step = PRICE_STEP[symbol]
-    price_level = round_price_to_step(price, step)
+    if price_level is None:
+        price_level = round_price_to_step(price, step)
     key = str(price_level)
-
-    base_lot = rolling_lot_tracker.get(symbol, 0.05)
-    if candle["timeframe"] == "1m":
-        base_lot = (base_lot * 0.992) + (quantity * 0.008)
-        rolling_lot_tracker[symbol] = base_lot
-
-    whale_cut = max(base_lot * 3.0, MIN_WHALE_LOT.get(symbol, 0.25))
-    is_whale_tick = quantity >= whale_cut
-
-    if is_buyer_maker:
-        candle["sell_volume"] += quantity
-        if is_whale_tick:
-            candle["whale_sell_vol"] = float(candle.get("whale_sell_vol", 0.0)) + quantity
-        else:
-            candle["retail_sell_vol"] = float(candle.get("retail_sell_vol", 0.0)) + quantity
-    else:
-        candle["buy_volume"] += quantity
-        if is_whale_tick:
-            candle["whale_buy_vol"] = float(candle.get("whale_buy_vol", 0.0)) + quantity
-        else:
-            candle["retail_buy_vol"] = float(candle.get("retail_buy_vol", 0.0)) + quantity
-
-    candle["delta"] = candle["buy_volume"] - candle["sell_volume"]
 
     level = candle["footprint"].get(key)
     if level is None:
@@ -420,47 +449,84 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker):
         candle["footprint"][key] = level
 
     if is_buyer_maker:
+        # Market Sell Order hit the Bid
+        candle["sell_volume"] += quantity
         level["sell"] += quantity
-        if is_whale_tick:
+        if inst_mode == "DISP_WHALE":
+            # Aggressive Whale dumping & displacing price down!
+            candle["whale_sell_vol"] = float(candle.get("whale_sell_vol", 0.0)) + quantity
             level["whale_sell"] = float(level.get("whale_sell", 0.0)) + quantity
             level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
+        elif inst_mode == "ABS_WHALE":
+            # Price is STUCK in cluster while retail sells -> Passive Bid Whale is BUYING/ABSORBING them!
+            candle["retail_sell_vol"] = float(candle.get("retail_sell_vol", 0.0)) + quantity
+            level["retail_sell"] = float(level.get("retail_sell", 0.0)) + quantity
+            w_credit = max(quantity, absorbed_vol)
+            candle["whale_buy_vol"] = float(candle.get("whale_buy_vol", 0.0)) + w_credit
+            level["whale_buy"] = float(level.get("whale_buy", 0.0)) + w_credit
+            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
+            level["status"] = "HEAVY ABSORPTION"
         else:
+            candle["retail_sell_vol"] = float(candle.get("retail_sell_vol", 0.0)) + quantity
             level["retail_sell"] = float(level.get("retail_sell", 0.0)) + quantity
     else:
+        # Market Buy Order lifted the Ask
+        candle["buy_volume"] += quantity
         level["buy"] += quantity
-        if is_whale_tick:
+        if inst_mode == "DISP_WHALE":
+            # Aggressive Whale sweeping & displacing price up!
+            candle["whale_buy_vol"] = float(candle.get("whale_buy_vol", 0.0)) + quantity
             level["whale_buy"] = float(level.get("whale_buy", 0.0)) + quantity
             level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
+        elif inst_mode == "ABS_WHALE":
+            # Price is STUCK in cluster while retail buys -> Passive Ask Whale is SELLING/CAPPING them!
+            candle["retail_buy_vol"] = float(candle.get("retail_buy_vol", 0.0)) + quantity
+            level["retail_buy"] = float(level.get("retail_buy", 0.0)) + quantity
+            w_credit = max(quantity, absorbed_vol)
+            candle["whale_sell_vol"] = float(candle.get("whale_sell_vol", 0.0)) + w_credit
+            level["whale_sell"] = float(level.get("whale_sell", 0.0)) + w_credit
+            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
+            level["status"] = "HEAVY ABSORPTION"
         else:
+            candle["retail_buy_vol"] = float(candle.get("retail_buy_vol", 0.0)) + quantity
             level["retail_buy"] = float(level.get("retail_buy", 0.0)) + quantity
 
+    candle["delta"] = candle["buy_volume"] - candle["sell_volume"]
     level["volume"] += quantity
     level["trades"] += 1
     level["delta"] = level["buy"] - level["sell"]
 
-    # Feed Raw Millisecond DOM Telemetry + 3-Tick Neighborhood Cluster Iceberg Detection
+    # Feed Raw Millisecond DOM Telemetry + True Behavioral Iceberg & Whale Tracking
     if candle["timeframe"] == "1m":
         d_raw = dom_raw_telemetry[symbol]
         d_cell = d_raw[price_level]
         d_cell["ts"] = now_ms()
         if is_buyer_maker:
-            if is_whale_tick:
+            if inst_mode == "DISP_WHALE":
                 d_cell["w_sell"] += quantity
+            elif inst_mode == "ABS_WHALE":
+                d_cell["r_sell"] += quantity
+                d_cell["w_buy"] += quantity
+                d_cell["iceberg_bid"] = round(d_cell["iceberg_bid"] + quantity, 4)
             else:
                 d_cell["r_sell"] += quantity
             c_sell_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("w_sell", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("r_sell", 0.0) for k in (-1, 0, 1))
             c_peak_bid = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_bid", 0.0) for k in (-1, 0, 1))
-            if c_peak_bid > 0 and c_sell_exec > c_peak_bid * 1.10:
-                d_cell["iceberg_bid"] = max(d_cell["iceberg_bid"], (c_sell_exec - c_peak_bid) * 0.5)
+            if c_peak_bid > 0 and c_sell_exec > c_peak_bid * 1.15:
+                d_cell["iceberg_bid"] = max(d_cell["iceberg_bid"], round(c_sell_exec - c_peak_bid, 4))
         else:
-            if is_whale_tick:
+            if inst_mode == "DISP_WHALE":
                 d_cell["w_buy"] += quantity
+            elif inst_mode == "ABS_WHALE":
+                d_cell["r_buy"] += quantity
+                d_cell["w_sell"] += quantity
+                d_cell["iceberg_ask"] = round(d_cell["iceberg_ask"] + quantity, 4)
             else:
                 d_cell["r_buy"] += quantity
             c_buy_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("w_buy", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("r_buy", 0.0) for k in (-1, 0, 1))
             c_peak_ask = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_ask", 0.0) for k in (-1, 0, 1))
-            if c_peak_ask > 0 and c_buy_exec > c_peak_ask * 1.10:
-                d_cell["iceberg_ask"] = max(d_cell["iceberg_ask"], (c_buy_exec - c_peak_ask) * 0.5)
+            if c_peak_ask > 0 and c_buy_exec > c_peak_ask * 1.15:
+                d_cell["iceberg_ask"] = max(d_cell["iceberg_ask"], round(c_buy_exec - c_peak_ask, 4))
 
 
 def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty, old_book_qty, status_str):
@@ -474,8 +540,8 @@ def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty,
     key = str(bucket_price)
     max_distance = step * 18.0
 
-    min_pull_map = {"BTCUSDT": 1.5, "ETHUSDT": 12.0, "SOLUSDT": 80.0, "XRPUSDT": 15000.0}
-    whale_chunk_cut = min_pull_map.get(symbol, 1.0) * 2.5
+    dyn_book_ref = rolling_book_depth_tracker.get(symbol, 1.0)
+    whale_chunk_cut = max(dyn_book_ref * 1.35, rolling_lot_tracker.get(symbol, 0.05) * 6.0)
 
     with lock:
         live_px = last_trade.get(symbol, {}).get("price")
@@ -543,7 +609,6 @@ def fetch_orderbook_snapshot_ws(symbol):
     SNAPSHOT_DEADLINE = 20
     SOCKET_TIMEOUT = 6
     ws = None
-    started_at = time.time()
 
     try:
         ws_url = "wss://ws-fapi.binance.com/ws-fapi/v1"
@@ -604,7 +669,7 @@ def fetch_orderbook_snapshot_ws(symbol):
                 pass
 
 # ============================================================
-# EXECUTION MATCHING & FIFO ACCOUNTING
+# EXECUTION MATCHING & FIFO/LIFO ACCOUNTING
 # ============================================================
 
 def finalize_liquidity_records(symbol, current_time_ms=None):
@@ -631,8 +696,6 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         executed_qty = min(float(record.get("executed_qty", 0.0)), reduced_qty)
         total_unmatched_qty = max(0.0, reduced_qty - executed_qty)
 
-        # STRICT 10-SECOND AGED FIFO/LIFO RULE + LATE TRADE EXECUTION DEDUCTION:
-        # Subtract any late-arriving trade executions (within 450ms window) so eaten walls are NEVER counted as pulls!
         aged_unmatched_raw = float(record.get("aged_unmatched_qty", 0.0))
         aged_consumed_qty = float(record.get("aged_consumed_qty", 0.0))
 
@@ -656,7 +719,6 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
         else:
             record["status"] = "UNCONFIRMED_REDUCTION"
 
-        # Stamp ONLY genuine >=10s Aged Resting Wall pulls that were NOT executed!
         if pulled_qty > 0.0 and record["status"] != "HEAVY ABSORPTION":
             stamp_liquidity_event_to_active_candles(
                 symbol,
@@ -668,7 +730,6 @@ def finalize_liquidity_records(symbol, current_time_ms=None):
             )
         finalized_count += 1
 
-    # RAM CLEANUP: Prevent index memory leaks over 12H+ sessions
     liquidity_index = state.get("liquidity_match_index")
     if isinstance(liquidity_index, dict):
         history_ids = {id(r) for r in history if isinstance(r, dict)}
@@ -766,46 +827,16 @@ def record_trade_for_execution_matching(symbol, price, quantity, trade_time, is_
 
         liquidity["executed_qty"] = new_executed_qty
         liquidity["unmatched_qty"] = max(0.0, reduced_qty - new_executed_qty)
+        # Deduct late trade directly from aged_unmatched_qty so eaten walls NEVER register as pulls!
+        liquidity["aged_unmatched_qty"] = max(0.0, float(liquidity.get("aged_unmatched_qty", 0.0)) - actual_matched_qty)
+        liquidity["aged_executed_qty"] = float(liquidity.get("aged_executed_qty", 0.0)) + actual_matched_qty
         liquidity["pulled_qty"] = 0.0
         liquidity["pull_pct"] = 0.0
         liquidity["status"] = "reduction_pending"
 
-        fifo_consumption = liquidity.setdefault("fifo_consumption", [])
-        fifo_remaining = actual_matched_qty
-
-        for item in fifo_consumption:
-            if fifo_remaining <= epsilon:
-                break
-            consumed_qty = max(0.0, float(item.get("consumed_qty", 0.0)))
-            prior_exec = max(0.0, float(item.get("execution_qty", 0.0)))
-            capacity = max(0.0, consumed_qty - prior_exec)
-            if capacity <= epsilon:
-                continue
-
-            attrib = min(capacity, fifo_remaining)
-            item["execution_qty"] = prior_exec + attrib
-            item["unmatched_qty"] = max(0.0, consumed_qty - item["execution_qty"])
-            item["execution_time"] = trade_time
-            item["trade_price"] = price
-            fifo_remaining -= attrib
-
-        if fifo_remaining > epsilon:
-            liquidity["fifo_unattributed_execution_qty"] = (
-                float(liquidity.get("fifo_unattributed_execution_qty", 0.0)) + fifo_remaining
-            )
-
-        liquidity["fifo_executed_qty"] = sum(
-            float(i.get("execution_qty", 0.0)) for i in fifo_consumption
-        )
-        liquidity["fifo_unmatched_qty"] = sum(
-            max(0.0, float(i.get("consumed_qty", 0.0)) - float(i.get("execution_qty", 0.0)))
-            for i in fifo_consumption
-        )
-
         trade_record["remaining_qty"] = max(0.0, available_trade - actual_matched_qty)
         matched_total += actual_matched_qty
 
-    state["trade_history"].append(trade_record)
     return matched_total
 
 
@@ -856,7 +887,7 @@ def match_trade_to_liquidity_reduction(symbol, liquidity_side, liquidity_price, 
     return matched_qty
 
 # ============================================================
-# ORDERBOOK EVENT APPLICATION
+# ORDERBOOK EVENT APPLICATION (DYNAMIC DEPTH & SPOOF TRACKING)
 # ============================================================
 
 def apply_orderbook_event(symbol, event):
@@ -868,15 +899,15 @@ def apply_orderbook_event(symbol, event):
     liquidity_index = state["liquidity_match_index"]
 
     step = PRICE_STEP.get(symbol, 1.0)
-    min_pull_map = {"BTCUSDT": 1.5, "ETHUSDT": 12.0, "SOLUSDT": 80.0, "XRPUSDT": 15000.0}
-    min_track_qty = min_pull_map.get(symbol, 1.0)
-    flash_chunk_qty = min_track_qty * 0.65  # Captures fast millisecond institutional spoofs in Raw DOM
-    MIN_WALL_AGE_MS = 10000  # Strict 10s rule ONLY for Footprint Aged Resting Walls
-
     live_px = last_trade.get(symbol, {}).get("price")
     dom_raw = dom_raw_telemetry[symbol]
 
-    # Retain 5 minutes of Raw Millisecond Cluster Telemetry so multi-candle ranges/triangles are tracked!
+    # Dynamically adapt resting depth baseline from current active book
+    dyn_book_avg = rolling_book_depth_tracker.get(symbol, 1.0)
+    min_track_qty = max(dyn_book_avg * 0.55, rolling_lot_tracker.get(symbol, 0.04) * 3.0)
+    flash_chunk_qty = min_track_qty * 0.65
+    MIN_WALL_AGE_MS = 10000
+
     if event_update_id % 60 == 0 and dom_raw:
         cutoff_ts = event_time - 300000
         for k_px, v_obj in list(dom_raw.items()):
@@ -884,6 +915,7 @@ def apply_orderbook_event(symbol, event):
                 dom_raw.pop(k_px, None)
 
     def process_side(side, event_levels, book):
+        nonlocal dyn_book_avg
         is_bid = (side == "bid")
         for price, quantity in event_levels:
             price = str(price)
@@ -901,6 +933,10 @@ def apply_orderbook_event(symbol, event):
 
             b_px = round_price_to_step(p_flt, step)
             near_live = (live_px is None) or (abs(b_px - float(live_px)) <= step * 35.0)
+            if near_live and new_quantity > 0:
+                dyn_book_avg = (dyn_book_avg * 0.995) + (new_quantity * 0.005)
+                rolling_book_depth_tracker[symbol] = dyn_book_avg
+
             d_cell = dom_raw[b_px] if near_live else None
             if d_cell is not None:
                 d_cell["ts"] = event_time
@@ -913,7 +949,6 @@ def apply_orderbook_event(symbol, event):
 
             if added_qty > 1e-8:
                 lots.append({
-                    "lot_id": str(uuid.uuid4()),
                     "original_qty": added_qty,
                     "remaining_qty": added_qty,
                     "time": event_time,
@@ -923,16 +958,9 @@ def apply_orderbook_event(symbol, event):
                 if d_cell is not None:
                     if is_bid:
                         d_cell["ms_bid_add"] += added_qty
-                        cluster_sells = sum((dom_raw.get(round_price_to_step(b_px + k * step, step)) or {}).get("w_sell", 0.0) + (dom_raw.get(round_price_to_step(b_px + k * step, step)) or {}).get("r_sell", 0.0) for k in (-1, 0, 1))
-                        if cluster_sells >= min_track_qty * 0.45 and live_px is not None and abs(b_px - float(live_px)) <= step * 5.0:
-                            d_cell["iceberg_bid"] += added_qty * 0.70
                     else:
                         d_cell["ms_ask_add"] += added_qty
-                        cluster_buys = sum((dom_raw.get(round_price_to_step(b_px + k * step, step)) or {}).get("w_buy", 0.0) + (dom_raw.get(round_price_to_step(b_px + k * step, step)) or {}).get("r_buy", 0.0) for k in (-1, 0, 1))
-                        if cluster_buys >= min_track_qty * 0.45 and live_px is not None and abs(b_px - float(live_px)) <= step * 5.0:
-                            d_cell["iceberg_ask"] += added_qty * 0.70
 
-            fifo_consumption = []
             aged_consumed_qty = 0.0
             aged_executed_qty = 0.0
             aged_unmatched_qty = 0.0
@@ -1018,7 +1046,6 @@ def apply_orderbook_event(symbol, event):
                         "pull_pct": 0.0,
                         "finalized": False,
                         "fifo_reduction": True,
-                        "fifo_consumption": fifo_consumption,
                         "status": "reduction_pending",
                     }
                     state["liquidity_history"].append(liquidity_record)
@@ -1154,7 +1181,6 @@ def initialize_orderbook(symbol):
                             snap_time = now_ms()
                             for p, q in snapshot_bids.items():
                                 state["liquidity_lots"]["bid"][p].append({
-                                    "lot_id": str(uuid.uuid4()),
                                     "original_qty": q,
                                     "remaining_qty": q,
                                     "time": snap_time,
@@ -1163,7 +1189,6 @@ def initialize_orderbook(symbol):
                                 })
                             for p, q in snapshot_asks.items():
                                 state["liquidity_lots"]["ask"][p].append({
-                                    "lot_id": str(uuid.uuid4()),
                                     "original_qty": q,
                                     "remaining_qty": q,
                                     "time": snap_time,
@@ -1206,8 +1231,6 @@ def initialize_orderbook(symbol):
             if state.get("initialized", False):
                 state["resyncing"] = False
             elif collector_state.get("depth_stream_connected", False):
-                # FIX: Agar uninitialized reh gaya aur buffer empty bhi hai, 
-                # tab bhi recovery flag active rakh kar retry trigger karenge.
                 state["resyncing"] = True
                 restart_init = True
             else:
@@ -1220,6 +1243,7 @@ def initialize_orderbook(symbol):
                 name=f"orderbook-init-{symbol}-retry",
                 daemon=True,
             ).start()
+
 
 def handle_depth_update(symbol, event):
     try:
@@ -1340,7 +1364,6 @@ def save_candle_to_turso(candle):
     if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
         return
     try:
-        # Convert footprint dict/list to sorted list for clean storage
         fp_raw = candle.get("footprint", {})
         fp_list = list(fp_raw.values()) if isinstance(fp_raw, dict) else fp_raw
         footprint_json = json.dumps(fp_list, separators=(",", ":"))
@@ -1374,7 +1397,6 @@ def _turso_worker_loop():
             if turso_client is None:
                 turso_client = create_client_sync(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
             if job.get("cleanup"):
-                # Strict 48 Hours cutoff window (2 days)
                 cutoff = int(time.time() * 1000) - (48 * 60 * 60 * 1000)
                 turso_client.execute("DELETE FROM candles WHERE time < ?", (cutoff,))
             else:
@@ -1429,12 +1451,74 @@ def store_finished_candle(candle):
         turso_write_queue.put({"cleanup": True})
 
 # ============================================================
-# TRADE & MESSAGE ROUTER
+# TRADE & MESSAGE ROUTER (100% DYNAMIC WHALE ORDERFLOW ENGINE)
 # ============================================================
 
 def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
+    step = PRICE_STEP[symbol]
+    price_level = round_price_to_step(price, step)
+
     with lock:
         record_trade_for_execution_matching(symbol, price, quantity, trade_time, is_buyer_maker)
+
+        cb = cluster_behavior_tracker[symbol]
+        dyn_book_avg = max(rolling_book_depth_tracker.get(symbol, 1.0), 0.1)
+
+        # 1. Track Price Sticking in a 3-Tick Cluster (Absorption Detection)
+        if cb["anchor_px"] is None or abs(price_level - cb["anchor_px"]) > step * 2.5:
+            cb["anchor_px"] = price_level
+            cb["stuck_start_ms"] = trade_time
+            cb["stuck_buy_vol"] = 0.0 if is_buyer_maker else quantity
+            cb["stuck_sell_vol"] = quantity if is_buyer_maker else 0.0
+            cb["stuck_trades"] = 1
+        else:
+            if is_buyer_maker:
+                cb["stuck_sell_vol"] += quantity
+            else:
+                cb["stuck_buy_vol"] += quantity
+            cb["stuck_trades"] += 1
+
+        # 2. Track Fast Price Displacement / Momentum Sweep (Within 1200ms window)
+        cur_dir = -1 if is_buyer_maker else 1
+        if cb["disp_start_px"] is None or (trade_time - cb["disp_ts"] > 1200) or (cb["disp_dir"] != cur_dir):
+            cb["disp_start_px"] = price
+            cb["disp_ts"] = trade_time
+            cb["disp_vol"] = quantity
+            cb["disp_trades"] = 1
+            cb["disp_dir"] = cur_dir
+        else:
+            cb["disp_vol"] += quantity
+            cb["disp_trades"] += 1
+
+        price_disp_steps = abs(price - cb["disp_start_px"]) / step
+        avg_disp_lot = cb["disp_vol"] / max(1, cb["disp_trades"])
+
+        # Local resting book & recent spoof pulls in this 3-tick zone
+        d_raw = dom_raw_telemetry[symbol]
+        zone_bid_pull = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("aged_bid_pull", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("flash_bid_pull", 0.0) for k in (-1, 0, 1))
+        zone_ask_pull = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("aged_ask_pull", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("flash_ask_pull", 0.0) for k in (-1, 0, 1))
+
+        inst_mode = "RETAIL"
+        absorbed_credit = 0.0
+
+        # RULE A: AGGRESSIVE WHALE DISPLACEMENT (Big Chunks + Fast Price Move >= 2 steps OR Spoof Wall Pulled)
+        if (
+            (price_disp_steps >= 2.0 and cb["disp_vol"] >= dyn_book_avg * 0.85 and avg_disp_lot >= dyn_book_avg * 0.22)
+            or (quantity >= dyn_book_avg * 0.75 and (price_disp_steps >= 1.0 or (cur_dir == 1 and zone_ask_pull > 0) or (cur_dir == -1 and zone_bid_pull > 0)))
+        ):
+            inst_mode = "DISP_WHALE"
+
+        # RULE B: PASSIVE WHALE ABSORPTION (Price STUCK in 3-tick cluster while heavy volume hits one side without pulling!)
+        elif cb["stuck_trades"] >= 5 and (trade_time - cb["stuck_start_ms"] >= 600):
+            if is_buyer_maker and cb["stuck_sell_vol"] >= dyn_book_avg * 1.15 and cb["stuck_sell_vol"] > cb["stuck_buy_vol"] * 1.55 and zone_bid_pull < cb["stuck_sell_vol"] * 0.35:
+                inst_mode = "ABS_WHALE"
+                absorbed_credit = quantity
+            elif (not is_buyer_maker) and cb["stuck_buy_vol"] >= dyn_book_avg * 1.15 and cb["stuck_buy_vol"] > cb["stuck_sell_vol"] * 1.55 and zone_ask_pull < cb["stuck_buy_vol"] * 0.35:
+                inst_mode = "ABS_WHALE"
+                absorbed_credit = quantity
+
+        cb["last_px"] = price
+        cb["last_ts"] = trade_time
 
         for timeframe, seconds in TIMEFRAMES.items():
             start = floor_timestamp(trade_time, seconds)
@@ -1451,13 +1535,21 @@ def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
                 current = create_empty_candle(symbol, timeframe, start, prev_close)
                 current_candles[symbol][timeframe] = current
 
-            add_trade_to_candle(current, price, quantity, is_buyer_maker)
+            add_trade_to_candle(current, price, quantity, is_buyer_maker, price_level, inst_mode, absorbed_credit)
 
         last_trade[symbol] = {
             "time": trade_time,
             "price": price,
             "quantity": quantity,
         }
+
+        if paper_bot_state.get("enabled") and paper_bot_state.get("symbol") == symbol:
+            for mode in ("scalp", "intraday"):
+                act = paper_bot_state.get(mode, {}).get("active")
+                if act and act.get("symbol") == symbol:
+                    b = paper_post_entry_bounds[mode]
+                    b["high"] = price if b["high"] is None else max(b["high"], price)
+                    b["low"] = price if b["low"] is None else min(b["low"], price)
 
 
 def handle_message(ws, message):
@@ -1614,10 +1706,7 @@ def ensure_collector_started():
     with collector_start_lock:
         if collector_thread is not None and collector_thread.is_alive():
             return
-        
-        # Ensure Turso background worker & historical hydration starts on boot
         ensure_turso_worker_started()
-
         collector_thread = threading.Thread(
             target=collector_loop,
             name="binance-trade-collector",
@@ -1631,7 +1720,7 @@ def before_request():
     ensure_collector_started()
 
 # ============================================================
-# ROUTES
+# ROUTES & UI
 # ============================================================
 
 @app.route("/")
@@ -1641,7 +1730,7 @@ def home():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>SA Institutional Footprint & Pulling-Delta Engine V4.5</title>
+<title>SA Institutional Footprint & Pulling-Delta Engine V5.0</title>
 <style>
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
     html, body {
@@ -1844,7 +1933,7 @@ def home():
 <body>
 
 <div class="topbar">
-    <span class="brand">⚡ SA V4.6</span>
+    <span class="brand">⚡ SA V5.0</span>
     <select id="symSel" onchange="setSym(this.value)">
         <option value="BTCUSDT" selected>BTCUSDT</option>
         <option value="ETHUSDT">ETHUSDT</option>
@@ -1944,14 +2033,14 @@ def home():
 
 <div id="ruleModal">
     <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #00e5ff; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
-        <b style="color:#00e5ff; font-size:14px;">⚡ SA INSTITUTIONAL FOOTPRINT & ORDERFLOW ENGINE — COMPLETE A-TO-Z MASTER RULEBOOK</b>
+        <b style="color:#00e5ff; font-size:14px;">⚡ SA INSTITUTIONAL FOOTPRINT & ORDERFLOW ENGINE V5 — MASTER RULEBOOK</b>
         <button class="btn" onclick="toggleRules()" style="background:#ff1744;color:#fff;border:none;padding:4px 12px;font-weight:bold;">✕ CLOSE</button>
     </div>
 
     <div class="rule-sec" style="border-color:#00e5ff;">
         <h4 style="color:#00e5ff;">1. 10-SECOND AGED RESTING WALL PULLS (H-BP / bp / H-AP / ap) &amp; LIFO NOISE FILTER</h4>
-        • <b>10-Second Heatmap Wall Gate:</b> Orderbook me har millisecond aane-jane wale HFT flickers ko LIFO (Last-In-First-Out) queue se 0% spoof count karke filter kiya jata hai. Sirf wahi limit orders jo <b>&ge; 10 Seconds</b> se orderbook me resting the aur jab price unke <b>2 ticks</b> ke andar aaya tab pull huye, unhe genuine <b>Institutional Wall Pull</b> maana jata hai.<br>
-        • <b>Price Level Tags:</b> Left (Bid) side par <code>H-BP:Qty(%)</code> (Heavy Bid Pull) ya <code>bp:Qty(%)</code> aur Right (Ask) side par <code>H-AP:Qty(%)</code> (Heavy Ask Pull) ya <code>ap:Qty(%)</code> dikhta hai. Price levels par Pulling Delta nahi dikhaya jata taaki chart 100% clean rahe.
+        • <b>10-Second Heatmap Wall Gate:</b> Orderbook me har millisecond aane-jane wale HFT flickers ko LIFO queue se filter kiya jata hai. Sirf wahi limit orders jo <b>&ge; 10 Seconds</b> se orderbook me resting the aur price ke <b>18 steps</b> ke andar aane par pull huye, unhe genuine <b>Institutional Wall Pull</b> maana jata hai.<br>
+        • <b>Price Level Tags:</b> Left (Bid) side par <code>H-BP:Qty(%)</code> (Heavy Bid Pull) ya <code>bp:Qty(%)</code> aur Right (Ask) side par <code>H-AP:Qty(%)</code> (Heavy Ask Pull) ya <code>ap:Qty(%)</code> dikhta hai.
     </div>
 
     <div class="rule-sec">
@@ -1962,72 +2051,9 @@ def home():
     </div>
 
     <div class="rule-sec" style="border-color:#ff9100;">
-        <h4 style="color:#ff9100;">3. TRUE INSTITUTIONAL ABSORPTION (H-B.ABS / H-A.ABS) vs SOLID WALLS</h4>
-        • <b>Bid Absorption (<code>H-B.ABS &ge; 65%</code> — Cyan):</b> Jab candle ke lower/bid zone me bhari Market Sell orders maare jayein (<code>Sell Vol &ge; Heavy Cut</code>), lekin Resting Limit Buyers saara maal absorb kar lein aur price level ke niche close na hone dein (<code>🛡️ SOLID-BID WALL: Absorbed &amp; Held!</code>).<br>
-        • <b>Ask Absorption (<code>H-A.ABS &ge; 65%</code> — Orange):</b> Jab candle ke upper/ask zone me bhari Market Buy orders maare jayein, lekin Resting Limit Sellers saara maal absorb karke price ko cap kar dein (<code>🛡️ SOLID-ASK WALL: Absorbed &amp; Capped!</code>).
-    </div>
-
-    <div class="rule-sec" style="border-color:#ffd700;">
-        <h4 style="color:#ffd700;">4. WHALE BLOCKS (◆), RETAIL SL-SWEEPS (🎯) &amp; CANDLE PILL 5-LINE DECODER</h4>
-        • <b>◆ Whale Lot Detector (Gold Diamond):</b> Jab kisi price level par average trade size (<code>Volume / Trades</code>) normal baseline lot se <b>2.8x se 4.5x+ bada</b> ho aur heavy volume ho, toh wahan <code>◆</code> (Institutional Block Execution) lagta hai.<br>
-        • <b>🎯 BSL-SWEEP / SSL-SWEEP:</b> Jab price pichli candles ka Swing High ya Swing Low tode, chote-chote retail stop-loss lots trigger hon (high trade count, small avg lot, low wall pull), aur candle wapas range ke andar close ho jaye = <b>100% Retail Stop-Hunt Reversal!</b><br>
-        • <b>5-Line Candle Pill:</b> Line 1: <code>Delta | Vol (RVOL)</code> &bull; Line 2: <code>CVD | Market Buy vs Sell</code> &bull; Line 3: <code>BP vs AP &amp; P&Delta;</code> &bull; Line 4: <code>Mechanism (SL-Sweep / Fake-Wall / Solid-Wall)</code> &bull; Line 5: <code>Final Winner &amp; Conviction %</code>.
-    </div>
-
-    <div class="rule-sec" style="border-color:#e040fb;">
-        <h4 style="color:#e040fb;">5. NAKED POC (nPOC) &amp; UNFINISHED BUSINESS (UB-HIGH / UB-LOW) MAGNETS</h4>
-        • <b>🟡 Naked POC (<code>nPOC</code>):</b> Pichli kisi bhi candle ka Point of Control (sabse jyada volume wala price) jisko baad ki kisi bhi candle ne abhi tak touch/test nahi kiya hai. Ye high-volume nodes <b>Price Magnets</b> ka kaam karte hain.<br>
-        • <b>🎯 Unfinished Business (<code>UB-HIGH</code> / <code>UB-LOW</code>):</b> Normal candle ke exact High par Bid (`Sell`) `0` hona chahiye aur exact Low par Ask (`Buy`) `0` hona chahiye (Completed Auction). Agar kisi candle ke exact High ya Low extreme par <b>Bid aur Ask DONO side Significant Volume (&gt;0)</b> trade hua hai aur baad me price ne us extreme ko sweep nahi kiya, toh wo <b>Unfinished Auction (Adhura Business)</b> hai—market us level ko revisit karke sweep karne zaroor aata hai!
-    </div>
-
-    <div class="rule-sec" style="border-color:#00e676;">
-        <h4 style="color:#00e676;">6. 2 FINAL DECISION BOXES (SCALP vs INTRADAY), SMART DOM &amp; AI MENTOR</h4>
-        • <b>⚡ Box 1 (SCALP VERDICT):</b> Last 3 candles ke DOM Execution, Bid/Ask Absorption, Resting Wall aur 10s Pull ko mila kar seedha batata hai: <code>🟢 BUYING READY</code>, <code>🔴 SELLING READY</code>, ya <code>⏳ WAIT (BUYING/SELLING BUILDING)</code> + exact reason aur target!<br>
-        • <b>🌊 Box 2 (INTRADAY VERDICT):</b> Rolling 20-candle session CVD, Whale Blocks, Multi-Candle Absorption aur POC stepping se bada intraday direction aur HTF Magnet Target batata hai.<br>
-        • <b>🤖 AI Mentor:</b> Render ke <code>GEMINI_API_KEY</code> se juda hua Zero-Load Co-Pilot jo TradingView structure aur SA Engine data ko cross-verify karta hai.
-    </div>
-
-    <div class="rule-sec" style="border-color:#b388ff;">
-        <h4 style="color:#b388ff;">7. COMPLETE 35-POINT 1-LINE MASTER PARAMETER DICTIONARY (🟢 BULLISH / 🔴 BEARISH / ⚪ NEUTRAL)</h4>
-        <b>[A] FOOTPRINT PRICE-LEVEL &amp; CLUSTER TOOLS:</b><br>
-        1. <code>H-B.ABS (&ge;65%)</code>: <b>🟢 BULLISH</b> — Retail heavy selling ko institutional limit buyers ne niche absorb karke rok liya hai.<br>
-        2. <code>b-abs (&ge;52%)</code>: <b>🟢 MILD BULLISH</b> — Lower zone me moderate selling absorb ho rahi hai.<br>
-        3. <code>H-A.ABS (&ge;65%)</code>: <b>🔴 BEARISH</b> — Retail heavy buying ko institutional limit sellers ne upar absorb karke cap kar diya hai.<br>
-        4. <code>a-abs (&ge;52%)</code>: <b>🔴 MILD BEARISH</b> — Upper zone me moderate buying ko limit sellers rok rahe hain.<br>
-        5. <code>Stealth 50/50 Churn Iceberg</code>: <b>🟢/🔴 PINNING</b> — Heavy volume (&ge;2x Avg) par 50-50 Buy/Sell fight ke baad jis taraf candle close ho, us taraf institutional iceberg jeeta.<br>
-        6. <code>H-BP / bp (10s+ Bid Pulled)</code>: <b>🔴 BEARISH</b> — Niche se 10s+ purani Bid support wall kheench li gayi (support gayab / fake bid trap).<br>
-        7. <code>H-AP / ap (10s+ Ask Pulled)</code>: <b>🟢 BULLISH</b> — Upar se 10s+ purani Ask resistance wall hata li gayi (rasta saaf / fake ask trap).<br>
-        8. <code>◆ Whale Buy Block (Buy &gt; Sell)</code>: <b>🟢 BULLISH</b> — Bade lot size (&ge;2.8x baseline) me institutional aggressive market buying.<br>
-        9. <code>◆ Whale Sell Block (Sell &gt; Buy)</code>: <b>🔴 BEARISH</b> — Bade lot size (&ge;2.8x baseline) me institutional aggressive market selling.<br>
-        10. <code>Buy Imbalance (Buy &gt; 2.5x Sell)</code>: <b>🟢 BULLISH</b> — Us price par aggressive market buyers 2.5 guna haavi hain.<br>
-        11. <code>Sell Imbalance (Sell &gt; 2.5x Buy)</code>: <b>🔴 BEARISH</b> — Us price par aggressive market sellers 2.5 guna haavi hain.<br>
-        12. <code>▲ BID ABS Banner (Bottom)</code>: <b>🟢 BULLISH</b> — Candle ke lower wick me sabse badi selling absorb hui (reversal/hold).<br>
-        13. <code>▼ ASK ABS Banner (Top)</code>: <b>🔴 BEARISH</b> — Candle ke upper wick me sabse badi buying absorb hui (rejection/cap).<br><br>
-        <b>[B] VALUE AREA, POC &amp; MAGNET TOOLS:</b><br>
-        14. <code>POC (Yellow Box)</code>: <b>⚪ PIVOT</b> — Price POC ke upar = <b>🟢 Bullish Support</b> | Price POC ke niche = <b>🔴 Bearish Resistance</b>.<br>
-        15. <code>POC Stepping (Migration)</code>: <b>POC Up (&uarr;) = 🟢 BULLISH</b> | <b>POC Down (&darr;) = 🔴 BEARISH</b>.<br>
-        16. <code>VAH (Value Area High)</code>: <b>Price &gt; VAH = 🟢 BULLISH BREAKOUT</b> | <b>Reject at VAH = 🔴 BEARISH</b>.<br>
-        17. <code>VAL (Value Area Low)</code>: <b>Price &lt; VAL = 🔴 BEARISH BREAKDOWN</b> | <b>Bounce at VAL = 🟢 BULLISH</b>.<br>
-        18. <code>🟡 nPOC (Untouched POC)</code>: <b>🧲 MAGNET</b> — Price ke upar = <b>🟢 Bullish Target</b> | Price ke niche = <b>🔴 Bearish Target</b>.<br>
-        19. <code>🎯 UB-HIGH (Unfinished High)</code>: <b>🟢 BULLISH MAGNET</b> — Candle high par adhura auction, price sweep karne upar aayega.<br>
-        20. <code>🎯 UB-LOW (Unfinished Low)</code>: <b>🔴 BEARISH MAGNET</b> — Candle low par adhura auction, price sweep karne niche aayega.<br><br>
-        <b>[C] CANDLE PILL, DELTA, CVD &amp; TRAP TOOLS:</b><br>
-        21. <code>&Delta; (Candle Delta)</code>: <b>+&Delta; with Green Close = 🟢 BULLISH</b> | <b>&minus;&Delta; with Red Close = 🔴 BEARISH</b> | <b>+&Delta; with Red Close = 🔴 Ask Absorption</b> | <b>&minus;&Delta; with Green Close = 🟢 Bid Absorption</b>.<br>
-        22. <code>CVD (Cumulative Vol Delta)</code>: <b>Positive &amp; Rising = 🟢 BULLISH</b> | <b>Negative &amp; Falling = 🔴 BEARISH</b>.<br>
-        23. <code>RVOL (Relative Volume)</code>: <b>&ge;1.2x = ⚡ REAL FUEL</b> | <b>&lt;0.65x = ⚪ SIDEWAYS RETAIL NOISE (Skip)</b>.<br>
-        24. <code>P&Delta; (10s+ Pulling Delta = BP &minus; AP)</code>: <b>Negative P&Delta; + Price Up = 🟢 BULLISH (Ask Spoof Pulled)</b> | <b>Positive P&Delta; + Price Down = 🔴 BEARISH (Bid Spoof Pulled)</b>.<br>
-        25. <code>🎯 SSL-SWEEP</code>: <b>🟢 BULLISH REVERSAL</b> — Swing Low ke retail SLs khakar price wapas range me upar close hua.<br>
-        26. <code>🎯 BSL-SWEEP</code>: <b>🔴 BEARISH REVERSAL</b> — Swing High ke retail SLs khakar price wapas range me niche close hua.<br>
-        27. <code>⚠️ FAKE-ASK WALL PULLED</code>: <b>🟢 BULLISH BREAKOUT</b> — Heavy Ask wall pull + Green expansion.<br>
-        28. <code>⚠️ FAKE-BID WALL PULLED</code>: <b>🔴 BEARISH DUMP</b> — Heavy Bid wall pull + Red breakdown.<br>
-        29. <code>🛡️ SOLID-BID WALL</code>: <b>🟢 BULLISH HOLD</b> — Heavy selling absorbed at Bid with low pull.<br>
-        30. <code>🛡️ SOLID-ASK WALL</code>: <b>🔴 BEARISH CAP</b> — Heavy buying absorbed at Ask with low pull.<br><br>
-        <b>[D] SMT RADAR &amp; BATTLE DOM TOOLS:</b><br>
-        31. <code>🔗 SMT Radar</code>: <b>🚨 BULL SMT = 🟢 BULLISH</b> | <b>🚨 BEAR SMT = 🔴 BEARISH</b> | <b>SYNCED = ⚪ NEUTRAL</b>.<br>
-        32. <code>DOM Real Exec (B vs S)</code>: <b>Buy Exec &gt; Sell Exec = 🟢 BULLISH</b> | <b>Sell Exec &gt; Buy Exec = 🔴 BEARISH</b>.<br>
-        33. <code>DOM Near Resting Wall</code>: <b>Bid Rest &gt; Ask Rest = 🟢 BULLISH SUPPORT</b> | <b>Ask Rest &gt; Bid Rest = 🔴 BEARISH RESISTANCE</b>.<br>
-        34. <code>DOM 🛡️ABS vs 🛡️CAP</code>: <b>🛡️ABS = 🟢 BULLISH LEVEL HOLD</b> | <b>🛡️CAP = 🔴 BEARISH LEVEL REJECTION</b>.<br>
-        35. <code>Macro Efficiency</code>: <b>&lt;0.15 = ⚪ SIDEWAYS ROTATIONAL CHOP</b> | <b>&ge;0.20 = ⚡ TRENDING DISPLACEMENT</b>.
+        <h4 style="color:#ff9100;">3. TRUE BEHAVIORAL WHALE DETECTION (ABSORPTION STICKING vs DISPLACEMENT SWEEP)</h4>
+        • <b>Passive Whale (Absorption Sticking):</b> Jab ek 3-tick cluster me retail lagatar market orders maare, volume badhe, par price wahi stuck rahe aur wall pull na ho = <b>Passive Whale Absorbing Retail!</b><br>
+        • <b>Aggressive Whale (Displacement Sweep):</b> Jab bade chunks ke sath price tezi se steps sweep kare = <b>Aggressive Whale Displacement!</b>
     </div>
 </div>
 
@@ -2044,7 +2070,7 @@ def home():
 <!-- ==================== START DEMO BOT UI ==================== -->
 <div id="paperModal" style="display:none; position:fixed; inset:36px 3%; background:rgba(11,14,22,0.98); border:1px solid #ffd740; border-radius:6px; z-index:999; padding:14px 18px; overflow-y:auto; color:#d1d4dc; font-size:12px; line-height:1.5; box-shadow:0 12px 40px #000; touch-action:pan-y;">
     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; border-bottom:1px solid #ffd740; padding-bottom:8px; margin-bottom:12px; position:sticky; top:0; background:#0b0e16; z-index:2;">
-        <b style="color:#ffd740; font-size:14px;">🎯 24/7 SERVER-SIDE $10 AUTO-TESTER (PC BAND HONE PAR BHI CHALEGA)</b>
+        <b style="color:#ffd740; font-size:14px;">🎯 24/7 SERVER-SIDE $10 AUTO-TESTER (POST-ENTRY TICK VERIFIED)</b>
         <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
             <select id="pBotSym" onchange="updatePaperConfig()" style="background:#1a2030;color:#00e5ff;border:1px solid #00e5ff;">
                 <option value="BTCUSDT">Test: BTCUSDT</option>
@@ -2165,7 +2191,7 @@ function renderServerPaperUI(st) {
             const cur = livePx || p.entry;
             const notional = p.margin * p.leverage;
             const move = p.side === 'LONG' ? ((cur - p.entry) / p.entry) : ((p.entry - cur) / p.entry);
-            const uPnl = (notional * move) - (notional * 0.0007);
+            const uPnl = (notional * move) - (notional * 0.0012);
             const uCol = uPnl >= 0 ? '#00e676' : '#ff5252';
             const sCol = p.side === 'LONG' ? '#00e676' : '#ff5252';
 
@@ -2208,7 +2234,7 @@ function renderServerPaperUI(st) {
                     <span style="color:#ffd740;">Win Rate: <b>${wr}%</b></span>
                 </div>
                 ${actBox}
-                <div style="margin-top:6px;font-weight:bold;color:#90a4ae;font-size:11px;">📜 24H Trade Log (0.07% Fee Deducted):</div>
+                <div style="margin-top:6px;font-weight:bold;color:#90a4ae;font-size:11px;">📜 24H Trade Log (0.12% Fee+Slippage Deducted):</div>
                 <div style="max-height:210px;overflow-y:auto;margin-top:4px;">${logs}</div>
             </div>`;
     };
@@ -2635,10 +2661,22 @@ function fmt(v) {
     return v.toFixed(2);
 }
 
-// Strictly clips to actual candle High-Low + de-flickers raw pulls so 0|0 ghost rows never appear!
-// Preserves BOTH Traded Levels AND 10s+ Aged Pull Levels + Exact Tick-Level Whale vs Retail Volumes!
-// Preserves Traded Levels + 10s+ Aged Pull Levels + Tick-Level Whale vs Retail + 3-Row Cluster Neighborhood!
+// Zero-CPU Cached groupFootprint for smooth P4 2GB RAM rendering
 function groupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench) {
+    if (fpRaw && typeof fpRaw === 'object') {
+        const cacheKey = `${effStep.toFixed(6)}_${low}_${high}_${closePx}_${Math.round(liveRestBench || 0)}`;
+        if (fpRaw._cacheKey === cacheKey && fpRaw._cachedOut) {
+            return fpRaw._cachedOut;
+        }
+        const res = _computeGroupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench);
+        fpRaw._cacheKey = cacheKey;
+        fpRaw._cachedOut = res;
+        return res;
+    }
+    return _computeGroupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench);
+}
+
+function _computeGroupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench) {
     const map = new Map();
     const arr = Array.isArray(fpRaw) ? fpRaw : Object.values(fpRaw || {});
     arr.forEach(l => {
@@ -2758,13 +2796,11 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         const lowerSwingTop = c.low + cSpan * 0.42;
         const upperSwingBot = c.high - cSpan * 0.42;
 
-        // Evaluate 3-Row Sliding Clusters inside each candle's swing so Diagonal/Arc/Triangle absorption is caught!
         for (let i = 0; i < fpGrouped.length; i++) {
             const l = fpGrouped[i];
             const sv = l.sell || 0, bv = l.buy || 0, tv = l.volume || 0;
             const bp = l.bid_pulled || 0, ap = l.ask_pulled || 0;
 
-            // 3-Row Cluster Sum (i-1, i, i+1)
             let clusSell = sv, clusBuy = bv;
             if (i > 0 && Math.abs(fpGrouped[i - 1].price - l.price) <= effStep * 1.5) {
                 clusSell += (fpGrouped[i - 1].sell || 0);
@@ -2788,23 +2824,22 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
                 macroAskAbsorbs++;
             }
 
+            // Behavioral Whale: Either Passive Absorption Sticking OR Aggressive Displacement Chunk
             const lt = Math.max(l.trades || 1, 1);
             const lotRatio = (tv / lt) / baselineLotSize;
-            const hasTickWhale = (l.whale_buy || 0) + (l.whale_sell || 0) > 0;
-            if (hasTickWhale || (tv >= Math.max(cAvgV * 1.15, heavyLvlBenchmark * 0.50) && ((lotRatio >= 2.8 && lt <= 48) || lotRatio >= 4.5))) {
+            const hasBehavioralWhale = (l.whale_buy || 0) + (l.whale_sell || 0) > 0;
+            if (hasBehavioralWhale || (tv >= Math.max(cAvgV * 1.35, heavyLvlBenchmark * 0.65) && lotRatio >= 3.2)) {
                 if ((l.whale_buy || bv) > (l.whale_sell || sv)) whaleBuyLots++;
                 else whaleSellLots++;
             }
         }
     });
 
-    const macroSpan = Math.max(macroHigh - macroLow, rawStep);
     const netPriceMove = last.close - first.open;
     const efficiency = Math.abs(netPriceMove) / Math.max(sumCandleRanges, rawStep);
     const macroPullDelta = macroBidPulled - macroAskPulled;
     const netWhaleVolDelta = sessWhaleBuyVol - sessWhaleSellVol;
 
-    // Hidden Institutional Buildup Score (Works EVEN WHEN PRICE IS IN A SIDEWAYS/DIAGONAL/TRIANGLE/ARC CLUSTER!)
     let instBuildupPts = 0;
     let macroNotes = [];
 
@@ -2852,35 +2887,32 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
     const vTitle = document.getElementById('masterVerdictTitle');
     const vReasons = document.getElementById('masterVerdictReasons');
     const netMacro = instBuildupPts;
-    const isCoilingCluster = efficiency < 0.22; // Price is rotating inside a Range, Channel, Triangle, or Arc!
+    const isCoilingCluster = efficiency < 0.22;
 
     if (isCoilingCluster && Math.abs(netMacro) >= 18) {
-        const prob = Math.min(96, Math.round(56 + (Math.abs(netMacro) / 95) * 40));
         if (netMacro > 0) {
             vBox.style.background = 'rgba(0, 229, 255, 0.18)';
             vBox.style.borderColor = '#00e5ff';
             vTitle.style.color = '#00e5ff';
-            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: INST ACCUMULATING LONG (${prob}% PROB) ➔ EXPECT LOW-SWEEP OR UPSIDE BREAK!`;
+            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: INST ACCUMULATING LONG (Score:+${netMacro}) ➔ EXPECT LOW-SWEEP OR UPSIDE BREAK!`;
         } else {
             vBox.style.background = 'rgba(255, 145, 0, 0.20)';
             vBox.style.borderColor = '#ff9100';
             vTitle.style.color = '#ffab00';
-            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: INST DISTRIBUTING SHORT (${prob}% PROB) ➔ EXPECT HIGH-SWEEP OR DOWNSIDE BREAK!`;
+            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: INST DISTRIBUTING SHORT (Score:${netMacro}) ➔ EXPECT HIGH-SWEEP OR DOWNSIDE BREAK!`;
         }
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
-    } else if (netMacro >= 20) {
-        const conf = Math.min(97, Math.round(54 + (netMacro / 100) * 43));
+    } else if (netMacro >= 22) {
         vBox.style.background = 'rgba(0, 200, 83, 0.18)';
         vBox.style.borderColor = '#00e676';
         vTitle.style.color = '#00e676';
-        vTitle.innerText = `🟢 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BULLISH EXPANSION (${conf}%) — LONG BIAS`;
+        vTitle.innerText = `🟢 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BULLISH CAMPAIGN (Score:+${netMacro}) — LONG BIAS`;
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
-    } else if (netMacro <= -20) {
-        const conf = Math.min(97, Math.round(54 + (Math.abs(netMacro) / 100) * 43));
+    } else if (netMacro <= -22) {
         vBox.style.background = 'rgba(255, 23, 68, 0.18)';
         vBox.style.borderColor = '#ff5252';
         vTitle.style.color = '#ff5252';
-        vTitle.innerText = `🔴 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BEARISH EXPANSION (${conf}%) — SHORT BIAS`;
+        vTitle.innerText = `🔴 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BEARISH CAMPAIGN (Score:${netMacro}) — SHORT BIAS`;
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     } else {
         vBox.style.background = 'rgba(38, 50, 56, 0.85)';
@@ -3198,7 +3230,6 @@ function drawAll() {
 
             if (totV <= 0 && bPull <= 0 && aPull <= 0) return;
 
-            // 3-Row Sliding Cluster Calculation (Captures multi-tick cluster stopping!)
             let clusSell = sellV, clusBuy = buyV;
             if (rowIdx > 0 && Math.abs(fp[rowIdx - 1].price - l.price) <= effStep * 1.5) {
                 clusSell += (fp[rowIdx - 1].sell || 0);
@@ -3218,19 +3249,12 @@ function drawAll() {
             const wBuy = l.whale_buy || 0;
             const wSell = l.whale_sell || 0;
 
-            const isWhaleLot = (wBuy + wSell > 0) || (totV >= Math.max(avgV * 1.15, heavyLvlBenchmark * 0.50) && ((lotRatio >= 2.8 && trd <= 48) || lotRatio >= 4.5));
-            if (isWhaleLot) {
-                if ((wBuy > 0 || wSell > 0) ? (wBuy > wSell) : (buyV > sellV)) whaleBuyCount++;
-                else whaleSellCount++;
-            }
-
             const lvlPullDelta = bPull - aPull;
             const bPullPct = bPull > 0 ? Math.round((bPull / (bPull + sellV)) * 100) : 0;
             const aPullPct = aPull > 0 ? Math.round((aPull / (aPull + buyV)) * 100) : 0;
             const bAbsPct = totV > 0 ? Math.round((sellV / totV) * 100) : 0;
             const aAbsPct = totV > 0 ? Math.round((buyV / totV) * 100) : 0;
 
-            // Cluster-Aware Absorption: Catches single-level OR 3-row cluster stopping where price rotates away!
             const isStealthChurnLvl = clusTot >= Math.max(avgV * 2.2, heavyLvlBenchmark * 0.90) && clusBPct >= 42 && clusAPct >= 42;
             const inBidCluster = l.price <= lowerClusterTop;
             const bidClusterHeld = c.close > l.price + effStep * 0.4 && (c.close >= c.open || closePos >= 0.42);
@@ -3250,6 +3274,16 @@ function drawAll() {
                 if (!topSummary || buyV > topSummary.val) topSummary = { type: 'ABS', val: buyV, pct: Math.max(aAbsPct, clusAPct) };
             } else if (inAskCluster && askClusterHeld && buyV >= effectiveNormAbsCut && aAbsPct >= 52) {
                 askAbsType = 'norm';
+            }
+
+            // Behavioral Whale Classification: Passive Absorption Whale OR Aggressive Displacement Whale
+            const isPassiveAbsWhale = (bidAbsType === 'heavy' || askAbsType === 'heavy');
+            const isDisplacementWhale = (wBuy + wSell > 0) || (totV >= Math.max(avgV * 1.35, heavyLvlBenchmark * 0.65) && lotRatio >= 3.2);
+            const isWhaleLot = isPassiveAbsWhale || isDisplacementWhale;
+
+            if (isWhaleLot) {
+                if (bidAbsType === 'heavy' || ((wBuy > 0 || wSell > 0) ? (wBuy > wSell) : (buyV > sellV))) whaleBuyCount++;
+                else whaleSellCount++;
             }
 
             let bidPullType = null;
@@ -3307,7 +3341,7 @@ function drawAll() {
                     wBuy, wSell, rBuy: l.retail_buy || 0, rSell: l.retail_sell || 0,
                     bPull, aPull, lvlPullDelta,
                     bPullPct, aPullPct, bAbsPct, aAbsPct,
-                    trades: trd, lvlLotSize, lotRatio, isWhaleLot
+                    trades: trd, lvlLotSize, lotRatio, isWhaleLot, isPassiveAbsWhale
                 };
                 ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 1;
@@ -3316,8 +3350,8 @@ function drawAll() {
 
             if (canPrint) {
                 ctx.textBaseline = 'middle';
-                const whaleSellMark = (proViewMode && isWhaleLot && (wSell > wBuy || (wSell === 0 && sellV >= buyV))) ? '◆' : '';
-                const whaleBuyMark = (proViewMode && isWhaleLot && (wBuy > wSell || (wBuy === 0 && buyV > sellV))) ? '◆' : '';
+                const whaleSellMark = (proViewMode && isWhaleLot && (askAbsType === 'heavy' || wSell > wBuy || (wSell === 0 && sellV >= buyV))) ? '◆' : '';
+                const whaleBuyMark = (proViewMode && isWhaleLot && (bidAbsType === 'heavy' || wBuy > wSell || (wBuy === 0 && buyV > sellV))) ? '◆' : '';
 
                 ctx.font = (sellImb || isPoc || whaleSellMark) ? 'bold 9.5px monospace' : '9.5px monospace';
                 ctx.fillStyle = whaleSellMark ? '#ffd700' : (sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
@@ -3458,12 +3492,10 @@ function drawAll() {
             const whalePrefix = totalWhalesInCandle > 0 ? '◆' : '';
 
             if (cNet >= 20) {
-                const cPct = Math.min(97, Math.round(52 + (cNet / 110) * 45));
-                candleDecision = `${whalePrefix}🟢 BUYERS WIN (${cPct}%)`;
+                candleDecision = `${whalePrefix}🟢 BUYERS WIN (+${cNet})`;
                 decisionCol = '#00e676';
             } else if (cNet <= -20) {
-                const cPct = Math.min(97, Math.round(52 + (Math.abs(cNet) / 110) * 45));
-                candleDecision = `${whalePrefix}🔴 SELLERS WIN (${cPct}%)`;
+                candleDecision = `${whalePrefix}🔴 SELLERS WIN (${cNet})`;
                 decisionCol = '#ff5252';
             } else {
                 candleDecision = `${whalePrefix}⚖️ CLUSTER BUILDUP`;
@@ -3552,7 +3584,7 @@ function drawAll() {
         ctx.fillStyle = '#ff80ab';
         ctx.fillText(`10sBPull:${fmt(h.bPull)}(${h.bPullPct}%) | 10sAPull:${fmt(h.aPull)}(${h.aPullPct}%) | PΔ:${h.lvlPullDelta >= 0 ? '+' : ''}${fmt(h.lvlPullDelta)}`, 12, 47);
         ctx.fillStyle = h.isWhaleLot ? '#ffd700' : '#b0bec5';
-        const playerTag = h.isWhaleLot ? '🐋 WHALE BLOCK!' : (h.lotRatio < 1.2 ? '🐑 RETAIL / BOT SPLIT' : '⚡ STANDARD FLOW');
+        const playerTag = h.isPassiveAbsWhale ? '🛡️ PASSIVE ABSORB WHALE!' : (h.isWhaleLot ? '🐋 DISPLACEMENT WHALE!' : (h.lotRatio < 1.2 ? '🐑 RETAIL / BOT SPLIT' : '⚡ STANDARD FLOW'));
         ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 61);
     }
 
@@ -3578,7 +3610,7 @@ function drawAll() {
     }
 
     // =========================================================================
-    // MULTI-ROW CLUSTER DOM + DYNAMIC TIMEFRAME PRE-BREAKOUT PREDICTOR (CRASH-PROOF)
+    // MULTI-ROW CLUSTER DOM + IRON-ANCHOR VERDICT ENGINE (CRASH-PROOF)
     // =========================================================================
     try {
         const domStep = Math.max(effStep || rawStep || 1.0, 1e-6);
@@ -3711,7 +3743,6 @@ function drawAll() {
             }
         });
 
-        // Clamp visible DOM bucket span to max 160 rows so loop never freezes on huge candle ranges!
         const rawMinB = Math.floor((minActivePrice - domStep * 5) / domStep) * domStep;
         const rawMaxB = Math.ceil((maxActivePrice + domStep * 5) / domStep) * domStep;
         const maxSpanSteps = domStep * 80;
@@ -3786,72 +3817,52 @@ function drawAll() {
             if (candles[k].low < prev5Low) prev5Low = candles[k].low;
         }
 
-        const bullSweepReject = lastC.low < prev5Low && lastC.close > prev5Low && (closePos >= 0.50 || rBidAbs > 0 || totIceBid > 0);
-        const bearSweepReject = lastC.high > prev5High && lastC.close < prev5High && (closePos <= 0.50 || rAskAbs > 0 || totIceAsk > 0);
+        // =========================================================================
+        // IRON-ANCHOR INSTITUTIONAL VERDICT ENGINE (FOOTPRINT + LIVE DOM SYNERGY)
+        // =========================================================================
+        const closedCandles = candles.length > 2 ? candles.slice(0, -1) : candles;
+        const closed6 = closedCandles.slice(-6);
+        const avgCandleRange = closed6.reduce((s, x) => s + Math.max(x.high - x.low, rawStep), 0) / Math.max(1, closed6.length);
 
-        const instBullDrive = (totExecBuy > totExecSell * 1.15 || totWhaleBuy > totWhaleSell * 1.20)
-            && lastC.close > lastC.open && closePos >= 0.58 && lastC.close >= curPoc && !bearSweepReject;
+        let anchorBullScore = 0, anchorBearScore = 0;
+        let anchorSupportPx = null, anchorResistPx = null;
 
-        const instBearDrive = (totExecSell > totExecBuy * 1.15 || totWhaleSell > totWhaleBuy * 1.20)
-            && lastC.close < lastC.open && closePos <= 0.42 && lastC.close <= curPoc && !bullSweepReject;
+        closed6.forEach(cc => {
+            const ccRange = Math.max(cc.high - cc.low, rawStep * 0.5);
+            const ccClosePos = (cc.close - cc.low) / ccRange;
+            const ccWBuy = cc.whale_buy_vol || 0;
+            const ccWSell = cc.whale_sell_vol || 0;
+            const ccDelta = cc.delta || 0;
 
-        const clusterLongBuildup = (
-            (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25)
-            && (totWhaleBuy >= totWhaleSell || domPullDelta < -effCellBench * 0.25 || nearBidRest > nearAskRest * 1.25)
-        );
-        const clusterShortBuildup = (
-            (rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25)
-            && (totWhaleSell >= totWhaleBuy || domPullDelta > effCellBench * 0.25 || nearAskRest > nearBidRest * 1.25)
-        );
+            if (ccDelta < -effCellBench * 0.3 && ccClosePos >= 0.55) {
+                anchorBullScore += 18;
+                anchorSupportPx = anchorSupportPx === null ? cc.low : Math.min(anchorSupportPx, cc.low);
+            } else if (ccDelta > effCellBench * 0.3 && ccClosePos <= 0.45) {
+                anchorBearScore += 18;
+                anchorResistPx = anchorResistPx === null ? cc.high : Math.max(anchorResistPx, cc.high);
+            }
 
-        const retailBuysTrapped = !instBullDrive && (
-            bearSweepReject
-            || (totRetailBuy > totWhaleBuy * 1.15 && (totIceAsk > effCellBench * 0.35 || rAskAbs > rBidAbs) && closePos <= 0.52)
-            || (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.44)
-            || (prevC.delta > effCellBench * 0.35 && lastC.close < prevPoc - domStep * 0.5 && lastC.close < lastC.open)
-        );
-
-        const retailSellsTrapped = !instBearDrive && (
-            bullSweepReject
-            || (totRetailSell > totWhaleSell * 1.15 && (totIceBid > effCellBench * 0.35 || rBidAbs > rAskAbs) && closePos >= 0.48)
-            || (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.56)
-            || (prevC.delta < -effCellBench * 0.35 && lastC.close > prevPoc + domStep * 0.5 && lastC.close > lastC.open)
-        );
-
-        let battleWinner = `⚖️ [${tf.toUpperCase()}] TWO-WAY CLUSTER FIGHT (MONITORING BUILDUP)`;
-        let bwCol = '#ffd700';
-        if (bullSweepReject) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] SSL FAKEOUT SWEEP + BID CLUSTER ABSORBED ➔ LONG!`;
-            bwCol = '#00e5ff';
-        } else if (bearSweepReject) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] BSL FAKEOUT SWEEP + ASK CLUSTER ABSORBED ➔ SHORT!`;
-            bwCol = '#ff9100';
-        } else if (instBullDrive) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] GENUINE BULL BREAKOUT (🐋W.Buy:${fmt(totWhaleBuy)} + AskPulled:${fmt(totPullA)})`;
-            bwCol = '#00e676';
-        } else if (instBearDrive) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] GENUINE BEAR BREAKDOWN (🐋W.Sell:${fmt(totWhaleSell)} + BidPulled:${fmt(totPullB)})`;
-            bwCol = '#ff1744';
-        } else if (clusterLongBuildup || retailSellsTrapped) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] CLUSTER LONG ACCUMULATION (BidAbs:${rBidAbs} 🧊Ice:${fmt(totIceBid)}) ➔ UP PROB HIGH`;
-            bwCol = '#00e5ff';
-        } else if (clusterShortBuildup || retailBuysTrapped) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] CLUSTER SHORT DISTRIBUTION (AskAbs:${rAskAbs} 🧊Ice:${fmt(totIceAsk)}) ➔ DN PROB HIGH`;
-            bwCol = '#ff9100';
-        }
-
-        let recentWhaleB = 0, recentWhaleS = 0;
-        candles.slice(-3).forEach(rc => {
-            const gList = groupFootprint(rc.footprint, rc.low, rc.high, domStep, rc.close, liveRestBench);
-            gList.forEach(gl => {
-                const trd = Math.max(gl.trades || 1, 1);
-                const hasTickW = (gl.whale_buy || 0) + (gl.whale_sell || 0) > 0;
-                if (hasTickW || (gl.volume >= effCellBench * 1.20 && ((gl.volume / trd) / baselineLotSize) >= 2.8)) {
-                    if ((gl.whale_buy || gl.buy) > (gl.whale_sell || gl.sell) && rc.close >= gl.price - domStep * 0.5) recentWhaleB++;
-                    else if ((gl.whale_sell || gl.sell) >= (gl.whale_buy || gl.buy) && rc.close <= gl.price + domStep * 0.5) recentWhaleS++;
-                }
-            });
+            if (ccWBuy > ccWSell * 1.35 && ccClosePos >= 0.50) {
+                anchorBullScore += 14;
+                if (cc.poc) anchorSupportPx = anchorSupportPx === null ? cc.poc : Math.min(anchorSupportPx, cc.poc);
+            } else if (ccWSell > ccWBuy * 1.35 && ccClosePos <= 0.50) {
+                anchorBearScore += 14;
+                if (cc.poc) anchorResistPx = anchorResistPx === null ? cc.poc : Math.max(anchorResistPx, cc.poc);
+            }
         });
+
+        if (rBidAbs > rAskAbs) anchorBullScore += Math.min(26, 12 + (rBidAbs - rAskAbs) * 5);
+        else if (rAskAbs > rBidAbs) anchorBearScore += Math.min(26, 12 + (rAskAbs - rBidAbs) * 5);
+
+        if (totIceBid > totIceAsk * 1.3) anchorBullScore += 15;
+        else if (totIceAsk > totIceBid * 1.3) anchorBearScore += 15;
+
+        if (sPocUp > sPocDn) anchorBullScore += 14;
+        else if (sPocDn > sPocUp) anchorBearScore += 14;
+
+        const isBigExpansionCandle = cRange >= avgCandleRange * 1.55;
+        const bullSweepReject = lastC.low < prev5Low && lastC.close > prev5Low && (closePos >= 0.48 || rBidAbs > 0 || totIceBid > 0);
+        const bearSweepReject = lastC.high > prev5High && lastC.close < prev5High && (closePos <= 0.52 || rAskAbs > 0 || totIceAsk > 0);
 
         const recent20 = candles.slice(-20);
         const r20Hi = Math.max(...recent20.map(x => x.high));
@@ -3859,99 +3870,160 @@ function drawAll() {
         const r20Span = Math.max(r20Hi - r20Lo, rawStep);
         const rangeLocation = (lastC.close - r20Lo) / r20Span;
 
-        let scalpPts = 0;
-        let scalpFactors = [];
+        const isBullExhaustionTrap = (
+            bearSweepReject
+            || (lastC.close > lastC.open && isBigExpansionCandle && rangeLocation >= 0.78 && (rAskAbs > 0 || totIceAsk > effCellBench * 0.4))
+            || (lastC.close > lastC.open && anchorBearScore > anchorBullScore + 20 && lastC.close < (anchorResistPx || r20Hi))
+            || (lastC.delta > effCellBench * 0.45 && closePos <= 0.46)
+        );
 
-        if (instBullDrive) { scalpPts += 28; scalpFactors.push('TrueBullBreak'); }
-        else if (instBearDrive) { scalpPts -= 28; scalpFactors.push('TrueBearBreak'); }
-        else if (retailBuysTrapped || clusterShortBuildup) { scalpPts -= 25; scalpFactors.push('ClusterShortBuildup'); }
-        else if (retailSellsTrapped || clusterLongBuildup) { scalpPts += 25; scalpFactors.push('ClusterLongBuildup'); }
+        const isBearExhaustionTrap = (
+            bullSweepReject
+            || (lastC.close < lastC.open && isBigExpansionCandle && rangeLocation <= 0.22 && (rBidAbs > 0 || totIceBid > effCellBench * 0.4))
+            || (lastC.close < lastC.open && anchorBullScore > anchorBearScore + 20 && lastC.close > (anchorSupportPx || r20Lo))
+            || (lastC.delta < -effCellBench * 0.45 && closePos >= 0.54)
+        );
 
-        if ((rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) && !instBearDrive) {
-            scalpPts += Math.min(24, 14 + (rBidAbs - rAskAbs) * 4);
-            scalpFactors.push(`ClusterBidAbs(${rBidAbs}v${rAskAbs})`);
-        } else if ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) && !instBullDrive) {
-            scalpPts -= Math.min(24, 14 + (rAskAbs - rBidAbs) * 4);
-            scalpFactors.push(`ClusterAskAbs(${rAskAbs}v${rBidAbs})`);
+        const instBullDrive = (
+            !isBullExhaustionTrap
+            && anchorBullScore >= anchorBearScore
+            && (totWhaleBuy > totWhaleSell * 1.20 || domPullDelta < -effCellBench * 0.30)
+            && lastC.close > curPoc && prevC.close >= prevPoc
+            && closePos >= 0.60 && rangeLocation <= 0.82
+        );
+
+        const instBearDrive = (
+            !isBearExhaustionTrap
+            && anchorBearScore >= anchorBullScore
+            && (totWhaleSell > totWhaleBuy * 1.20 || domPullDelta > effCellBench * 0.30)
+            && lastC.close < curPoc && prevC.close <= prevPoc
+            && closePos <= 0.40 && rangeLocation >= 0.18
+        );
+
+        const clusterLongBuildup = (anchorBullScore >= anchorBearScore + 15) && !instBearDrive;
+        const clusterShortBuildup = (anchorBearScore >= anchorBullScore + 15) && !instBullDrive;
+        const retailBuysTrapped = isBullExhaustionTrap;
+        const retailSellsTrapped = isBearExhaustionTrap;
+
+        let battleWinner = `⚖️ [${tf.toUpperCase()}] CHOP / INDUCEMENT ZONE — DO NOT TRADE YET`;
+        let bwCol = '#ffd700';
+
+        if (bullSweepReject) {
+            battleWinner = `🎯 [${tf.toUpperCase()}] SSL STOP-HUNT REJECTED + BID ABSORBED ➔ INSTITUTIONAL LONG TRAP-REVERSAL!`;
+            bwCol = '#00e5ff';
+        } else if (bearSweepReject) {
+            battleWinner = `🎯 [${tf.toUpperCase()}] BSL STOP-HUNT REJECTED + ASK CAPPED ➔ INSTITUTIONAL SHORT TRAP-REVERSAL!`;
+            bwCol = '#ff9100';
+        } else if (lastC.close < lastC.open && isBearExhaustionTrap && clusterLongBuildup) {
+            battleWinner = `🛡️ [${tf.toUpperCase()}] FAKE RED DUMP INTO BID ANCHOR (BidAbs:${rBidAbs}) ➔ DO NOT SHORT, LONG HOLD!`;
+            bwCol = '#00e5ff';
+        } else if (lastC.close > lastC.open && isBullExhaustionTrap && clusterShortBuildup) {
+            battleWinner = `🛡️ [${tf.toUpperCase()}] FAKE GREEN PUMP INTO ASK ANCHOR (AskAbs:${rAskAbs}) ➔ DO NOT BUY, SHORT CAP!`;
+            bwCol = '#ff9100';
+        } else if (instBullDrive) {
+            battleWinner = `🚀 [${tf.toUpperCase()}] CONFIRMED BULL EXPANSION (Anchor+🐋Whale+AskPulled)`;
+            bwCol = '#00e676';
+        } else if (instBearDrive) {
+            battleWinner = `🚀 [${tf.toUpperCase()}] CONFIRMED BEAR EXPANSION (Anchor+🐋Whale+BidPulled)`;
+            bwCol = '#ff1744';
+        } else if (clusterLongBuildup) {
+            battleWinner = `🏦 [${tf.toUpperCase()}] INSTITUTIONAL LONG BASE BUILDING (Wait for Low Sweep / POC Hold)`;
+            bwCol = '#00e5ff';
+        } else if (clusterShortBuildup) {
+            battleWinner = `🏦 [${tf.toUpperCase()}] INSTITUTIONAL SHORT CEILING BUILDING (Wait for High Sweep / POC Reject)`;
+            bwCol = '#ff9100';
         }
 
-        if (domPullDelta < -effCellBench * 0.28) { scalpPts += 18; scalpFactors.push(`AskWallPulled(PΔ${fmt(domPullDelta)})`); }
-        else if (domPullDelta > effCellBench * 0.28) { scalpPts -= 18; scalpFactors.push(`BidWallPulled(PΔ+${fmt(domPullDelta)})`); }
+        let scalpPts = anchorBullScore - anchorBearScore;
+
+        if (domPullDelta < -effCellBench * 0.30) scalpPts += 16;
+        else if (domPullDelta > effCellBench * 0.30) scalpPts -= 16;
 
         const minBookFloor = effCellBench * 1.3;
-        if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) { scalpPts += 12; }
-        else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) { scalpPts -= 12; }
+        if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) scalpPts += 10;
+        else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) scalpPts -= 10;
 
         let deltaState = 'NEU';
-        if (lastC.delta > effCellBench * 0.45 && lastC.close <= lastC.open && closePos <= 0.44) { scalpPts -= 18; deltaState = 'BEAR'; }
-        else if (lastC.delta < -effCellBench * 0.45 && lastC.close >= lastC.open && closePos >= 0.56) { scalpPts += 18; deltaState = 'BULL'; }
-        else if (lastC.delta > effCellBench * 0.30 && lastC.close > lastC.open && closePos >= 0.56) { scalpPts += 15; deltaState = 'BULL'; }
-        else if (lastC.delta < -effCellBench * 0.30 && lastC.close < lastC.open && closePos <= 0.44) { scalpPts -= 15; deltaState = 'BEAR'; }
+        if (isBearExhaustionTrap) { scalpPts += 20; deltaState = 'BULL'; }
+        else if (isBullExhaustionTrap) { scalpPts -= 20; deltaState = 'BEAR'; }
+        else if (instBullDrive) { scalpPts += 14; deltaState = 'BULL'; }
+        else if (instBearDrive) { scalpPts -= 14; deltaState = 'BEAR'; }
 
         let whaleVsRetailState = 'NEU';
-        if ((totWhaleBuy > totWhaleSell * 1.20 || recentWhaleB > recentWhaleS) && !instBearDrive) { scalpPts += 18; whaleVsRetailState = 'BULL'; }
-        else if ((totWhaleSell > totWhaleBuy * 1.20 || recentWhaleS > recentWhaleB) && !instBullDrive) { scalpPts -= 18; whaleVsRetailState = 'BEAR'; }
+        if (totWhaleBuy > totWhaleSell * 1.25 && !instBearDrive) { scalpPts += 16; whaleVsRetailState = 'BULL'; }
+        else if (totWhaleSell > totWhaleBuy * 1.25 && !instBullDrive) { scalpPts -= 16; whaleVsRetailState = 'BEAR'; }
 
         let locState = 'NEU';
-        if (lastC.close > curPoc && (lastC.close >= prevPoc || clusterLongBuildup)) { scalpPts += 14; locState = 'BULL'; }
-        else if (lastC.close < curPoc && (lastC.close <= prevPoc || clusterShortBuildup)) { scalpPts -= 14; locState = 'BEAR'; }
-
-        if (bullSweepReject) scalpPts += 22;
-        else if (bearSweepReject) scalpPts -= 22;
-
-        if (sPocUp > sPocDn) scalpPts += 12;
-        else if (sPocDn > sPocUp) scalpPts -= 12;
+        if (lastC.close >= curPoc && prevC.close >= prevPoc && !isBullExhaustionTrap) { scalpPts += 12; locState = 'BULL'; }
+        else if (lastC.close <= curPoc && prevC.close <= prevPoc && !isBearExhaustionTrap) { scalpPts -= 12; locState = 'BEAR'; }
 
         if (smtState.bias === 1) scalpPts += 10;
         else if (smtState.bias === -1) scalpPts -= 10;
 
-        if (instBearDrive && lastC.close < curPoc && lastC.close < prevPoc && !bullSweepReject && scalpPts > 0) scalpPts = -22;
-        else if (instBullDrive && lastC.close > curPoc && lastC.close > prevPoc && !bearSweepReject && scalpPts < 0) scalpPts = 22;
-
-        const scalpProb = Math.min(96, Math.round(50 + (Math.abs(scalpPts) / 110) * 46));
-        let scalpFinalTxt = `⚪ ${tf.toUpperCase()} EQUILIBRIUM`;
-        let scalpFinalCol = '#ffca28';
-        if (scalpPts >= 48) { scalpFinalTxt = `🟢 STRONG LONG (${scalpProb}%)`; scalpFinalCol = '#00e676'; }
-        else if (scalpPts >= 24) { scalpFinalTxt = `🟢 LONG BUILDUP (${scalpProb}%)`; scalpFinalCol = '#69f0ae'; }
-        else if (scalpPts >= 12) { scalpFinalTxt = `🟡 LEAN LONG (${scalpProb}%)`; scalpFinalCol = '#00e5ff'; }
-        else if (scalpPts <= -48) { scalpFinalTxt = `🔴 STRONG SHORT (${scalpProb}%)`; scalpFinalCol = '#ff1744'; }
-        else if (scalpPts <= -24) { scalpFinalTxt = `🔴 SHORT BUILDUP (${scalpProb}%)`; scalpFinalCol = '#ff5252'; }
-        else if (scalpPts <= -12) { scalpFinalTxt = `🟠 LEAN SHORT (${scalpProb}%)`; scalpFinalCol = '#ff9100'; }
-
-        let intraPts = macroInfo ? macroInfo.netMacro : 0;
-        if (macroInfo) {
-            if (sPocUp > sPocDn) intraPts += 14;
-            else if (sPocDn > sPocUp) intraPts -= 14;
-            if (smtState.bias === 1) intraPts += 12;
-            else if (smtState.bias === -1) intraPts -= 12;
+        let chasingWarning = null;
+        if (scalpPts > 0 && rangeLocation >= 0.78 && !bullSweepReject) {
+            scalpPts = Math.min(scalpPts, 18);
+            chasingWarning = '⚠️ AT RANGE HIGH (WAIT PULLBACK)';
+        } else if (scalpPts < 0 && rangeLocation <= 0.22 && !bearSweepReject) {
+            scalpPts = Math.max(scalpPts, -18);
+            chasingWarning = '⚠️ AT RANGE LOW (WAIT BOUNCE)';
         }
 
-        const intraProb = Math.min(96, Math.round(50 + (Math.abs(intraPts) / 110) * 46));
-        let intraFinalTxt = `⚪ ${tf.toUpperCase()} BALANCED`;
-        let intraFinalCol = '#ffca28';
-        if (intraPts >= 48) { intraFinalTxt = `🟢 STRONG LONG (${intraProb}%)`; intraFinalCol = '#00e676'; }
-        else if (intraPts >= 24) { intraFinalTxt = `🟢 ACCUMULATING LONG (${intraProb}%)`; intraFinalCol = '#69f0ae'; }
-        else if (intraPts >= 12) { intraFinalTxt = `🟡 LEAN LONG (${intraProb}%)`; intraFinalCol = '#00e5ff'; }
-        else if (intraPts <= -48) { intraFinalTxt = `🔴 STRONG SHORT (${intraProb}%)`; intraFinalCol = '#ff1744'; }
-        else if (intraPts <= -24) { intraFinalTxt = `🔴 DISTRIBUTING SHORT (${intraProb}%)`; intraFinalCol = '#ff5252'; }
-        else if (intraPts <= -12) { intraFinalTxt = `🟠 LEAN SHORT (${intraProb}%)`; intraFinalCol = '#ff9100'; }
+        const scalpScoreVal = Math.abs(scalpPts);
+        let scalpFinalTxt = `⏳ WAIT / NO CLEAR EDGE`;
+        let scalpFinalCol = '#ffca28';
 
-        const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : ((retailBuysTrapped || clusterShortBuildup) ? 'BEAR' : ((retailSellsTrapped || clusterLongBuildup) ? 'BULL' : 'NEU')));
-        const execVsAbsLbl = instBullDrive ? `BullBreak(B:${fmt(totExecBuy)})` : (instBearDrive ? `BearBreak(S:${fmt(totExecSell)})` : ((retailBuysTrapped || clusterShortBuildup) ? 'ShortClusterBuildup' : ((retailSellsTrapped || clusterLongBuildup) ? 'LongClusterBuildup' : `B:${fmt(totExecBuy)} vs S:${fmt(totExecSell)}`)));
+        if (chasingWarning) {
+            scalpFinalTxt = chasingWarning;
+            scalpFinalCol = '#ffab00';
+        } else if (scalpPts >= 46 && (bullSweepReject || instBullDrive || (clusterLongBuildup && lastC.close >= curPoc))) {
+            scalpFinalTxt = `🟢 CONFIRMED LONG (Score:+${scalpScoreVal})`;
+            scalpFinalCol = '#00e676';
+        } else if (scalpPts >= 22) {
+            scalpFinalTxt = lastC.close < lastC.open
+                ? `🛡️ BULL BASE: RED PULLBACK ABSORBING`
+                : `🟡 LONG BUILDING (WAIT TRIGGER)`;
+            scalpFinalCol = '#00e5ff';
+        } else if (scalpPts <= -46 && (bearSweepReject || instBearDrive || (clusterShortBuildup && lastC.close <= curPoc))) {
+            scalpFinalTxt = `🔴 CONFIRMED SHORT (Score:-${scalpScoreVal})`;
+            scalpFinalCol = '#ff1744';
+        } else if (scalpPts <= -22) {
+            scalpFinalTxt = lastC.close > lastC.open
+                ? `🛡️ BEAR CEILING: GREEN BOUNCE CAPPED`
+                : `🟠 SHORT BUILDING (WAIT TRIGGER)`;
+            scalpFinalCol = '#ff9100';
+        }
+
+        let intraPts = macroInfo ? macroInfo.netMacro : 0;
+        if (sPocUp > sPocDn) intraPts += 14;
+        else if (sPocDn > sPocUp) intraPts -= 14;
+        if (smtState.bias === 1) intraPts += 12;
+        else if (smtState.bias === -1) intraPts -= 12;
+
+        const intraScoreVal = Math.abs(intraPts);
+        let intraFinalTxt = `⏳ ${tf.toUpperCase()} ROTATIONAL RANGE`;
+        let intraFinalCol = '#ffca28';
+        if (intraPts >= 46) { intraFinalTxt = `🟢 MACRO LONG CAMPAIGN (Score:+${intraScoreVal})`; intraFinalCol = '#00e676'; }
+        else if (intraPts >= 22) { intraFinalTxt = `🏦 ACCUMULATING LONG (Score:+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
+        else if (intraPts <= -46) { intraFinalTxt = `🔴 MACRO SHORT CAMPAIGN (Score:-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
+        else if (intraPts <= -22) { intraFinalTxt = `🏦 DISTRIBUTING SHORT (Score:-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
+
+        const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : (clusterLongBuildup ? 'BULL' : (clusterShortBuildup ? 'BEAR' : 'NEU')));
+        const execVsAbsLbl = isBearExhaustionTrap ? 'FakeRedDump(Absorbed🟢)' : (isBullExhaustionTrap ? 'FakeGreenPump(Capped🔴)' : (clusterLongBuildup ? `BullAnchor(+${anchorBullScore})` : (clusterShortBuildup ? `BearAnchor(-${anchorBearScore})` : 'NeutralFight')));
 
         const scalpMeterList = [
-            { name: '1. Cluster Buildup vs Breakout Intent', state: execVsAbsState, val: execVsAbsLbl },
-            { name: '2. Multi-Row Cluster + Iceberg Abs', state: ((rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) && !instBearDrive) ? 'BULL' : (((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) && !instBullDrive) ? 'BEAR' : 'NEU'), val: `BidClus:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskClus:${rAskAbs}(🧊${fmt(totIceAsk)})` },
-            { name: '3. Raw Flash + 10s Spoof Pull (PΔ)', state: domPullDelta < -effCellBench * 0.28 ? 'BULL' : (domPullDelta > effCellBench * 0.28 ? 'BEAR' : 'NEU'), val: `RawPΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}` },
-            { name: '4. 8-Step Cluster Resting Book Depth', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `Bid:${fmt(nearBidRest)} vs Ask:${fmt(nearAskRest)}` },
-            { name: '5. Delta Displacement vs Cluster Cap', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}` },
-            { name: '6. Cluster POC Structure Control', state: locState, val: `Px:${lastC.close.toFixed(dec)} vs POC:${curPoc.toFixed(dec)}` },
-            { name: '7. Tick Whale (🐋) vs Retail (🐑) Flow', state: whaleVsRetailState, val: `🐋W B:${fmt(totWhaleBuy)}/S:${fmt(totWhaleSell)}` },
-            { name: '8. Value Area Zone (VAH/VAL)', state: (lastC.vah != null && lastC.close > lastC.vah) ? 'BULL' : ((lastC.val != null && lastC.close < lastC.val) ? 'BEAR' : 'NEU'), val: `Loc:${Math.round(rangeLocation * 100)}%` },
+            { name: '1. 6-Candle Institutional Anchor vs Trap', state: execVsAbsState, val: execVsAbsLbl },
+            { name: '2. Multi-Row Cluster + Iceberg Abs', state: (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) ? 'BULL' : ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) ? 'BEAR' : 'NEU'), val: `BidClus:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskClus:${rAskAbs}(🧊${fmt(totIceAsk)})` },
+            { name: '3. Raw Flash + 10s Spoof Pull (PΔ)', state: domPullDelta < -effCellBench * 0.30 ? 'BULL' : (domPullDelta > effCellBench * 0.30 ? 'BEAR' : 'NEU'), val: `RawPΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}` },
+            { name: '4. 8-Step Cluster Resting Book Depth', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) ? 'BEAR' : 'NEU'), val: `Bid:${fmt(nearBidRest)} vs Ask:${fmt(nearAskRest)}` },
+            { name: '5. Exhaustion Climax / Delta Trap', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}` },
+            { name: '6. Two-Candle POC Structure Control', state: locState, val: `Px:${lastC.close.toFixed(dec)} vs POC:${curPoc.toFixed(dec)}` },
+            { name: '7. Behavioral Whale (🐋) vs Retail (🐑)', state: whaleVsRetailState, val: `🐋W B:${fmt(totWhaleBuy)}/S:${fmt(totWhaleSell)}` },
+            { name: '8. Range Location Safety (Anti-Chase)', state: rangeLocation <= 0.35 ? 'BULL' : (rangeLocation >= 0.65 ? 'BEAR' : 'NEU'), val: `Loc:${Math.round(rangeLocation * 100)}% (Safe:22-78%)` },
             { name: '9. 4-Candle POC Stepping Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
-            { name: '10. Boundary Fakeout Sweep (BSL/SSL)', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'SSL-Sweep' : (bearSweepReject ? 'BSL-Sweep' : 'None') },
+            { name: '10. Boundary Stop-Hunt Sweep (BSL/SSL)', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'SSL-Sweep🟢' : (bearSweepReject ? 'BSL-Sweep🔴' : 'None') },
             { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
-            { name: '12. RVOL Institutional Participation', state: curRvol >= 0.85 ? (execVsAbsState !== 'NEU' ? execVsAbsState : 'NEU') : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
+            { name: '12. RVOL Institutional Participation', state: curRvol >= 0.85 ? execVsAbsState : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
         ];
 
         const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
@@ -3968,7 +4040,7 @@ function drawAll() {
             { name: '6. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
             { name: '7. Unfinished Business Magnet Draw', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} vs UB-LO:${ubLoCnt}` },
             { name: '8. Untouched nPOC Gravity', state: nakedPocs.filter(n => n.price > lastC.close).length > nakedPocs.filter(n => n.price < lastC.close).length ? 'BULL' : (nakedPocs.filter(n => n.price < lastC.close).length > nakedPocs.filter(n => n.price > lastC.close).length ? 'BEAR' : 'NEU'), val: `nPOCs:${nakedPocs.length}` },
-            { name: '9. Orderbook Macro Depth Support', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) ? 'BEAR' : 'NEU'), val: `B:${fmt(nearBidRest)} vs A:${fmt(nearAskRest)}` },
+            { name: '9. Orderbook Macro Depth Support', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) ? 'BEAR' : 'NEU'), val: `B:${fmt(nearBidRest)} vs A:${fmt(nearAskRest)}` },
             { name: '10. SMT Divergence Alignment', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text }
         ];
 
@@ -4021,6 +4093,8 @@ function drawAll() {
             },
             dom_and_clusters: {
                 battle_verdict: battleWinner,
+                anchor_bull_score: anchorBullScore,
+                anchor_bear_score: anchorBearScore,
                 exec_buy_3c: Math.round(totExecBuy),
                 exec_sell_3c: Math.round(totExecSell),
                 whale_buy_vol: Math.round(totWhaleBuy),
@@ -4294,7 +4368,7 @@ def hello():
 
 @app.route("/api/test")
 def api_test():
-    return jsonify({"status": "ok", "message": "API working", "version": "V3"})
+    return jsonify({"status": "ok", "message": "API working", "version": "V5"})
 
 
 @app.route("/api/db-test")
@@ -4323,7 +4397,7 @@ def api_status():
         }
         return jsonify({
             "status": "ok",
-            "version": "V3",
+            "version": "V5",
             "rolling_hours": 48,
             "symbols": symbol_status,
             "timeframes": list(TIMEFRAMES.keys()),
@@ -4471,8 +4545,6 @@ def liquidity_debug():
         finalize_liquidity_records(symbol)
         state = orderbook[symbol]
         history = [r for r in state["liquidity_history"] if isinstance(r, dict)]
-        trades = list(state["trade_flow_diagnostics"])
-        diagnostics = list(state["match_diagnostics"])
 
         finalized = [r for r in history if r.get("finalized") is True]
         executed = [r for r in finalized if float(r.get("executed_qty") or 0) > 0]
@@ -4480,22 +4552,18 @@ def liquidity_debug():
         reductions = [r for r in history if float(r.get("reduced_qty") or 0) > 0]
 
         def short_record(r):
-            fc = r.get("fifo_consumption") or []
             return {
                 "time": r.get("time"),
                 "price": r.get("price"),
                 "side": r.get("side"),
                 "reduced_qty": r.get("reduced_qty"),
                 "executed_qty": r.get("executed_qty"),
+                "aged_consumed_qty": r.get("aged_consumed_qty"),
+                "aged_executed_qty": r.get("aged_executed_qty"),
+                "aged_unmatched_qty": r.get("aged_unmatched_qty"),
                 "pulled_qty": r.get("pulled_qty"),
                 "status": r.get("status"),
                 "finalized": r.get("finalized"),
-                "fifo_consumed_qty": r.get("fifo_consumed_qty"),
-                "fifo_executed_qty": r.get("fifo_executed_qty"),
-                "fifo_unattributed_qty": r.get("fifo_unattributed_qty"),
-                "fifo_unmatched_qty": r.get("fifo_unmatched_qty"),
-                "fifo_consumption_count": len(fc),
-                "fifo_consumption": fc[:5],
             }
 
         return jsonify({
@@ -4514,13 +4582,9 @@ def liquidity_debug():
                 "reduction_records": len(reductions),
                 "finalized_with_execution": len(executed),
                 "finalized_with_pull": len(pulled),
-                "trade_diagnostic_entries": len(trades),
-                "match_diagnostic_entries": len(diagnostics),
             },
             "execution_examples": [short_record(r) for r in executed[-3:]],
             "recent_reductions": [short_record(r) for r in reductions[-3:]],
-            "trade_examples": trades[-3:],
-            "match_diagnostics": diagnostics[-3:],
         })
 
 
@@ -4597,10 +4661,7 @@ def api_scan():
     })
 
 
-import concurrent.futures
-
 _news_cache = {"time": 0, "data": []}
-_working_gemini_model = None
 
 def fetch_live_crypto_news(symbol="BTCUSDT"):
     """Fetches latest breaking crypto headlines & Fear/Greed Index (Cached for 60s, Zero Mobile Data!)."""
@@ -4652,7 +4713,7 @@ def api_ai_mentor():
     live_news = fetch_live_crypto_news(symbol)
     news_block = "\n".join(live_news)
 
-    prompt = f"""You are an Institutional Crypto Quant & ICT Orderflow Mentor speaking in sharp, practical Hinglish.
+    prompt = f"""You are an Institutional Crypto Quant & Orderflow Mentor speaking in sharp, practical Hinglish.
 STRICT RULE: DO NOT hallucinate any numbers. Base 100% of your analysis strictly on the JSON telemetry and Live News Headlines below.
 
 Asset: {symbol} ({timeframe})
@@ -4661,13 +4722,13 @@ Trader's Question / TradingView Observation: "{question}"
 LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT:
 {news_block}
 
-COMPLETE 10-PARAMETER SA ENGINE & DOM TELEMETRY:
+COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
 {json.dumps(engine_data, indent=2)}
 
-Analyze ALL 10 parameters and reply in 5 short Hinglish points:
+Analyze ALL parameters and reply in 5 short Hinglish points:
 1. ⚖️ FINAL VERDICT & ALIGNMENT: State Scalp Bias ({engine_data.get('scalp_10factor_verdict', {}).get('final_bias')}) & Intraday Bias ({engine_data.get('intraday_10factor_verdict', {}).get('final_bias')}) with Quant Scores. Is the trader's view 🟢 100% ALIGNED, 🔴 TRAP, or ⏳ WAIT FOR TRIGGER?
 2. 📰 LIVE NEWS & SENTIMENT IMPACT: Any breaking news risk/tailwind, or pure technical orderflow?
-3. ⚔️ DOM & ABSORPTION X-RAY: Exact numbers from Buy/Sell Executions, 10s Pull Delta (PΔ), Resting Walls, Absorptions, and Whale Lots.
+3. ⚔️ DOM & ABSORPTION X-RAY: Exact numbers from 6-Candle Anchor Score, Buy/Sell Executions, 10s Pull Delta (PΔ), Resting Walls, Absorptions, and Behavioral Whale Lots.
 4. 🎯 EXACT SCALP PLAN: Entry Zone, Invalidation/SL level, and Target (using active UB-HIGH/LOW or nPOC magnets).
 5. 🌊 INTRADAY ROADMAP: Session CVD & Big Player campaign direction."""
 
@@ -4726,7 +4787,6 @@ Analyze ALL 10 parameters and reply in 5 short Hinglish points:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-import gzip
 @app.after_request
 def compress_response(response):
     if response.status_code != 200 or len(response.get_data()) < 500:
@@ -4741,7 +4801,7 @@ def compress_response(response):
     return response
 
 # ============================================================
-# START 24/7 SERVER-SIDE $10 DEMO PAPER BOT (CLUSTER V5)
+# START 24/7 SERVER-SIDE $10 DEMO PAPER BOT (IRON-ANCHOR V5)
 # ============================================================
 
 paper_bot_lock = threading.Lock()
@@ -4849,11 +4909,13 @@ def _pick_server_magnet_tp(side, entry_px, sl_dist, min_rr, max_rr, magnets):
     return fallback_tp, f"{min_rr}R-Target"
 
 def _evaluate_server_orderflow(sym, tf_key):
-    """Multi-Row Cluster Buildup + Raw Millisecond DOM + Sweep vs Breakout Evaluator."""
+    """100% Unified Iron-Anchor Evaluator (Matches Frontend Chart & DOM Logic)."""
     raw_step = PRICE_STEP.get(sym, 1.0)
     peer_sym = "ETHUSDT" if sym == "BTCUSDT" else "BTCUSDT"
 
     with lock:
+        if not orderbook[sym]["initialized"]:
+            return None
         c_list = list(candles[sym][tf_key])[-20:]
         curr = current_candles[sym][tf_key]
         if curr is not None:
@@ -5010,7 +5072,7 @@ def _evaluate_server_orderflow(sym, tf_key):
             lt = max(l["trades"], 1)
             lot_ratio = (tv / lt) / base_lot
             has_tw = (l["whale_buy"] + l["whale_sell"]) > 0
-            if has_tw or (tv >= max(c_avg_v * 1.15, heavy_lvl_bench * 0.50) and ((lot_ratio >= 2.8 and lt <= 48) or lot_ratio >= 4.5)):
+            if has_tw or (tv >= max(c_avg_v * 1.35, heavy_lvl_bench * 0.65) and lot_ratio >= 3.2):
                 if (l["whale_buy"] or bv) > (l["whale_sell"] or sv):
                     macro_whale_b += 1
                 else:
@@ -5047,7 +5109,7 @@ def _evaluate_server_orderflow(sym, tf_key):
     tot_ice_ask = sum(v["ice_ask"] for v in raw_dom_cluster.values())
     tot_flash_bp = sum(v["flash_bp"] for v in raw_dom_cluster.values())
     tot_flash_ap = sum(v["flash_ap"] for v in raw_dom_cluster.values())
-    r_bid_abs, r_ask_abs, recent_whale_b, recent_whale_s = 0, 0, 0, 0
+    r_bid_abs, r_ask_abs = 0, 0
     lowest_bid_abs_px, highest_ask_abs_px = None, None
 
     struct_set = c_list[-6:]
@@ -5113,15 +5175,6 @@ def _evaluate_server_orderflow(sym, tf_key):
                 if highest_ask_abs_px is None or gl["price"] > highest_ask_abs_px:
                     highest_ask_abs_px = gl["price"]
 
-            if is_rec3:
-                trd = max(gl["trades"], 1)
-                has_tw = (gl["whale_buy"] + gl["whale_sell"]) > 0
-                if has_tw or (gl["volume"] >= eff_cell_bench * 1.20 and ((gl["volume"] / trd) / base_lot) >= 2.8):
-                    if (gl["whale_buy"] or gl["buy"]) > (gl["whale_sell"] or gl["sell"]) and rc_cls >= gl["price"] - eff_step * 0.5:
-                        recent_whale_b += 1
-                    elif (gl["whale_sell"] or gl["sell"]) >= (gl["whale_buy"] or gl["buy"]) and rc_cls <= gl["price"] + eff_step * 0.5:
-                        recent_whale_s += 1
-
     tot_pull_b += tot_flash_bp
     tot_pull_a += tot_flash_ap
     dom_pull_delta = tot_pull_b - tot_pull_a
@@ -5129,7 +5182,6 @@ def _evaluate_server_orderflow(sym, tf_key):
     c_range = max(float(last_c["high"]) - float(last_c["low"]), raw_step * 0.5)
     close_pos = (live_px - float(last_c["low"])) / c_range
     last_delta = float(last_c.get("delta", 0.0))
-    prev_delta = float(prev_c.get("delta", 0.0))
 
     cur_poc = float(last_c["poc"]) if last_c.get("poc") is not None else (float(last_c["high"]) + float(last_c["low"])) * 0.5
     prev_poc = float(prev_c["poc"]) if prev_c.get("poc") is not None else (float(prev_c["high"]) + float(prev_c["low"])) * 0.5
@@ -5145,27 +5197,81 @@ def _evaluate_server_orderflow(sym, tf_key):
 
     prev5_hi = max(float(x["high"]) for x in c_list[-6:-1])
     prev5_lo = min(float(x["low"]) for x in c_list[-6:-1])
-    bull_sweep_reject = float(last_c["low"]) < prev5_lo and live_px > prev5_lo and (close_pos >= 0.50 or r_bid_abs > 0 or tot_ice_bid > 0)
-    bear_sweep_reject = float(last_c["high"]) > prev5_hi and live_px < prev5_hi and (close_pos <= 0.50 or r_ask_abs > 0 or tot_ice_ask > 0)
 
-    inst_bull_drive = (tot_exec_buy > tot_exec_sell * 1.15 or tot_w_buy > tot_w_sell * 1.20) and live_px > float(last_c["open"]) and close_pos >= 0.58 and live_px >= cur_poc and not bear_sweep_reject
-    inst_bear_drive = (tot_exec_sell > tot_exec_buy * 1.15 or tot_w_sell > tot_w_buy * 1.20) and live_px < float(last_c["open"]) and close_pos <= 0.42 and live_px <= cur_poc and not bull_sweep_reject
+    # Iron-Anchor Closed Candle Scoring (Matches Frontend JS 100%)
+    closed6 = c_list[:-1][-6:]
+    avg_c_rng = sum(max(float(x["high"]) - float(x["low"]), raw_step) for x in closed6) / max(1, len(closed6))
+    anchor_bull, anchor_bear = 0, 0
+    anchor_sup, anchor_res = None, None
 
-    cluster_long_buildup = (r_bid_abs > r_ask_abs or tot_ice_bid > tot_ice_ask * 1.25) and (tot_w_buy >= tot_w_sell or dom_pull_delta < -eff_cell_bench * 0.25 or near_bid_rest > near_ask_rest * 1.25)
-    cluster_short_buildup = (r_ask_abs > r_bid_abs or tot_ice_ask > tot_ice_bid * 1.25) and (tot_w_sell >= tot_w_buy or dom_pull_delta > eff_cell_bench * 0.25 or near_ask_rest > near_bid_rest * 1.25)
+    for cc in closed6:
+        cc_rng = max(float(cc["high"]) - float(cc["low"]), raw_step * 0.5)
+        cc_pos = (float(cc["close"]) - float(cc["low"])) / cc_rng
+        cc_wb = float(cc.get("whale_buy_vol", 0.0))
+        cc_ws = float(cc.get("whale_sell_vol", 0.0))
+        cc_d = float(cc.get("delta", 0.0))
 
-    retail_buys_trapped = not inst_bull_drive and (
+        if cc_d < -eff_cell_bench * 0.3 and cc_pos >= 0.55:
+            anchor_bull += 18
+            anchor_sup = float(cc["low"]) if anchor_sup is None else min(anchor_sup, float(cc["low"]))
+        elif cc_d > eff_cell_bench * 0.3 and cc_pos <= 0.45:
+            anchor_bear += 18
+            anchor_res = float(cc["high"]) if anchor_res is None else max(anchor_res, float(cc["high"]))
+
+        if cc_wb > cc_ws * 1.35 and cc_pos >= 0.50:
+            anchor_bull += 14
+        elif cc_ws > cc_wb * 1.35 and cc_pos <= 0.50:
+            anchor_bear += 14
+
+    if r_bid_abs > r_ask_abs:
+        anchor_bull += min(26, 12 + (r_bid_abs - r_ask_abs) * 5)
+    elif r_ask_abs > r_bid_abs:
+        anchor_bear += min(26, 12 + (r_ask_abs - r_bid_abs) * 5)
+
+    if tot_ice_bid > tot_ice_ask * 1.3:
+        anchor_bull += 15
+    elif tot_ice_ask > tot_ice_bid * 1.3:
+        anchor_bear += 15
+
+    if s_poc_up > s_poc_dn:
+        anchor_bull += 14
+    elif s_poc_dn > s_poc_up:
+        anchor_bear += 14
+
+    is_big_exp = c_range >= avg_c_rng * 1.55
+    bull_sweep_reject = float(last_c["low"]) < prev5_lo and live_px > prev5_lo and (close_pos >= 0.48 or r_bid_abs > 0 or tot_ice_bid > 0)
+    bear_sweep_reject = float(last_c["high"]) > prev5_hi and live_px < prev5_hi and (close_pos <= 0.52 or r_ask_abs > 0 or tot_ice_ask > 0)
+
+    is_bull_exhaust = (
         bear_sweep_reject
-        or (tot_r_buy > tot_w_buy * 1.15 and (tot_ice_ask > eff_cell_bench * 0.35 or r_ask_abs > r_bid_abs) and close_pos <= 0.52)
-        or (last_delta > eff_cell_bench * 0.45 and live_px <= float(last_c["open"]) and close_pos <= 0.44)
-        or (prev_delta > eff_cell_bench * 0.35 and live_px < prev_poc - eff_step * 0.5 and live_px < float(last_c["open"]))
+        or (live_px > float(last_c["open"]) and is_big_exp and range_location >= 0.78 and (r_ask_abs > 0 or tot_ice_ask > eff_cell_bench * 0.4))
+        or (live_px > float(last_c["open"]) and anchor_bear > anchor_bull + 20 and live_px < (anchor_res or macro_hi))
+        or (last_delta > eff_cell_bench * 0.45 and close_pos <= 0.46)
     )
-    retail_sells_trapped = not inst_bear_drive and (
+    is_bear_exhaust = (
         bull_sweep_reject
-        or (tot_r_sell > tot_w_sell * 1.15 and (tot_ice_bid > eff_cell_bench * 0.35 or r_bid_abs > r_ask_abs) and close_pos >= 0.48)
-        or (last_delta < -eff_cell_bench * 0.45 and live_px >= float(last_c["open"]) and close_pos >= 0.56)
-        or (prev_delta < -eff_cell_bench * 0.35 and live_px > prev_poc + eff_step * 0.5 and live_px > float(last_c["open"]))
+        or (live_px < float(last_c["open"]) and is_big_exp and range_location <= 0.22 and (r_bid_abs > 0 or tot_ice_bid > eff_cell_bench * 0.4))
+        or (live_px < float(last_c["open"]) and anchor_bull > anchor_bear + 20 and live_px > (anchor_sup or macro_lo))
+        or (last_delta < -eff_cell_bench * 0.45 and close_pos >= 0.54)
     )
+
+    inst_bull_drive = (
+        not is_bull_exhaust and anchor_bull >= anchor_bear
+        and (tot_w_buy > tot_w_sell * 1.20 or dom_pull_delta < -eff_cell_bench * 0.30)
+        and live_px > cur_poc and float(prev_c["close"]) >= prev_poc
+        and close_pos >= 0.60 and range_location <= 0.82
+    )
+    inst_bear_drive = (
+        not is_bear_exhaust and anchor_bear >= anchor_bull
+        and (tot_w_sell > tot_w_buy * 1.20 or dom_pull_delta > eff_cell_bench * 0.30)
+        and live_px < cur_poc and float(prev_c["close"]) <= prev_poc
+        and close_pos <= 0.40 and range_location >= 0.18
+    )
+
+    cluster_long_buildup = (anchor_bull >= anchor_bear + 15) and not inst_bear_drive
+    cluster_short_buildup = (anchor_bear >= anchor_bull + 15) and not inst_bull_drive
+    retail_buys_trapped = is_bull_exhaust
+    retail_sells_trapped = is_bear_exhaust
 
     naked_pocs, unfinished_levels = [], []
     min_ub_vol = max(base_lot * 0.8, 0.05)
@@ -5184,98 +5290,72 @@ def _evaluate_server_orderflow(sym, tf_key):
                 unfinished_levels.append((lo_l["price"], "UB-LOW"))
     magnets = [(p, "nPOC") for p in naked_pocs] + unfinished_levels
 
-    scalp_pts = 0
-    if inst_bull_drive:
-        scalp_pts += 28
-    elif inst_bear_drive:
-        scalp_pts -= 28
-    elif retail_buys_trapped or cluster_short_buildup:
-        scalp_pts -= 25
-    elif retail_sells_trapped or cluster_long_buildup:
-        scalp_pts += 25
-
-    if (r_bid_abs > r_ask_abs or tot_ice_bid > tot_ice_ask * 1.25) and not inst_bear_drive:
-        scalp_pts += min(24, 14 + (r_bid_abs - r_ask_abs) * 4)
-    elif (r_ask_abs > r_bid_abs or tot_ice_ask > tot_ice_bid * 1.25) and not inst_bull_drive:
-        scalp_pts -= min(24, 14 + (r_ask_abs - r_bid_abs) * 4)
-
-    if dom_pull_delta < -eff_cell_bench * 0.28:
-        scalp_pts += 18
-    elif dom_pull_delta > eff_cell_bench * 0.28:
-        scalp_pts -= 18
+    scalp_pts = anchor_bull - anchor_bear
+    if dom_pull_delta < -eff_cell_bench * 0.30:
+        scalp_pts += 16
+    elif dom_pull_delta > eff_cell_bench * 0.30:
+        scalp_pts -= 16
 
     min_book_floor = eff_cell_bench * 1.3
-    if near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.25:
-        scalp_pts += 12
-    elif near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.25:
-        scalp_pts -= 12
+    if near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.30:
+        scalp_pts += 10
+    elif near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.30:
+        scalp_pts -= 10
 
     delta_state = "NEU"
-    if last_delta > eff_cell_bench * 0.45 and live_px <= float(last_c["open"]) and close_pos <= 0.44:
-        scalp_pts -= 18
+    if is_bear_exhaust:
+        scalp_pts += 20
+        delta_state = "BULL"
+    elif is_bull_exhaust:
+        scalp_pts -= 20
         delta_state = "BEAR"
-    elif last_delta < -eff_cell_bench * 0.45 and live_px >= float(last_c["open"]) and close_pos >= 0.56:
-        scalp_pts += 18
+    elif inst_bull_drive:
+        scalp_pts += 14
         delta_state = "BULL"
-    elif last_delta > eff_cell_bench * 0.30 and live_px > float(last_c["open"]) and close_pos >= 0.56:
-        scalp_pts += 15
-        delta_state = "BULL"
-    elif last_delta < -eff_cell_bench * 0.30 and live_px < float(last_c["open"]) and close_pos <= 0.44:
-        scalp_pts -= 15
+    elif inst_bear_drive:
+        scalp_pts -= 14
         delta_state = "BEAR"
 
     whale_state = "NEU"
-    if (tot_w_buy > tot_w_sell * 1.20 or recent_whale_b > recent_whale_s) and not inst_bear_drive:
-        scalp_pts += 18
+    if tot_w_buy > tot_w_sell * 1.25 and not inst_bear_drive:
+        scalp_pts += 16
         whale_state = "BULL"
-    elif (tot_w_sell > tot_w_buy * 1.20 or recent_whale_s > recent_whale_b) and not inst_bull_drive:
-        scalp_pts -= 18
+    elif tot_w_sell > tot_w_buy * 1.25 and not inst_bull_drive:
+        scalp_pts -= 16
         whale_state = "BEAR"
 
     loc_state = "NEU"
-    if live_px > cur_poc and (live_px >= prev_poc or cluster_long_buildup):
-        scalp_pts += 14
-        loc_state = "BULL"
-    elif live_px < cur_poc and (live_px <= prev_poc or cluster_short_buildup):
-        scalp_pts -= 14
-        loc_state = "BEAR"
-
-    if bull_sweep_reject:
-        scalp_pts += 22
-    elif bear_sweep_reject:
-        scalp_pts -= 22
-
-    if s_poc_up > s_poc_dn:
+    if live_px >= cur_poc and float(prev_c["close"]) >= prev_poc and not is_bull_exhaust:
         scalp_pts += 12
-    elif s_poc_dn > s_poc_up:
+        loc_state = "BULL"
+    elif live_px <= cur_poc and float(prev_c["close"]) <= prev_poc and not is_bear_exhaust:
         scalp_pts -= 12
+        loc_state = "BEAR"
 
     if smt_bias == 1:
         scalp_pts += 10
     elif smt_bias == -1:
         scalp_pts -= 10
 
-    if inst_bear_drive and live_px < cur_poc and live_px < prev_poc and not bull_sweep_reject and scalp_pts > 0:
-        scalp_pts = -22
-    elif inst_bull_drive and live_px > cur_poc and live_px > prev_poc and not bear_sweep_reject and scalp_pts < 0:
-        scalp_pts = 22
+    if scalp_pts > 0 and range_location >= 0.78 and not bull_sweep_reject:
+        scalp_pts = min(scalp_pts, 18)
+    elif scalp_pts < 0 and range_location <= 0.22 and not bear_sweep_reject:
+        scalp_pts = max(scalp_pts, -18)
 
-    exec_vs_abs_state = "BULL" if inst_bull_drive else ("BEAR" if inst_bear_drive else ("BEAR" if (retail_buys_trapped or cluster_short_buildup) else ("BULL" if (retail_sells_trapped or cluster_long_buildup) else "NEU")))
-    vah, val = last_c.get("vah"), last_c.get("val")
-
+    exec_vs_abs_state = "BULL" if inst_bull_drive else ("BEAR" if inst_bear_drive else ("BULL" if cluster_long_buildup else ("BEAR" if cluster_short_buildup else "NEU")))
     s_states = [
         exec_vs_abs_state,
-        "BULL" if ((r_bid_abs > r_ask_abs or tot_ice_bid > tot_ice_ask * 1.25) and not inst_bear_drive) else ("BEAR" if ((r_ask_abs > r_bid_abs or tot_ice_ask > tot_ice_bid * 1.25) and not inst_bull_drive) else "NEU"),
-        "BULL" if dom_pull_delta < -eff_cell_bench * 0.28 else ("BEAR" if dom_pull_delta > eff_cell_bench * 0.28 else "NEU"),
-        "BULL" if (near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.25) else ("BEAR" if (near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.25) else "NEU"),
+        "BULL" if (r_bid_abs > r_ask_abs or tot_ice_bid > tot_ice_ask * 1.25) else ("BEAR" if (r_ask_abs > r_bid_abs or tot_ice_ask > tot_ice_bid * 1.25) else "NEU"),
+        "BULL" if dom_pull_delta < -eff_cell_bench * 0.30 else ("BEAR" if dom_pull_delta > eff_cell_bench * 0.30 else "NEU"),
+        "BULL" if (near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.30) else ("BEAR" if (near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.30) else "NEU"),
         delta_state,
         loc_state,
         whale_state,
-        "BULL" if (vah is not None and live_px > float(vah) and live_px > float(last_c["open"])) else ("BEAR" if (val is not None and live_px < float(val) and live_px < float(last_c["open"])) else "NEU"),
+        "BULL" if range_location <= 0.35 else ("BEAR" if range_location >= 0.65 else "NEU"),
         "BULL" if s_poc_up > s_poc_dn else ("BEAR" if s_poc_dn > s_poc_up else "NEU"),
         "BULL" if bull_sweep_reject else ("BEAR" if bear_sweep_reject else "NEU"),
         "BULL" if smt_bias == 1 else ("BEAR" if smt_bias == -1 else "NEU"),
-        "BULL" if (cur_rvol >= 0.85 and exec_vs_abs_state == "BULL") else ("BEAR" if (cur_rvol >= 0.85 and exec_vs_abs_state == "BEAR") else "NEU"),
+        exec_vs_abs_state if cur_rvol >= 0.85 else "NEU",
     ]
     s_bull, s_bear, s_neu = s_states.count("BULL"), s_states.count("BEAR"), s_states.count("NEU")
 
@@ -5291,16 +5371,6 @@ def _evaluate_server_orderflow(sym, tf_key):
 
     sess_pocs = [float(x["poc"]) for x in c_list[-15:] if x.get("poc") is not None]
     avg_sess_poc = (sum(sess_pocs) / len(sess_pocs)) if sess_pocs else live_px
-    if live_px > avg_sess_poc + eff_step:
-        intra_pts += 12
-    elif live_px < avg_sess_poc - eff_step:
-        intra_pts -= 12
-
-    if near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.25:
-        intra_pts += 10
-    elif near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.25:
-        intra_pts -= 10
-
     ub_hi_cnt = sum(1 for px, t in unfinished_levels if t == "UB-HIGH" and px > live_px)
     ub_lo_cnt = sum(1 for px, t in unfinished_levels if t == "UB-LOW" and px < live_px)
     npoc_above = sum(1 for px in naked_pocs if px > live_px)
@@ -5315,7 +5385,7 @@ def _evaluate_server_orderflow(sym, tf_key):
         "BULL" if live_px > avg_sess_poc + eff_step else ("BEAR" if live_px < avg_sess_poc - eff_step else "NEU"),
         "BULL" if ub_hi_cnt > ub_lo_cnt else ("BEAR" if ub_lo_cnt > ub_hi_cnt else "NEU"),
         "BULL" if npoc_above > npoc_below else ("BEAR" if npoc_below > npoc_above else "NEU"),
-        "BULL" if (near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.25) else ("BEAR" if (near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.25) else "NEU"),
+        "BULL" if (near_bid_rest >= min_book_floor and near_bid_rest > near_ask_rest * 1.30) else ("BEAR" if (near_ask_rest >= min_book_floor and near_ask_rest > near_bid_rest * 1.30) else "NEU"),
         "BULL" if smt_bias == 1 else ("BEAR" if smt_bias == -1 else "NEU"),
     ]
     i_bull, i_bear, i_neu = i_states.count("BULL"), i_states.count("BEAR"), i_states.count("NEU")
@@ -5359,25 +5429,31 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
     act = book.get("active")
     if not act:
         return False
-    hi, lo, live_px = sig["high"], sig["low"], sig["live_px"]
+
+    # STRICT POST-ENTRY TICK BOUNDS (Never triggers on pre-entry candle wicks!)
+    bounds = paper_post_entry_bounds.get(mode, {})
+    live_px = sig["live_px"]
+    hi = bounds["high"] if bounds.get("high") is not None else live_px
+    lo = bounds["low"] if bounds.get("low") is not None else live_px
+
     entry_px = float(act["entry"])
     init_risk = float(act.get("init_risk", abs(entry_px - float(act["sl"]))))
     dec = 4 if sig["step"] < 0.01 else (2 if sig["step"] < 1 else 1)
 
     if init_risk > 0:
-        fee_plus_prof = max(entry_px * 0.0009, init_risk * 0.20)
+        fee_plus_prof = max(entry_px * 0.0014, init_risk * 0.25)
         if act["side"] == "LONG":
             if hi >= (entry_px + init_risk * 1.35) and float(act["sl"]) < (entry_px + init_risk * 0.75):
                 act["sl"] = round(entry_px + init_risk * 0.75, dec)
                 act["be_locked"] = "TRAIL"
-            elif not act.get("be_locked") and hi >= (entry_px + init_risk * 0.90):
+            elif not act.get("be_locked") and hi >= (entry_px + init_risk * 0.95):
                 act["sl"] = round(entry_px + fee_plus_prof, dec)
                 act["be_locked"] = "BE"
         else:
             if lo <= (entry_px - init_risk * 1.35) and float(act["sl"]) > (entry_px - init_risk * 0.75):
                 act["sl"] = round(entry_px - init_risk * 0.75, dec)
                 act["be_locked"] = "TRAIL"
-            elif not act.get("be_locked") and lo <= (entry_px - init_risk * 0.90):
+            elif not act.get("be_locked") and lo <= (entry_px - init_risk * 0.95):
                 act["sl"] = round(entry_px - fee_plus_prof, dec)
                 act["be_locked"] = "BE"
 
@@ -5402,7 +5478,7 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
 
     notional = float(act["margin"]) * float(act["leverage"])
     pct = ((exit_px - entry_px) / entry_px) if act["side"] == "LONG" else ((entry_px - exit_px) / entry_px)
-    net_pnl = (notional * pct) - (notional * 0.0007)
+    net_pnl = (notional * pct) - (notional * 0.0012)
 
     book["balance"] = round(max(0.0, float(book["balance"]) + net_pnl), 3)
     if net_pnl >= 0:
@@ -5419,6 +5495,7 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
     book["history"] = book["history"][:30]
     book["active"] = None
     book["last_close"] = time.time()
+    paper_post_entry_bounds[mode] = {"high": None, "low": None}
     return True
 
 def _paper_bot_worker():
@@ -5462,20 +5539,19 @@ def _paper_bot_worker():
                     changed = True
 
                 if enabled and sig["candle_age_sec"] >= 25:
-                    # 1. SCALP AUTO-ENTRY: Triggers on Cluster Buildup Reclaim, Boundary Fakeout Sweep, or Genuine Breakout
                     sb = paper_bot_state["scalp"]
                     if not sb["active"] and sb["balance"] >= 1.0 and (now_s - sb.get("last_close", 0) > 45):
                         s_long = (
-                            sig["s_pts"] >= 42 and sig["s_bull"] >= 6 and (sig["s_bull"] - sig["s_bear"] >= 3)
+                            sig["s_pts"] >= 46 and sig["s_bull"] >= 6 and (sig["s_bull"] - sig["s_bear"] >= 3)
                             and not sig["inst_bear_drive"] and not sig["retail_buys_trapped"]
-                            and sig["i_pts"] >= -15 and sig["range_location"] <= 0.85
+                            and sig["i_pts"] >= -15 and sig["range_location"] <= 0.78
                             and sig["live_px"] >= sig["cur_poc"]
                             and (sig["inst_bull_drive"] or sig["cluster_long_buildup"] or sig["bull_sweep_reject"])
                         )
                         s_short = (
-                            sig["s_pts"] <= -42 and sig["s_bear"] >= 6 and (sig["s_bear"] - sig["s_bull"] >= 3)
+                            sig["s_pts"] <= -46 and sig["s_bear"] >= 6 and (sig["s_bear"] - sig["s_bull"] >= 3)
                             and not sig["inst_bull_drive"] and not sig["retail_sells_trapped"]
-                            and sig["i_pts"] <= 15 and sig["range_location"] >= 0.15
+                            and sig["i_pts"] <= 15 and sig["range_location"] >= 0.22
                             and sig["live_px"] <= sig["cur_poc"]
                             and (sig["inst_bear_drive"] or sig["cluster_short_buildup"] or sig["bear_sweep_reject"])
                         )
@@ -5500,6 +5576,7 @@ def _paper_bot_worker():
                             safe_notional = min(sb["balance"] * lev, max_loss_usd / max(sl_pct, 0.0005))
                             eff_margin = round(safe_notional / lev, 2)
 
+                            paper_post_entry_bounds["scalp"] = {"high": ep, "low": ep}
                             sb["active"] = {
                                 "symbol": sym, "tf": tf_key, "side": side,
                                 "entry": round(ep, dec), "sl": sl, "tp": tp, "tp_tag": tp_tag,
@@ -5509,18 +5586,17 @@ def _paper_bot_worker():
                             }
                             changed = True
 
-                    # 2. INTRADAY AUTO-ENTRY: Triggers on Macro Cluster Accumulation/Distribution + Structure Breakout
                     ib = paper_bot_state["intraday"]
                     if not ib["active"] and ib["balance"] >= 1.0 and (now_s - ib.get("last_close", 0) > 60):
                         i_long = (
-                            sig["i_pts"] >= 40 and sig["i_bull"] >= 6 and (sig["i_bull"] - sig["i_bear"] >= 3)
+                            sig["i_pts"] >= 46 and sig["i_bull"] >= 6 and (sig["i_bull"] - sig["i_bear"] >= 3)
                             and sig["s_pts"] >= 28 and not sig["inst_bear_drive"] and not sig["retail_buys_trapped"]
-                            and sig["live_px"] >= sig["cur_poc"] and sig["range_location"] <= 0.85
+                            and sig["live_px"] >= sig["cur_poc"] and sig["range_location"] <= 0.78
                         )
                         i_short = (
-                            sig["i_pts"] <= -40 and sig["i_bear"] >= 6 and (sig["i_bear"] - sig["i_bull"] >= 3)
+                            sig["i_pts"] <= -46 and sig["i_bear"] >= 6 and (sig["i_bear"] - sig["i_bull"] >= 3)
                             and sig["s_pts"] <= -28 and not sig["inst_bull_drive"] and not sig["retail_sells_trapped"]
-                            and sig["live_px"] <= sig["cur_poc"] and sig["range_location"] >= 0.15
+                            and sig["live_px"] <= sig["cur_poc"] and sig["range_location"] >= 0.22
                         )
 
                         if i_long or i_short:
@@ -5539,6 +5615,7 @@ def _paper_bot_worker():
                             safe_notional = min(ib["balance"] * lev, max_loss_usd / max(sl_pct, 0.0005))
                             eff_margin = round(safe_notional / lev, 2)
 
+                            paper_post_entry_bounds["intraday"] = {"high": ep, "low": ep}
                             ib["active"] = {
                                 "symbol": sym, "tf": tf_key, "side": side,
                                 "entry": round(ep, dec), "sl": sl, "tp": tp, "tp_tag": tp_tag,
@@ -5592,6 +5669,8 @@ def api_paper_action():
             paper_bot_state.update(_default_paper_state())
             paper_bot_state["symbol"], paper_bot_state["tf"], paper_bot_state["leverage"] = sym, tf_k, lev
             paper_bot_state["enabled"] = en_state
+            paper_post_entry_bounds["scalp"] = {"high": None, "low": None}
+            paper_post_entry_bounds["intraday"] = {"high": None, "low": None}
         elif act == "close":
             mode = data.get("mode", "scalp")
             book = paper_bot_state.get(mode)
@@ -5600,7 +5679,7 @@ def api_paper_action():
                 px = float(last_trade.get(p["symbol"], {}).get("price") or p["entry"])
                 notional = float(p["margin"]) * float(p["leverage"])
                 move = ((px - p["entry"]) / p["entry"]) if p["side"] == "LONG" else ((p["entry"] - px) / p["entry"])
-                net_pnl = (notional * move) - (notional * 0.0007)
+                net_pnl = (notional * move) - (notional * 0.0012)
                 book["balance"] = round(max(0.0, float(book["balance"]) + net_pnl), 3)
                 if net_pnl >= 0:
                     book["wins"] += 1
@@ -5614,6 +5693,7 @@ def api_paper_action():
                 })
                 book["active"] = None
                 book["last_close"] = time.time()
+                paper_post_entry_bounds[mode] = {"high": None, "low": None}
     _save_paper_state_to_turso()
     return jsonify({"status": "ok"})
 
