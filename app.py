@@ -1454,6 +1454,14 @@ def store_finished_candle(candle):
 # TRADE & MESSAGE ROUTER (100% DYNAMIC WHALE ORDERFLOW ENGINE)
 # ============================================================
 
+# Absolute Minimum Institutional Cluster Volume (Below this = 100% Retail / Bot Noise!)
+INST_MIN_CLUSTER_VOL = {
+    "BTCUSDT": 8.0,      # At least 8+ BTC in a fast sweep or stuck cluster to be called Institutional!
+    "ETHUSDT": 80.0,     # At least 80+ ETH
+    "SOLUSDT": 600.0,    # At least 600+ SOL
+    "XRPUSDT": 120000.0, # At least 120k+ XRP
+}
+
 def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
     step = PRICE_STEP[symbol]
     price_level = round_price_to_step(price, step)
@@ -1462,7 +1470,8 @@ def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
         record_trade_for_execution_matching(symbol, price, quantity, trade_time, is_buyer_maker)
 
         cb = cluster_behavior_tracker[symbol]
-        dyn_book_avg = max(rolling_book_depth_tracker.get(symbol, 1.0), 0.1)
+        inst_floor = INST_MIN_CLUSTER_VOL.get(symbol, 10.0)
+        dyn_book_avg = max(rolling_book_depth_tracker.get(symbol, inst_floor), inst_floor)
 
         # 1. Track Price Sticking in a 3-Tick Cluster (Absorption Detection)
         if cb["anchor_px"] is None or abs(price_level - cb["anchor_px"]) > step * 2.5:
@@ -1491,29 +1500,29 @@ def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
             cb["disp_trades"] += 1
 
         price_disp_steps = abs(price - cb["disp_start_px"]) / step
-        avg_disp_lot = cb["disp_vol"] / max(1, cb["disp_trades"])
 
-        # Local resting book & recent spoof pulls in this 3-tick zone
         d_raw = dom_raw_telemetry[symbol]
-        zone_bid_pull = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("aged_bid_pull", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("flash_bid_pull", 0.0) for k in (-1, 0, 1))
-        zone_ask_pull = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("aged_ask_pull", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("flash_ask_pull", 0.0) for k in (-1, 0, 1))
+        zone_bid_pull = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("aged_bid_pull", 0.0) for k in (-1, 0, 1))
+        zone_ask_pull = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("aged_ask_pull", 0.0) for k in (-1, 0, 1))
 
         inst_mode = "RETAIL"
         absorbed_credit = 0.0
 
-        # RULE A: AGGRESSIVE WHALE DISPLACEMENT (Big Chunks + Fast Price Move >= 2 steps OR Spoof Wall Pulled)
+        # RULE A: AGGRESSIVE WHALE DISPLACEMENT
+        # Must move price >= 3 steps within 1.2s WITH at least inst_floor (e.g. 8+ BTC) or single block >= 3.5+ BTC!
         if (
-            (price_disp_steps >= 2.0 and cb["disp_vol"] >= dyn_book_avg * 0.85 and avg_disp_lot >= dyn_book_avg * 0.22)
-            or (quantity >= dyn_book_avg * 0.75 and (price_disp_steps >= 1.0 or (cur_dir == 1 and zone_ask_pull > 0) or (cur_dir == -1 and zone_bid_pull > 0)))
+            (price_disp_steps >= 3.0 and cb["disp_vol"] >= inst_floor)
+            or (quantity >= inst_floor * 0.45 and price_disp_steps >= 1.5)
         ):
             inst_mode = "DISP_WHALE"
 
-        # RULE B: PASSIVE WHALE ABSORPTION (Price STUCK in 3-tick cluster while heavy volume hits one side without pulling!)
-        elif cb["stuck_trades"] >= 5 and (trade_time - cb["stuck_start_ms"] >= 600):
-            if is_buyer_maker and cb["stuck_sell_vol"] >= dyn_book_avg * 1.15 and cb["stuck_sell_vol"] > cb["stuck_buy_vol"] * 1.55 and zone_bid_pull < cb["stuck_sell_vol"] * 0.35:
+        # RULE B: PASSIVE WHALE ABSORPTION
+        # Price STUCK in 3-tick cluster for >= 1.5s while eating >= inst_floor (8+ BTC) one-sided retail orders!
+        elif cb["stuck_trades"] >= 8 and (trade_time - cb["stuck_start_ms"] >= 1500):
+            if is_buyer_maker and cb["stuck_sell_vol"] >= inst_floor and cb["stuck_sell_vol"] > cb["stuck_buy_vol"] * 1.8 and zone_bid_pull < cb["stuck_sell_vol"] * 0.30:
                 inst_mode = "ABS_WHALE"
                 absorbed_credit = quantity
-            elif (not is_buyer_maker) and cb["stuck_buy_vol"] >= dyn_book_avg * 1.15 and cb["stuck_buy_vol"] > cb["stuck_sell_vol"] * 1.55 and zone_ask_pull < cb["stuck_buy_vol"] * 0.35:
+            elif (not is_buyer_maker) and cb["stuck_buy_vol"] >= inst_floor and cb["stuck_buy_vol"] > cb["stuck_sell_vol"] * 1.8 and zone_ask_pull < cb["stuck_buy_vol"] * 0.30:
                 inst_mode = "ABS_WHALE"
                 absorbed_credit = quantity
 
@@ -2883,6 +2892,12 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
         macroNotes.push(`CVD${fmt(totalCvd)}`);
     }
 
+    // Contradiction Veto: Never call LONG Buildup if Ask Absorption + Whale Net Sell dominate!
+  if (instBuildupPts > 0 && macroAskAbsorbs > macroBidAbsorbs && netWhaleVolDelta < 0) {
+      instBuildupPts = -18;
+  } else if (instBuildupPts < 0 && macroBidAbsorbs > macroAskAbsorbs && netWhaleVolDelta > 0) {
+      instBuildupPts = 18;
+  }
     const vBox = document.getElementById('masterVerdictBox');
     const vTitle = document.getElementById('masterVerdictTitle');
     const vReasons = document.getElementById('masterVerdictReasons');
@@ -3172,9 +3187,9 @@ function drawAll() {
             sumV += l.volume;
         });
 
-        const avgV = tradedCells.length > 0 ? sumV / tradedCells.length : tfAvgCellVol;
-        const effectiveHeavyAbsCut = Math.max(avgV * 1.30, heavyLvlBenchmark * 0.55);
-        const effectiveNormAbsCut = Math.max(avgV * 0.70, heavyLvlBenchmark * 0.28);
+        const avgV = Math.max(tradedCells.length > 0 ? sumV / tradedCells.length : tfAvgCellVol, tfAvgCellVol * 0.85);
+        const effectiveHeavyAbsCut = Math.max(avgV * 1.85, heavyLvlBenchmark * 1.15);
+        const effectiveNormAbsCut = Math.max(avgV * 1.25, heavyLvlBenchmark * 0.75);
 
         const baseRestRef = liveRestBench > 0 ? Math.max(liveRestBench, heavyLvlBenchmark) : heavyLvlBenchmark;
         const effectiveHeavyPullQty = Math.max(baseRestRef * 0.95, avgV * 1.10);
@@ -3277,8 +3292,9 @@ function drawAll() {
             }
 
             // Behavioral Whale Classification: Passive Absorption Whale OR Aggressive Displacement Whale
-            const isPassiveAbsWhale = (bidAbsType === 'heavy' || askAbsType === 'heavy');
-            const isDisplacementWhale = (wBuy + wSell > 0) || (totV >= Math.max(avgV * 1.35, heavyLvlBenchmark * 0.65) && lotRatio >= 3.2);
+            const minRealWhaleCellVol = heavyLvlBenchmark * 1.25;
+            const isPassiveAbsWhale = (bidAbsType === 'heavy' || askAbsType === 'heavy') && (totV >= minRealWhaleCellVol);
+            const isDisplacementWhale = (totV >= minRealWhaleCellVol) && ((wBuy + wSell >= heavyLvlBenchmark * 0.60) || lotRatio >= 3.8);
             const isWhaleLot = isPassiveAbsWhale || isDisplacementWhale;
 
             if (isWhaleLot) {
@@ -3363,57 +3379,28 @@ function drawAll() {
                 ctx.textAlign = 'left';
                 ctx.fillText(`${fmt(buyV)}${whaleBuyMark}`, spineX + 4, py);
 
-                if (proViewMode && candleW >= 135) {
-                    let bParts = [];
-                    let leftCol = '#84ffff';
-                    let leftBold = false;
-
-                    if (bidAbsType === 'heavy') { bParts.push(`H-B.ABS:${bAbsPct}%`); leftCol = '#00e5ff'; leftBold = true; }
-                    else if (bidAbsType === 'norm' && candleW >= 165) { bParts.push(`b-abs:${bAbsPct}%`); }
-
-                    if (bidPullType === 'heavy') {
-                        bParts.push(`H-BP:${fmt(bPull)}(${bPullPct}%)`);
-                        if (!bidAbsType) leftCol = '#ff4081';
-                        leftBold = true;
-                    } else if (bidPullType === 'norm' && candleW >= 165) {
-                        bParts.push(`bp:${fmt(bPull)}(${bPullPct}%)`);
-                        if (!bidAbsType) leftCol = '#ff80ab';
-                    }
-
-                    if (bParts.length > 0) {
-                        ctx.font = leftBold ? 'bold 8px monospace' : '8px monospace';
+                if (proViewMode && candleW >= 185) {
+                    let leftTag = '';
+                    let leftCol = '#00e5ff';
+                    if (bidAbsType === 'heavy') { leftTag = `ABS:${bAbsPct}%`; leftCol = '#00e5ff'; }
+                    else if (bidPullType === 'heavy') { leftTag = `BP:${fmt(bPull)}`; leftCol = '#ff4081'; }
+                    if (leftTag) {
+                        ctx.font = 'bold 7.5px monospace';
                         ctx.fillStyle = leftCol;
                         ctx.textAlign = 'left';
-                        ctx.fillText(bParts.join('|'), boxL + 5, py);
+                        ctx.fillText(leftTag, boxL + 5, py);
                     }
 
-                    let aParts = [];
-                    let rightCol = '#ffd180';
-                    let rightBold = false;
-
-                    if (askAbsType === 'heavy') { aParts.push(`H-A.ABS:${aAbsPct}%`); rightCol = '#ff9100'; rightBold = true; }
-                    else if (askAbsType === 'norm' && candleW >= 165) { aParts.push(`a-abs:${aAbsPct}%`); }
-
-                    if (askPullType === 'heavy') {
-                        aParts.push(`H-AP:${fmt(aPull)}(${aPullPct}%)`);
-                        if (!askAbsType) rightCol = '#e040fb';
-                        rightBold = true;
-                    } else if (askPullType === 'norm' && candleW >= 165) {
-                        aParts.push(`ap:${fmt(aPull)}(${aPullPct}%)`);
-                        if (!askAbsType) rightCol = '#ea80fc';
-                    }
-
-                    if (aParts.length === 0 && isPoc) {
-                        aParts.push('POC');
-                        rightCol = '#ffeb3b';
-                        rightBold = true;
-                    }
-
-                    if (aParts.length > 0) {
-                        ctx.font = rightBold ? 'bold 8px monospace' : '8px monospace';
+                    let rightTag = '';
+                    let rightCol = '#ff9100';
+                    if (askAbsType === 'heavy') { rightTag = `ABS:${aAbsPct}%`; rightCol = '#ff9100'; }
+                    else if (askPullType === 'heavy') { rightTag = `AP:${fmt(aPull)}`; rightCol = '#e040fb'; }
+                    else if (isPoc) { rightTag = 'POC'; rightCol = '#ffeb3b'; }
+                    if (rightTag) {
+                        ctx.font = 'bold 7.5px monospace';
                         ctx.fillStyle = rightCol;
                         ctx.textAlign = 'right';
-                        ctx.fillText(aParts.join('|'), boxR - 3, py);
+                        ctx.fillText(rightTag, boxR - 3, py);
                     }
                 }
             }
@@ -3458,7 +3445,7 @@ function drawAll() {
         let decisionCol = '#9ba2b0';
         let isHighConviction = false;
 
-        if (rvol < 0.65 && totalWhalesInCandle === 0) {
+        if (rvol < 0.65) {
             flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x)`;
             candleDecision = `⚪ SKIP (RETAIL NOISE)`;
         } else {
