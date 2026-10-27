@@ -3074,11 +3074,11 @@ function drawAll() {
         totalVisBuckets += Math.max(gFp.length, 1);
         totalVisVol += (c.volume || 0);
     });
-    const tfAvgCellVol = Math.max(totalVisVol / Math.max(totalVisBuckets, 1), 0.001);
+    const tfAvgCellVol = Math.max(totalVisVol / Math.max(totalVisBuckets, 1), (avgFlowVol / 12.0) * 0.85);
 
     const heavyLvlBenchmark = liveRestBench > 0
-        ? Math.max(tfAvgCellVol * 1.40, Math.min(tfAvgCellVol * 2.1, liveRestBench * 1.20))
-        : tfAvgCellVol * 1.60;
+        ? Math.max(tfAvgCellVol * 1.50, Math.min(tfAvgCellVol * 2.2, liveRestBench * 1.25))
+        : tfAvgCellVol * 1.65;
 
     const macroInfo = updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, heavyLvlBenchmark, liveRestBench);
 
@@ -3187,13 +3187,13 @@ function drawAll() {
             sumV += l.volume;
         });
 
-        const avgV = Math.max(tradedCells.length > 0 ? sumV / tradedCells.length : tfAvgCellVol, tfAvgCellVol * 0.85);
-        const effectiveHeavyAbsCut = Math.max(avgV * 1.85, heavyLvlBenchmark * 1.15);
-        const effectiveNormAbsCut = Math.max(avgV * 1.25, heavyLvlBenchmark * 0.75);
+        // Strict Session-Anchored Cutoffs (Dead low-volume candles can NEVER trigger fake institutional flags!)
+        const avgV = Math.max(tradedCells.length > 0 ? sumV / tradedCells.length : tfAvgCellVol, tfAvgCellVol * 0.90);
+        const effectiveHeavyAbsCut = Math.max(avgV * 1.75, heavyLvlBenchmark * 1.15);
+        const effectiveDispCut = Math.max(avgV * 1.60, heavyLvlBenchmark * 1.05);
 
         const baseRestRef = liveRestBench > 0 ? Math.max(liveRestBench, heavyLvlBenchmark) : heavyLvlBenchmark;
-        const effectiveHeavyPullQty = Math.max(baseRestRef * 0.95, avgV * 1.10);
-        const effectiveNormPullQty = Math.max(baseRestRef * 0.50, avgV * 0.60);
+        const effectiveHeavyPullQty = Math.max(baseRestRef * 1.05, avgV * 1.25);
 
         if (c.vah != null && c.val != null) {
             const yVah = pToY(c.vah + effStep * 0.5);
@@ -3225,8 +3225,7 @@ function drawAll() {
         let topSummary = null;
         let botSummary = null;
         let cBidPullSum = 0, cAskPullSum = 0;
-        let whaleBuyCount = 0, whaleSellCount = 0;
-        let cWhaleBuyVol = c.whale_buy_vol || 0, cWhaleSellVol = c.whale_sell_vol || 0;
+        let dispBuyCount = 0, dispSellCount = 0;
         const cRange = Math.max(c.high - c.low, rawStep * 0.5);
         const closePos = (c.close - c.low) / cRange;
         const lowerClusterTop = c.low + cRange * 0.45;
@@ -3261,8 +3260,6 @@ function drawAll() {
             const trd = Math.max(l.trades || 1, 1);
             const lvlLotSize = totV / trd;
             const lotRatio = lvlLotSize / baselineLotSize;
-            const wBuy = l.whale_buy || 0;
-            const wSell = l.whale_sell || 0;
 
             const lvlPullDelta = bPull - aPull;
             const bPullPct = bPull > 0 ? Math.round((bPull / (bPull + sellV)) * 100) : 0;
@@ -3270,45 +3267,35 @@ function drawAll() {
             const bAbsPct = totV > 0 ? Math.round((sellV / totV) * 100) : 0;
             const aAbsPct = totV > 0 ? Math.round((buyV / totV) * 100) : 0;
 
-            const isStealthChurnLvl = clusTot >= Math.max(avgV * 2.2, heavyLvlBenchmark * 0.90) && clusBPct >= 42 && clusAPct >= 42;
+            // 1. PASSIVE ICEBERG ABSORPTION (Price fails to break through despite heavy Taker volume)
+            const isStealthChurnLvl = clusTot >= Math.max(avgV * 2.4, heavyLvlBenchmark * 1.25) && clusBPct >= 42 && clusAPct >= 42;
             const inBidCluster = l.price <= lowerClusterTop;
-            const bidClusterHeld = c.close > l.price + effStep * 0.4 && (c.close >= c.open || closePos >= 0.42);
+            const bidClusterHeld = c.close > l.price + effStep * 0.4 && (c.close >= c.open || closePos >= 0.45);
             let bidAbsType = null;
-            if (inBidCluster && bidClusterHeld && ((sellV >= effectiveHeavyAbsCut && bAbsPct >= 60) || (clusSell >= effectiveHeavyAbsCut * 1.65 && clusBPct >= 58 && sellV >= avgV * 0.8) || isStealthChurnLvl)) {
+            if (inBidCluster && bidClusterHeld && ((sellV >= effectiveHeavyAbsCut && bAbsPct >= 60) || (clusSell >= effectiveHeavyAbsCut * 1.65 && clusBPct >= 58 && sellV >= heavyLvlBenchmark * 0.85) || isStealthChurnLvl)) {
                 bidAbsType = 'heavy';
                 if (!botSummary || sellV > botSummary.val) botSummary = { type: 'ABS', val: sellV, pct: Math.max(bAbsPct, clusBPct) };
-            } else if (inBidCluster && bidClusterHeld && sellV >= effectiveNormAbsCut && bAbsPct >= 52) {
-                bidAbsType = 'norm';
             }
 
             const inAskCluster = l.price >= upperClusterBot;
-            const askClusterHeld = c.close < l.price - effStep * 0.4 && (c.close <= c.open || closePos <= 0.58);
+            const askClusterHeld = c.close < l.price - effStep * 0.4 && (c.close <= c.open || closePos <= 0.55);
             let askAbsType = null;
-            if (inAskCluster && askClusterHeld && ((buyV >= effectiveHeavyAbsCut && aAbsPct >= 60) || (clusBuy >= effectiveHeavyAbsCut * 1.65 && clusAPct >= 58 && buyV >= avgV * 0.8) || isStealthChurnLvl)) {
+            if (inAskCluster && askClusterHeld && ((buyV >= effectiveHeavyAbsCut && aAbsPct >= 60) || (clusBuy >= effectiveHeavyAbsCut * 1.65 && clusAPct >= 58 && buyV >= heavyLvlBenchmark * 0.85) || isStealthChurnLvl)) {
                 askAbsType = 'heavy';
                 if (!topSummary || buyV > topSummary.val) topSummary = { type: 'ABS', val: buyV, pct: Math.max(aAbsPct, clusAPct) };
-            } else if (inAskCluster && askClusterHeld && buyV >= effectiveNormAbsCut && aAbsPct >= 52) {
-                askAbsType = 'norm';
             }
 
-            // Behavioral Whale Classification: Passive Absorption Whale OR Aggressive Displacement Whale
-            const minRealWhaleCellVol = heavyLvlBenchmark * 1.25;
-            const isPassiveAbsWhale = (bidAbsType === 'heavy' || askAbsType === 'heavy') && (totV >= minRealWhaleCellVol);
-            const isDisplacementWhale = (totV >= minRealWhaleCellVol) && ((wBuy + wSell >= heavyLvlBenchmark * 0.60) || lotRatio >= 3.8);
-            const isWhaleLot = isPassiveAbsWhale || isDisplacementWhale;
+            // 2. AGGRESSIVE DISPLACEMENT SWEEP (Heavy one-sided volume that actually breaks & closes beyond the level!)
+            const sellImb = sellV > buyV * 2.5 && sellV > 0;
+            const buyImb = buyV > sellV * 2.5 && buyV > 0;
+            const isBullDispSweep = !askAbsType && buyImb && buyV >= effectiveDispCut && c.close > l.price + effStep * 0.3 && c.close > c.open;
+            const isBearDispSweep = !bidAbsType && sellImb && sellV >= effectiveDispCut && c.close < l.price - effStep * 0.3 && c.close < c.open;
 
-            if (isWhaleLot) {
-                if (bidAbsType === 'heavy' || ((wBuy > 0 || wSell > 0) ? (wBuy > wSell) : (buyV > sellV))) whaleBuyCount++;
-                else whaleSellCount++;
-            }
+            if (isBullDispSweep) dispBuyCount++;
+            if (isBearDispSweep) dispSellCount++;
 
-            let bidPullType = null;
-            if (bPull >= effectiveHeavyPullQty && bPullPct >= 55) bidPullType = 'heavy';
-            else if (bPull >= effectiveNormPullQty && bPullPct >= 38) bidPullType = 'norm';
-
-            let askPullType = null;
-            if (aPull >= effectiveHeavyPullQty && aPullPct >= 55) askPullType = 'heavy';
-            else if (aPull >= effectiveNormPullQty && aPullPct >= 38) askPullType = 'norm';
+            let bidPullType = (bPull >= effectiveHeavyPullQty && bPullPct >= 55) ? 'heavy' : null;
+            let askPullType = (aPull >= effectiveHeavyPullQty && aPullPct >= 55) ? 'heavy' : null;
 
             if (py < -20 || py > chartH + 10) return;
 
@@ -3317,7 +3304,7 @@ function drawAll() {
 
             if (proViewMode) {
                 if (bidAbsType === 'heavy') {
-                    ctx.fillStyle = 'rgba(0, 229, 255, 0.22)';
+                    ctx.fillStyle = 'rgba(0, 229, 255, 0.24)';
                     ctx.fillRect(spineX - halfW, topY, halfW, cellH);
                 } else if (bidPullType === 'heavy' && lvlPullDelta > 0) {
                     ctx.fillStyle = 'rgba(255, 64, 129, 0.22)';
@@ -3325,7 +3312,7 @@ function drawAll() {
                 }
 
                 if (askAbsType === 'heavy') {
-                    ctx.fillStyle = 'rgba(255, 145, 0, 0.25)';
+                    ctx.fillStyle = 'rgba(255, 145, 0, 0.26)';
                     ctx.fillRect(spineX, topY, halfW, cellH);
                 } else if (askPullType === 'heavy' && lvlPullDelta < 0) {
                     ctx.fillStyle = 'rgba(224, 64, 251, 0.22)';
@@ -3335,8 +3322,6 @@ function drawAll() {
 
             const sellRatio = Math.min(1, sellV / maxV);
             const buyRatio = Math.min(1, buyV / maxV);
-            const sellImb = sellV > buyV * 2.5 && sellV > 0;
-            const buyImb = buyV > sellV * 2.5 && buyV > 0;
 
             ctx.fillStyle = sellImb ? 'rgba(255, 23, 68, 0.55)' : 'rgba(242, 54, 69, 0.25)';
             ctx.fillRect(spineX - halfW * sellRatio, topY, halfW * sellRatio, cellH);
@@ -3352,12 +3337,17 @@ function drawAll() {
             }
 
             if (curX >= boxL && curX <= boxR && curY >= topY && curY <= topY + cellH) {
+                let rowRole = '⚪ NORMAL FLOW';
+                if (bidAbsType === 'heavy') rowRole = '🧊 PASSIVE BID ABSORPTION (SELLERS TRAPPED ➔ BULLISH)';
+                else if (askAbsType === 'heavy') rowRole = '🧊 PASSIVE ASK ABSORPTION (BUYERS CAPPED ➔ BEARISH)';
+                else if (isBullDispSweep) rowRole = '⚡ AGGRESSIVE BUY DISPLACEMENT SWEEP (BULLISH)';
+                else if (isBearDispSweep) rowRole = '⚡ AGGRESSIVE SELL DISPLACEMENT SWEEP (BEARISH)';
+
                 hoveredCellInfo = {
                     price: l.price, sellV, buyV,
-                    wBuy, wSell, rBuy: l.retail_buy || 0, rSell: l.retail_sell || 0,
                     bPull, aPull, lvlPullDelta,
                     bPullPct, aPullPct, bAbsPct, aAbsPct,
-                    trades: trd, lvlLotSize, lotRatio, isWhaleLot, isPassiveAbsWhale
+                    trades: trd, lvlLotSize, lotRatio, rowRole
                 };
                 ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 1;
@@ -3366,23 +3356,24 @@ function drawAll() {
 
             if (canPrint) {
                 ctx.textBaseline = 'middle';
-                const whaleSellMark = (proViewMode && isWhaleLot && (askAbsType === 'heavy' || wSell > wBuy || (wSell === 0 && sellV >= buyV))) ? '◆' : '';
-                const whaleBuyMark = (proViewMode && isWhaleLot && (bidAbsType === 'heavy' || wBuy > wSell || (wBuy === 0 && buyV > sellV))) ? '◆' : '';
+                // NO FAKE DIAMONDS! Only mark verified Passive Absorption (🛡️) or True Displacement Sweep (⚡)
+                const leftMark = proViewMode ? (bidAbsType === 'heavy' ? '🛡️' : (isBearDispSweep ? '⚡' : '')) : '';
+                const rightMark = proViewMode ? (askAbsType === 'heavy' ? '🛡️' : (isBullDispSweep ? '⚡' : '')) : '';
 
-                ctx.font = (sellImb || isPoc || whaleSellMark) ? 'bold 9.5px monospace' : '9.5px monospace';
-                ctx.fillStyle = whaleSellMark ? '#ffd700' : (sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
+                ctx.font = (sellImb || isPoc || leftMark) ? 'bold 9.5px monospace' : '9.5px monospace';
+                ctx.fillStyle = bidAbsType === 'heavy' ? '#00e5ff' : (isBearDispSweep ? '#ffd700' : (sellImb ? '#ff5252' : (isPoc ? '#ffeb3b' : '#e0e3eb')));
                 ctx.textAlign = 'right';
-                ctx.fillText(`${whaleSellMark}${fmt(sellV)}`, spineX - 4, py);
+                ctx.fillText(`${leftMark}${fmt(sellV)}`, spineX - 4, py);
 
-                ctx.font = (buyImb || isPoc || whaleBuyMark) ? 'bold 9.5px monospace' : '9.5px monospace';
-                ctx.fillStyle = whaleBuyMark ? '#ffd700' : (buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#e0e3eb'));
+                ctx.font = (buyImb || isPoc || rightMark) ? 'bold 9.5px monospace' : '9.5px monospace';
+                ctx.fillStyle = askAbsType === 'heavy' ? '#ff9100' : (isBullDispSweep ? '#ffd700' : (buyImb ? '#00e676' : (isPoc ? '#ffeb3b' : '#e0e3eb')));
                 ctx.textAlign = 'left';
-                ctx.fillText(`${fmt(buyV)}${whaleBuyMark}`, spineX + 4, py);
+                ctx.fillText(`${fmt(buyV)}${rightMark}`, spineX + 4, py);
 
                 if (proViewMode && candleW >= 185) {
                     let leftTag = '';
                     let leftCol = '#00e5ff';
-                    if (bidAbsType === 'heavy') { leftTag = `ABS:${bAbsPct}%`; leftCol = '#00e5ff'; }
+                    if (bidAbsType === 'heavy') { leftTag = `B-ABS:${bAbsPct}%`; leftCol = '#00e5ff'; }
                     else if (bidPullType === 'heavy') { leftTag = `BP:${fmt(bPull)}`; leftCol = '#ff4081'; }
                     if (leftTag) {
                         ctx.font = 'bold 7.5px monospace';
@@ -3393,7 +3384,7 @@ function drawAll() {
 
                     let rightTag = '';
                     let rightCol = '#ff9100';
-                    if (askAbsType === 'heavy') { rightTag = `ABS:${aAbsPct}%`; rightCol = '#ff9100'; }
+                    if (askAbsType === 'heavy') { rightTag = `A-ABS:${aAbsPct}%`; rightCol = '#ff9100'; }
                     else if (askPullType === 'heavy') { rightTag = `AP:${fmt(aPull)}`; rightCol = '#e040fb'; }
                     else if (isPoc) { rightTag = 'POC'; rightCol = '#ffeb3b'; }
                     if (rightTag) {
@@ -3406,7 +3397,6 @@ function drawAll() {
             }
         });
 
-        const totalWhalesInCandle = whaleBuyCount + whaleSellCount;
         const cVol = c.volume || 0;
         const rvol = cVol / avgFlowVol;
         const mktBuyPct = cVol > 0 ? Math.round(((c.buy_volume || 0) / cVol) * 100) : 50;
@@ -3415,15 +3405,14 @@ function drawAll() {
         const upperWick = c.high - Math.max(c.open, c.close);
         const lowerWick = Math.min(c.open, c.close) - c.low;
 
+        // Check how Old Swing High / Old Swing Low Liquidity was treated!
         let prevSwingHigh = -Infinity, prevSwingLow = Infinity;
-        for (let k = Math.max(0, idx - 5); k < idx; k++) {
+        for (let k = Math.max(0, idx - 6); k < idx; k++) {
             if (candles[k].high > prevSwingHigh) prevSwingHigh = candles[k].high;
             if (candles[k].low < prevSwingLow) prevSwingLow = candles[k].low;
         }
         const sweptSwingHigh = idx > 0 && c.high > prevSwingHigh;
         const sweptSwingLow = idx > 0 && c.low < prevSwingLow;
-        const candleAvgLot = cVol / Math.max(c.trades || 1, 1);
-        const isRetailLotBurst = (candleAvgLot < baselineLotSize * 1.15) && (rvol >= 0.85);
 
         const candlePullDelta = cBidPullSum - cAskPullSum;
         const cBpPct = cBidPullSum > 0 ? Math.round((cBidPullSum / (cBidPullSum + (c.sell_volume || 1))) * 100) : 0;
@@ -3431,61 +3420,58 @@ function drawAll() {
 
         let pullDeltaLine = `10sBP:${fmt(cBidPullSum)}(${cBpPct}%) AP:${fmt(cAskPullSum)}(${cApPct}%) PΔ:${candlePullDelta >= 0 ? '+' : ''}${fmt(candlePullDelta)}`;
         let pullDeltaCol = '#b0bec5';
-        if (candlePullDelta < -avgV * 0.4 && c.close > c.open) {
-            pullDeltaCol = '#00e5ff';
-        } else if (candlePullDelta > avgV * 0.4 && c.close < c.open) {
-            pullDeltaCol = '#ff4081';
-        }
+        if (candlePullDelta < -avgV * 0.5 && c.close > c.open) pullDeltaCol = '#00e5ff';
+        else if (candlePullDelta > avgV * 0.5 && c.close < c.open) pullDeltaCol = '#ff4081';
 
-        let flowVerdict = (cWhaleBuyVol + cWhaleSellVol > 0)
-            ? `🐋W:${fmt(cWhaleBuyVol)}B/${fmt(cWhaleSellVol)}S | 🐑R:${fmt(c.retail_buy_vol)}B/${fmt(c.retail_sell_vol)}S`
-            : `MB:${mktBuyPct}%|MS:${mktSellPct}%`;
-        let candleDecision = `⚪ NEUTRAL / CHOP`;
+        let flowVerdict = `Taker B:${mktBuyPct}% vs S:${mktSellPct}%`;
+        let candleDecision = `⚪ NEUTRAL / NOISE`;
         let verdictCol = '#8b93a7';
         let decisionCol = '#9ba2b0';
         let isHighConviction = false;
 
         if (rvol < 0.65) {
-            flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x)`;
-            candleDecision = `⚪ SKIP (RETAIL NOISE)`;
+            flowVerdict = `LOW FLOW (${rvol.toFixed(1)}x Avg)`;
+            candleDecision = `⚪ SKIP (LOW VOL NOISE)`;
         } else {
             let cBull = 0, cBear = 0;
-            if (mktSellPct >= 56 && (c.close >= c.open || lowerWick > bodySize * 0.75)) cBull += 34;
-            if (mktBuyPct >= 56 && (c.close <= c.open || upperWick > bodySize * 0.75)) cBear += 34;
-            if (mktBuyPct >= 58 && c.close > c.open && closePos >= 0.6) cBull += 30;
-            if (mktSellPct >= 58 && c.close < c.open && closePos <= 0.4) cBear += 30;
-            if (botSummary && closePos >= 0.42) cBull += 26;
-            if (topSummary && closePos <= 0.58) cBear += 26;
-            if (candlePullDelta < 0 && c.close > c.open) cBull += 20;
-            if (candlePullDelta > 0 && c.close < c.open) cBear += 20;
-            if (whaleBuyCount > whaleSellCount || cWhaleBuyVol > cWhaleSellVol * 1.3) cBull += 22;
-            else if (whaleSellCount > whaleBuyCount || cWhaleSellVol > cWhaleBuyVol * 1.3) cBear += 22;
+            // Effort vs Result Scoring
+            if (mktSellPct >= 56 && (c.close >= c.open || lowerWick > bodySize * 0.75)) cBull += 34; // Sellers absorbed!
+            if (mktBuyPct >= 56 && (c.close <= c.open || upperWick > bodySize * 0.75)) cBear += 34;  // Buyers capped!
+            if (mktBuyPct >= 58 && c.close > c.open && closePos >= 0.62 && dispBuyCount > 0) cBull += 30; // True Buy Displacement
+            if (mktSellPct >= 58 && c.close < c.open && closePos <= 0.38 && dispSellCount > 0) cBear += 30; // True Sell Displacement
+            if (botSummary && closePos >= 0.45) cBull += 28;
+            if (topSummary && closePos <= 0.55) cBear += 28;
+            if (candlePullDelta < -avgV * 0.5 && c.close > c.open) cBull += 18;
+            if (candlePullDelta > avgV * 0.5 && c.close < c.open) cBear += 18;
 
-            if (sweptSwingLow && c.close > prevSwingLow && (botSummary || isRetailLotBurst)) {
-                flowVerdict = `🎯SSL-SWEEP: Liquidity Grabbed ➔ Reversal!`; verdictCol = '#00e5ff'; isHighConviction = true; cBull += 28;
-            } else if (sweptSwingHigh && c.close < prevSwingHigh && (topSummary || isRetailLotBurst)) {
-                flowVerdict = `🎯BSL-SWEEP: Liquidity Grabbed ➔ Reject!`; verdictCol = '#ff9100'; isHighConviction = true; cBear += 28;
-            } else if (candlePullDelta < -avgV * 0.6 && cApPct >= 55 && c.close > c.open) {
-                flowVerdict = `⚠️FAKE-ASK WALL PULLED ➔ BULL BREAK!`; verdictCol = '#e040fb'; isHighConviction = true;
-            } else if (candlePullDelta > avgV * 0.6 && cBpPct >= 55 && c.close < c.open) {
-                flowVerdict = `⚠️FAKE-BID WALL PULLED ➔ BEAR DUMP!`; verdictCol = '#ff4081'; isHighConviction = true;
-            } else if (topSummary && cAskPullSum < topSummary.val * 0.3 && c.close <= c.open) {
-                flowVerdict = `🛡️CLUSTER-ASK CAP: Absorbed & Stopped!`; verdictCol = '#ff9100'; isHighConviction = true;
-            } else if (botSummary && cBidPullSum < botSummary.val * 0.3 && c.close >= c.open) {
-                flowVerdict = `🛡️CLUSTER-BID HOLD: Absorbed & Stopped!`; verdictCol = '#00e5ff'; isHighConviction = true;
+            // Old High / Low Liquidity Sweep vs True Breakout Classification
+            if (sweptSwingLow && c.close > prevSwingLow && (botSummary || c.delta < 0 || closePos >= 0.52)) {
+                flowVerdict = `🎯OLD LOW SWEPT + 🧊BID ABSORBED ➔ REVERSAL!`; verdictCol = '#00e5ff'; isHighConviction = true; cBull += 30;
+            } else if (sweptSwingHigh && c.close < prevSwingHigh && (topSummary || c.delta > 0 || closePos <= 0.48)) {
+                flowVerdict = `🎯OLD HIGH SWEPT + 🧊ASK CAPPED ➔ REJECT!`; verdictCol = '#ff9100'; isHighConviction = true; cBear += 30;
+            } else if (sweptSwingHigh && c.close > prevSwingHigh && dispBuyCount > 0 && !topSummary && closePos >= 0.65) {
+                flowVerdict = `🚀OLD HIGH BROKEN + ⚡DISPLACEMENT SWEEP!`; verdictCol = '#00e676'; isHighConviction = true; cBull += 24;
+            } else if (sweptSwingLow && c.close < prevSwingLow && dispSellCount > 0 && !botSummary && closePos <= 0.35) {
+                flowVerdict = `🚀OLD LOW BROKEN + ⚡DISPLACEMENT DUMP!`; verdictCol = '#ff5252'; isHighConviction = true; cBear += 24;
+            } else if (candlePullDelta < -avgV * 0.65 && cApPct >= 55 && c.close > c.open) {
+                flowVerdict = `⚠️ASK SPOOF PULLED ➔ BULL EXPANSION!`; verdictCol = '#e040fb'; isHighConviction = true;
+            } else if (candlePullDelta > avgV * 0.65 && cBpPct >= 55 && c.close < c.open) {
+                flowVerdict = `⚠️BID SPOOF PULLED ➔ BEAR DUMP!`; verdictCol = '#ff4081'; isHighConviction = true;
+            } else if (topSummary && c.close <= c.open) {
+                flowVerdict = `🧊PASSIVE ASK CAPPED BUYERS (TRAP)!`; verdictCol = '#ff9100'; isHighConviction = true;
+            } else if (botSummary && c.close >= c.open) {
+                flowVerdict = `🧊PASSIVE BID ABSORBED SELLERS (HOLD)!`; verdictCol = '#00e5ff'; isHighConviction = true;
             }
 
             const cNet = cBull - cBear;
-            const whalePrefix = totalWhalesInCandle > 0 ? '◆' : '';
-
-            if (cNet >= 20) {
-                candleDecision = `${whalePrefix}🟢 BUYERS WIN (+${cNet})`;
+            if (cNet >= 24) {
+                candleDecision = `🟢 BULLS WIN (+${cNet})`;
                 decisionCol = '#00e676';
-            } else if (cNet <= -20) {
-                candleDecision = `${whalePrefix}🔴 SELLERS WIN (${cNet})`;
+            } else if (cNet <= -24) {
+                candleDecision = `🔴 BEARS WIN (${cNet})`;
                 decisionCol = '#ff5252';
             } else {
-                candleDecision = `${whalePrefix}⚖️ CLUSTER BUILDUP`;
+                candleDecision = `⚖️ TWO-WAY ABSORPTION`;
                 decisionCol = '#ffca28';
             }
         }
@@ -3497,21 +3483,21 @@ function drawAll() {
             let topYBanner = Math.max(16, yH - 18);
             if (topSummary && c.close < c.high - rawStep) {
                 ctx.fillStyle = 'rgba(255, 145, 0, 0.92)';
-                ctx.fillRect(cx - 64, topYBanner, 128, 13);
+                ctx.fillRect(cx - 66, topYBanner, 132, 13);
                 ctx.fillStyle = '#000';
-                ctx.fillText(`▼ ASK ABS:${fmt(topSummary.val)}(${topSummary.pct}%)`, cx, topYBanner + 7);
+                ctx.fillText(`▼ ASK CAPPED:${fmt(topSummary.val)}(${topSummary.pct}%)`, cx, topYBanner + 7);
             }
             if (botSummary && c.close > c.low + rawStep) {
                 ctx.fillStyle = 'rgba(0, 229, 255, 0.92)';
-                ctx.fillRect(cx - 64, botYBanner, 128, 13);
+                ctx.fillRect(cx - 66, botYBanner, 132, 13);
                 ctx.fillStyle = '#000';
-                ctx.fillText(`▲ BID ABS:${fmt(botSummary.val)}(${botSummary.pct}%)`, cx, botYBanner + 7);
+                ctx.fillText(`▲ BID HELD:${fmt(botSummary.val)}(${botSummary.pct}%)`, cx, botYBanner + 7);
                 botYBanner += 18;
             }
         }
 
         if (candleW >= 65) {
-            const pillW = Math.min(candleW * 0.96, 198);
+            const pillW = Math.min(candleW * 0.96, 202);
             const pillH = 64;
             const maxAllowedY = H - TIME_H - pillH - 3;
             const pillY = Math.min(Math.max(botYBanner + 5, yL + 18), maxAllowedY);
@@ -3530,7 +3516,7 @@ function drawAll() {
 
             ctx.font = '8.5px monospace';
             ctx.fillStyle = '#b0b8c8';
-            ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} | B:${fmt(c.buy_volume)} S:${fmt(c.sell_volume)}`, cx, pillY + 19);
+            ctx.fillText(`CVD:${cvd >= 0 ? '+' : ''}${fmt(cvd)} | Taker B:${fmt(c.buy_volume)} S:${fmt(c.sell_volume)}`, cx, pillY + 19);
 
             ctx.font = 'bold 8.5px monospace';
             ctx.fillStyle = pullDeltaCol;
@@ -3554,7 +3540,7 @@ function drawAll() {
         }
     });
 
-    const hudW = Math.min(chartW - 12, 510);
+    const hudW = Math.min(chartW - 12, 520);
     ctx.fillStyle = 'rgba(17, 21, 31, 0.92)';
     ctx.fillRect(6, 6, hudW, hoveredCellInfo ? 66 : 22);
     ctx.strokeStyle = '#2962ff';
@@ -3567,12 +3553,11 @@ function drawAll() {
     if (hoveredCellInfo) {
         const h = hoveredCellInfo;
         ctx.fillStyle = '#ffeb3b';
-        ctx.fillText(`Px:${h.price.toFixed(dec)} | 🐋Whale B:${fmt(h.wBuy)} S:${fmt(h.wSell)} | 🐑Retail B:${fmt(h.rBuy)} S:${fmt(h.rSell)}`, 12, 33);
+        ctx.fillText(`Px:${h.price.toFixed(dec)} | Taker Sell(BidHit):${fmt(h.sellV)} (${h.bAbsPct}%) | Taker Buy(AskLift):${fmt(h.buyV)} (${h.aAbsPct}%)`, 12, 33);
         ctx.fillStyle = '#ff80ab';
         ctx.fillText(`10sBPull:${fmt(h.bPull)}(${h.bPullPct}%) | 10sAPull:${fmt(h.aPull)}(${h.aPullPct}%) | PΔ:${h.lvlPullDelta >= 0 ? '+' : ''}${fmt(h.lvlPullDelta)}`, 12, 47);
-        ctx.fillStyle = h.isWhaleLot ? '#ffd700' : '#b0bec5';
-        const playerTag = h.isPassiveAbsWhale ? '🛡️ PASSIVE ABSORB WHALE!' : (h.isWhaleLot ? '🐋 DISPLACEMENT WHALE!' : (h.lotRatio < 1.2 ? '🐑 RETAIL / BOT SPLIT' : '⚡ STANDARD FLOW'));
-        ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) [${playerTag}]`, 12, 61);
+        ctx.fillStyle = '#00e5ff';
+        ctx.fillText(`Trades:${h.trades} | AvgLot:${fmt(h.lvlLotSize)} (${h.lotRatio.toFixed(1)}x) | ${h.rowRole}`, 12, 61);
     }
 
     const yAxisX = chartW;
@@ -3597,7 +3582,7 @@ function drawAll() {
     }
 
     // =========================================================================
-    // MULTI-ROW CLUSTER DOM + IRON-ANCHOR VERDICT ENGINE (CRASH-PROOF)
+    // MULTI-ROW CLUSTER DOM + OLD HIGH/LOW SWEEP & IRON-ANCHOR VERDICT ENGINE
     // =========================================================================
     try {
         const domStep = Math.max(effStep || rawStep || 1.0, 1e-6);
@@ -3627,14 +3612,9 @@ function drawAll() {
             const b = Math.floor(d.price / domStep + 1e-9) * domStep;
             const k = b.toFixed(6);
             let cur = rawDomCluster.get(k) || {
-                wBuy: 0, wSell: 0, rBuy: 0, rSell: 0,
                 flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0,
                 iceBid: 0, iceAsk: 0
             };
-            cur.wBuy += (Number(d.w_buy) || 0);
-            cur.wSell += (Number(d.w_sell) || 0);
-            cur.rBuy += (Number(d.r_buy) || 0);
-            cur.rSell += (Number(d.r_sell) || 0);
             cur.flashBp += (Number(d.flash_bid_pull) || 0);
             cur.flashAp += (Number(d.flash_ask_pull) || 0);
             cur.agedBp += (Number(d.aged_bid_pull) || 0);
@@ -3659,8 +3639,9 @@ function drawAll() {
         let minActivePrice = lastC.low;
         let maxActivePrice = lastC.high;
         let rBidAbs = 0, rAskAbs = 0;
+        let dispBullLevels = 0, dispBearLevels = 0;
 
-        const minInstCellFloor = (avgFlowVol / 12.0) * 0.85;
+        const minInstCellFloor = (avgFlowVol / 10.0) * 0.95;
         const effCellBench = Math.max(tfAvgCellVol, minInstCellFloor);
 
         structSet.forEach((rc, sIdx) => {
@@ -3679,13 +3660,9 @@ function drawAll() {
                 const gl = gList[i];
                 const k = gl.price.toFixed(6);
                 if (isRecent3) {
-                    let cur = stickyMap.get(k) || { buy: 0, sell: 0, wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, bp: 0, ap: 0 };
+                    let cur = stickyMap.get(k) || { buy: 0, sell: 0, bp: 0, ap: 0 };
                     cur.buy += gl.buy;
                     cur.sell += gl.sell;
-                    cur.wBuy += (gl.whale_buy || 0);
-                    cur.wSell += (gl.whale_sell || 0);
-                    cur.rBuy += (gl.retail_buy || 0);
-                    cur.rSell += (gl.retail_sell || 0);
                     cur.bp += gl.bid_pulled;
                     cur.ap += gl.ask_pulled;
                     stickyMap.set(k, cur);
@@ -3703,7 +3680,7 @@ function drawAll() {
                 const clusTot = clusSell + clusBuy;
                 const clusBPct = clusTot > 0 ? (clusSell / clusTot) * 100 : 0;
                 const clusAPct = clusTot > 0 ? (clusBuy / clusTot) * 100 : 0;
-                const isChurn = clusTot >= effCellBench * 2.1 && clusBPct >= 42 && clusAPct >= 42;
+                const isChurn = clusTot >= effCellBench * 2.3 && clusBPct >= 42 && clusAPct >= 42;
                 const bRestHere = bidMap.get(k) || 0;
                 const aRestHere = askMap.get(k) || 0;
                 const rawD = rawDomCluster.get(k);
@@ -3712,21 +3689,26 @@ function drawAll() {
                 const askRotatedDn = (rc.close <= rc.open || rcClosePos <= 0.55) && (rc.close < gl.price - domStep * 0.4);
 
                 const isBidClusterAbs = gl.price <= lowerSwingZone && bidRotatedUp && (
-                    (clusSell >= effCellBench * 1.6 && clusBPct >= 58 && gl.sell >= effCellBench * 0.7)
+                    (clusSell >= effCellBench * 1.75 && clusBPct >= 58 && gl.sell >= effCellBench * 0.85)
                     || isChurn
-                    || (gl.sell >= effCellBench * 1.0 && bRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
-                    || (rawD && rawD.iceBid >= effCellBench * 0.5)
+                    || (gl.sell >= effCellBench * 1.15 && bRestHere >= Math.max(liveRestBench * 1.35, effCellBench))
+                    || (rawD && rawD.iceBid >= effCellBench * 0.65)
                 );
 
                 const isAskClusterAbs = gl.price >= upperSwingZone && askRotatedDn && (
-                    (clusBuy >= effCellBench * 1.6 && clusAPct >= 58 && gl.buy >= effCellBench * 0.7)
+                    (clusBuy >= effCellBench * 1.75 && clusAPct >= 58 && gl.buy >= effCellBench * 0.85)
                     || isChurn
-                    || (gl.buy >= effCellBench * 1.0 && aRestHere >= Math.max(liveRestBench * 1.3, effCellBench))
-                    || (rawD && rawD.iceAsk >= effCellBench * 0.5)
+                    || (gl.buy >= effCellBench * 1.15 && aRestHere >= Math.max(liveRestBench * 1.35, effCellBench))
+                    || (rawD && rawD.iceAsk >= effCellBench * 0.65)
                 );
 
                 if (isBidClusterAbs) rBidAbs++;
                 if (isAskClusterAbs) rAskAbs++;
+
+                if (isRecent3) {
+                    if (!isAskClusterAbs && gl.buy > gl.sell * 2.5 && gl.buy >= effCellBench * 1.4 && rc.close > gl.price + domStep * 0.3) dispBullLevels++;
+                    if (!isBidClusterAbs && gl.sell > gl.buy * 2.5 && gl.sell >= effCellBench * 1.4 && rc.close < gl.price - domStep * 0.3) dispBearLevels++;
+                }
             }
         });
 
@@ -3741,8 +3723,8 @@ function drawAll() {
             const k = p.toFixed(6);
             const bRest = bidMap.get(k) || 0;
             const aRest = askMap.get(k) || 0;
-            const st = stickyMap.get(k) || { buy: 0, sell: 0, wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, bp: 0, ap: 0 };
-            const rawD = rawDomCluster.get(k) || { wBuy: 0, wSell: 0, rBuy: 0, rSell: 0, flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0, iceBid: 0, iceAsk: 0 };
+            const st = stickyMap.get(k) || { buy: 0, sell: 0, bp: 0, ap: 0 };
+            const rawD = rawDomCluster.get(k) || { flashBp: 0, flashAp: 0, agedBp: 0, agedAp: 0, iceBid: 0, iceAsk: 0 };
             const mag = domMagnetMap.get(k) || null;
             const distTicks = Math.round(Math.abs(p - liveCenterP) / domStep);
 
@@ -3757,16 +3739,11 @@ function drawAll() {
         let maxRowVal = 1;
         let totExecBuy = 0, totExecSell = 0, totPullB = 0, totPullA = 0;
         let totFlashPullB = 0, totFlashPullA = 0, totIceBid = 0, totIceAsk = 0;
-        let totWhaleBuy = 0, totWhaleSell = 0, totRetailBuy = 0, totRetailSell = 0;
         let nearBidRest = 0, nearAskRest = 0;
 
         activeDomRows.forEach(r => {
             totExecBuy += r.st.buy;
             totExecSell += r.st.sell;
-            totWhaleBuy += Math.max(r.st.wBuy, r.rawD.wBuy);
-            totWhaleSell += Math.max(r.st.wSell, r.rawD.wSell);
-            totRetailBuy += Math.max(r.st.rBuy, r.rawD.rBuy);
-            totRetailSell += Math.max(r.st.rSell, r.rawD.rSell);
             totPullB += r.totRawBp;
             totPullA += r.totRawAp;
             totFlashPullB += r.rawD.flashBp;
@@ -3787,25 +3764,24 @@ function drawAll() {
         const prevPoc = prevC.poc != null ? prevC.poc : (prevC.high + prevC.low) * 0.5;
         const curPoc = lastC.poc != null ? lastC.poc : (lastC.high + lastC.low) * 0.5;
 
-        let sPocUp = 0, sPocDn = 0, hhCount = 0, llCount = 0;
+        let sPocUp = 0, sPocDn = 0;
         const last4 = candles.slice(-4);
         for (let m = 1; m < last4.length; m++) {
             if (last4[m].poc != null && last4[m - 1].poc != null) {
                 if (last4[m].poc > last4[m - 1].poc) sPocUp++;
                 else if (last4[m].poc < last4[m - 1].poc) sPocDn++;
             }
-            if (last4[m].high > last4[m - 1].high && last4[m].low >= last4[m - 1].low) hhCount++;
-            if (last4[m].low < last4[m - 1].low && last4[m].high <= last4[m - 1].high) llCount++;
         }
 
-        let prev5High = -Infinity, prev5Low = Infinity;
-        for (let k = Math.max(0, candles.length - 6); k < candles.length - 1; k++) {
-            if (candles[k].high > prev5High) prev5High = candles[k].high;
-            if (candles[k].low < prev5Low) prev5Low = candles[k].low;
+        // Old Swing High & Old Swing Low (Last 8 closed candles)
+        let prevSwingHigh = -Infinity, prevSwingLow = Infinity;
+        for (let k = Math.max(0, candles.length - 9); k < candles.length - 1; k++) {
+            if (candles[k].high > prevSwingHigh) prevSwingHigh = candles[k].high;
+            if (candles[k].low < prevSwingLow) prevSwingLow = candles[k].low;
         }
 
         // =========================================================================
-        // IRON-ANCHOR INSTITUTIONAL VERDICT ENGINE (FOOTPRINT + LIVE DOM SYNERGY)
+        // PURE INSTITUTIONAL ANCHOR & OLD HIGH/LOW LIQUIDITY VERDICT ENGINE V6.0
         // =========================================================================
         const closedCandles = candles.length > 2 ? candles.slice(0, -1) : candles;
         const closed6 = closedCandles.slice(-6);
@@ -3817,39 +3793,36 @@ function drawAll() {
         closed6.forEach(cc => {
             const ccRange = Math.max(cc.high - cc.low, rawStep * 0.5);
             const ccClosePos = (cc.close - cc.low) / ccRange;
-            const ccWBuy = cc.whale_buy_vol || 0;
-            const ccWSell = cc.whale_sell_vol || 0;
             const ccDelta = cc.delta || 0;
 
-            if (ccDelta < -effCellBench * 0.3 && ccClosePos >= 0.55) {
-                anchorBullScore += 18;
+            // Closed Candle Effort vs Result (True Absorption vs True Displacement)
+            if (ccDelta < -effCellBench * 0.35 && ccClosePos >= 0.55) {
+                anchorBullScore += 20; // Heavy selling absorbed on closed candle!
                 anchorSupportPx = anchorSupportPx === null ? cc.low : Math.min(anchorSupportPx, cc.low);
-            } else if (ccDelta > effCellBench * 0.3 && ccClosePos <= 0.45) {
-                anchorBearScore += 18;
+            } else if (ccDelta > effCellBench * 0.35 && ccClosePos <= 0.45) {
+                anchorBearScore += 20; // Heavy buying capped on closed candle!
                 anchorResistPx = anchorResistPx === null ? cc.high : Math.max(anchorResistPx, cc.high);
-            }
-
-            if (ccWBuy > ccWSell * 1.35 && ccClosePos >= 0.50) {
-                anchorBullScore += 14;
-                if (cc.poc) anchorSupportPx = anchorSupportPx === null ? cc.poc : Math.min(anchorSupportPx, cc.poc);
-            } else if (ccWSell > ccWBuy * 1.35 && ccClosePos <= 0.50) {
-                anchorBearScore += 14;
-                if (cc.poc) anchorResistPx = anchorResistPx === null ? cc.poc : Math.max(anchorResistPx, cc.poc);
+            } else if (ccDelta > effCellBench * 0.45 && cc.close > cc.open && ccClosePos >= 0.68) {
+                anchorBullScore += 14; // Closed displacement expansion up
+            } else if (ccDelta < -effCellBench * 0.45 && cc.close < cc.open && ccClosePos <= 0.32) {
+                anchorBearScore += 14; // Closed displacement expansion down
             }
         });
 
-        if (rBidAbs > rAskAbs) anchorBullScore += Math.min(26, 12 + (rBidAbs - rAskAbs) * 5);
-        else if (rAskAbs > rBidAbs) anchorBearScore += Math.min(26, 12 + (rAskAbs - rBidAbs) * 5);
+        if (rBidAbs > rAskAbs) anchorBullScore += Math.min(28, 14 + (rBidAbs - rAskAbs) * 5);
+        else if (rAskAbs > rBidAbs) anchorBearScore += Math.min(28, 14 + (rAskAbs - rBidAbs) * 5);
 
-        if (totIceBid > totIceAsk * 1.3) anchorBullScore += 15;
-        else if (totIceAsk > totIceBid * 1.3) anchorBearScore += 15;
+        if (totIceBid > totIceAsk * 1.3) anchorBullScore += 16;
+        else if (totIceAsk > totIceBid * 1.3) anchorBearScore += 16;
 
         if (sPocUp > sPocDn) anchorBullScore += 14;
         else if (sPocDn > sPocUp) anchorBearScore += 14;
 
         const isBigExpansionCandle = cRange >= avgCandleRange * 1.55;
-        const bullSweepReject = lastC.low < prev5Low && lastC.close > prev5Low && (closePos >= 0.48 || rBidAbs > 0 || totIceBid > 0);
-        const bearSweepReject = lastC.high > prev5High && lastC.close < prev5High && (closePos <= 0.52 || rAskAbs > 0 || totIceAsk > 0);
+
+        // Old Swing High / Low Liquidity Sweep vs True Breakout Analysis
+        const bullSweepReject = lastC.low < prevSwingLow && lastC.close > prevSwingLow && (closePos >= 0.48 || rBidAbs > 0 || totIceBid > 0 || lastC.delta < 0);
+        const bearSweepReject = lastC.high > prevSwingHigh && lastC.close < prevSwingHigh && (closePos <= 0.52 || rAskAbs > 0 || totIceAsk > 0 || lastC.delta > 0);
 
         const recent20 = candles.slice(-20);
         const r20Hi = Math.max(...recent20.map(x => x.high));
@@ -3874,7 +3847,7 @@ function drawAll() {
         const instBullDrive = (
             !isBullExhaustionTrap
             && anchorBullScore >= anchorBearScore
-            && (totWhaleBuy > totWhaleSell * 1.20 || domPullDelta < -effCellBench * 0.30)
+            && (dispBullLevels > dispBearLevels || domPullDelta < -effCellBench * 0.30)
             && lastC.close > curPoc && prevC.close >= prevPoc
             && closePos >= 0.60 && rangeLocation <= 0.82
         );
@@ -3882,42 +3855,40 @@ function drawAll() {
         const instBearDrive = (
             !isBearExhaustionTrap
             && anchorBearScore >= anchorBullScore
-            && (totWhaleSell > totWhaleBuy * 1.20 || domPullDelta > effCellBench * 0.30)
+            && (dispBearLevels > dispBullLevels || domPullDelta > effCellBench * 0.30)
             && lastC.close < curPoc && prevC.close <= prevPoc
             && closePos <= 0.40 && rangeLocation >= 0.18
         );
 
         const clusterLongBuildup = (anchorBullScore >= anchorBearScore + 15) && !instBearDrive;
         const clusterShortBuildup = (anchorBearScore >= anchorBullScore + 15) && !instBullDrive;
-        const retailBuysTrapped = isBullExhaustionTrap;
-        const retailSellsTrapped = isBearExhaustionTrap;
 
-        let battleWinner = `⚖️ [${tf.toUpperCase()}] CHOP / INDUCEMENT ZONE — DO NOT TRADE YET`;
+        let battleWinner = `⚖️ [${tf.toUpperCase()}] CHOP / INDUCEMENT ZONE — WAIT FOR LIQUIDITY SWEEP`;
         let bwCol = '#ffd700';
 
         if (bullSweepReject) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] SSL STOP-HUNT REJECTED + BID ABSORBED ➔ INSTITUTIONAL LONG TRAP-REVERSAL!`;
+            battleWinner = `🎯 [${tf.toUpperCase()}] OLD LOW (${prevSwingLow.toFixed(dec)}) SWEPT + 🧊BID ABSORBED ➔ REVERSAL LONG!`;
             bwCol = '#00e5ff';
         } else if (bearSweepReject) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] BSL STOP-HUNT REJECTED + ASK CAPPED ➔ INSTITUTIONAL SHORT TRAP-REVERSAL!`;
+            battleWinner = `🎯 [${tf.toUpperCase()}] OLD HIGH (${prevSwingHigh.toFixed(dec)}) SWEPT + 🧊ASK CAPPED ➔ REVERSAL SHORT!`;
             bwCol = '#ff9100';
         } else if (lastC.close < lastC.open && isBearExhaustionTrap && clusterLongBuildup) {
-            battleWinner = `🛡️ [${tf.toUpperCase()}] FAKE RED DUMP INTO BID ANCHOR (BidAbs:${rBidAbs}) ➔ DO NOT SHORT, LONG HOLD!`;
+            battleWinner = `🛡️ [${tf.toUpperCase()}] SELLERS ABSORBED INTO BID ICEBERG (BidAbs:${rBidAbs}) ➔ LONG HOLD!`;
             bwCol = '#00e5ff';
         } else if (lastC.close > lastC.open && isBullExhaustionTrap && clusterShortBuildup) {
-            battleWinner = `🛡️ [${tf.toUpperCase()}] FAKE GREEN PUMP INTO ASK ANCHOR (AskAbs:${rAskAbs}) ➔ DO NOT BUY, SHORT CAP!`;
+            battleWinner = `🛡️ [${tf.toUpperCase()}] BUYERS CAPPED INTO ASK ICEBERG (AskAbs:${rAskAbs}) ➔ SHORT HOLD!`;
             bwCol = '#ff9100';
         } else if (instBullDrive) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] CONFIRMED BULL EXPANSION (Anchor+🐋Whale+AskPulled)`;
+            battleWinner = `🚀 [${tf.toUpperCase()}] TRUE BULL DISPLACEMENT (SweepLvls:${dispBullLevels} | AskPulled:${fmt(totPullA)})`;
             bwCol = '#00e676';
         } else if (instBearDrive) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] CONFIRMED BEAR EXPANSION (Anchor+🐋Whale+BidPulled)`;
+            battleWinner = `🚀 [${tf.toUpperCase()}] TRUE BEAR DISPLACEMENT (SweepLvls:${dispBearLevels} | BidPulled:${fmt(totPullB)})`;
             bwCol = '#ff1744';
         } else if (clusterLongBuildup) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] INSTITUTIONAL LONG BASE BUILDING (Wait for Low Sweep / POC Hold)`;
+            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE BID ACCUMULATION (BidAbs:${rBidAbs} vs AskAbs:${rAskAbs})`;
             bwCol = '#00e5ff';
         } else if (clusterShortBuildup) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] INSTITUTIONAL SHORT CEILING BUILDING (Wait for High Sweep / POC Reject)`;
+            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE ASK DISTRIBUTION (AskAbs:${rAskAbs} vs BidAbs:${rBidAbs})`;
             bwCol = '#ff9100';
         }
 
@@ -3936,9 +3907,9 @@ function drawAll() {
         else if (instBullDrive) { scalpPts += 14; deltaState = 'BULL'; }
         else if (instBearDrive) { scalpPts -= 14; deltaState = 'BEAR'; }
 
-        let whaleVsRetailState = 'NEU';
-        if (totWhaleBuy > totWhaleSell * 1.25 && !instBearDrive) { scalpPts += 16; whaleVsRetailState = 'BULL'; }
-        else if (totWhaleSell > totWhaleBuy * 1.25 && !instBullDrive) { scalpPts -= 16; whaleVsRetailState = 'BEAR'; }
+        let dispVsTrapState = 'NEU';
+        if (dispBullLevels > dispBearLevels && !isBullExhaustionTrap) { scalpPts += 16; dispVsTrapState = 'BULL'; }
+        else if (dispBearLevels > dispBullLevels && !isBearExhaustionTrap) { scalpPts -= 16; dispVsTrapState = 'BEAR'; }
 
         let locState = 'NEU';
         if (lastC.close >= curPoc && prevC.close >= prevPoc && !isBullExhaustionTrap) { scalpPts += 12; locState = 'BULL'; }
@@ -3968,7 +3939,7 @@ function drawAll() {
             scalpFinalCol = '#00e676';
         } else if (scalpPts >= 22) {
             scalpFinalTxt = lastC.close < lastC.open
-                ? `🛡️ BULL BASE: RED PULLBACK ABSORBING`
+                ? `🛡️ BID BASE HOLDING (ABSORBING SELLS)`
                 : `🟡 LONG BUILDING (WAIT TRIGGER)`;
             scalpFinalCol = '#00e5ff';
         } else if (scalpPts <= -46 && (bearSweepReject || instBearDrive || (clusterShortBuildup && lastC.close <= curPoc))) {
@@ -3976,7 +3947,7 @@ function drawAll() {
             scalpFinalCol = '#ff1744';
         } else if (scalpPts <= -22) {
             scalpFinalTxt = lastC.close > lastC.open
-                ? `🛡️ BEAR CEILING: GREEN BOUNCE CAPPED`
+                ? `🛡️ ASK CEILING CAPPING (ABSORBING BUYS)`
                 : `🟠 SHORT BUILDING (WAIT TRIGGER)`;
             scalpFinalCol = '#ff9100';
         }
@@ -3987,6 +3958,12 @@ function drawAll() {
         if (smtState.bias === 1) intraPts += 12;
         else if (smtState.bias === -1) intraPts -= 12;
 
+        // Contradiction Veto on Macro Score
+        if (macroInfo) {
+            if (intraPts > 0 && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs && sPocDn >= sPocUp) intraPts = -20;
+            else if (intraPts < 0 && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs && sPocUp >= sPocDn) intraPts = 20;
+        }
+
         const intraScoreVal = Math.abs(intraPts);
         let intraFinalTxt = `⏳ ${tf.toUpperCase()} ROTATIONAL RANGE`;
         let intraFinalCol = '#ffca28';
@@ -3996,21 +3973,21 @@ function drawAll() {
         else if (intraPts <= -22) { intraFinalTxt = `🏦 DISTRIBUTING SHORT (Score:-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
 
         const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : (clusterLongBuildup ? 'BULL' : (clusterShortBuildup ? 'BEAR' : 'NEU')));
-        const execVsAbsLbl = isBearExhaustionTrap ? 'FakeRedDump(Absorbed🟢)' : (isBullExhaustionTrap ? 'FakeGreenPump(Capped🔴)' : (clusterLongBuildup ? `BullAnchor(+${anchorBullScore})` : (clusterShortBuildup ? `BearAnchor(-${anchorBearScore})` : 'NeutralFight')));
+        const execVsAbsLbl = isBearExhaustionTrap ? 'SellsAbsorbedAtBid🟢' : (isBullExhaustionTrap ? 'BuysCappedAtAsk🔴' : (clusterLongBuildup ? `BullAnchor(+${anchorBullScore})` : (clusterShortBuildup ? `BearAnchor(-${anchorBearScore})` : 'NeutralFight')));
 
         const scalpMeterList = [
             { name: '1. 6-Candle Institutional Anchor vs Trap', state: execVsAbsState, val: execVsAbsLbl },
-            { name: '2. Multi-Row Cluster + Iceberg Abs', state: (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) ? 'BULL' : ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) ? 'BEAR' : 'NEU'), val: `BidClus:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskClus:${rAskAbs}(🧊${fmt(totIceAsk)})` },
+            { name: '2. Passive Iceberg & Cluster Absorption', state: (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) ? 'BULL' : ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) ? 'BEAR' : 'NEU'), val: `BidAbs:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskAbs:${rAskAbs}(🧊${fmt(totIceAsk)})` },
             { name: '3. Raw Flash + 10s Spoof Pull (PΔ)', state: domPullDelta < -effCellBench * 0.30 ? 'BULL' : (domPullDelta > effCellBench * 0.30 ? 'BEAR' : 'NEU'), val: `RawPΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}` },
             { name: '4. 8-Step Cluster Resting Book Depth', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) ? 'BEAR' : 'NEU'), val: `Bid:${fmt(nearBidRest)} vs Ask:${fmt(nearAskRest)}` },
-            { name: '5. Exhaustion Climax / Delta Trap', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}` },
+            { name: '5. Effort vs Result (Delta Divergence)', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}` },
             { name: '6. Two-Candle POC Structure Control', state: locState, val: `Px:${lastC.close.toFixed(dec)} vs POC:${curPoc.toFixed(dec)}` },
-            { name: '7. Behavioral Whale (🐋) vs Retail (🐑)', state: whaleVsRetailState, val: `🐋W B:${fmt(totWhaleBuy)}/S:${fmt(totWhaleSell)}` },
+            { name: '7. True Displacement Sweep Levels (⚡)', state: dispVsTrapState, val: `BullSweep:${dispBullLevels} vs BearSweep:${dispBearLevels}` },
             { name: '8. Range Location Safety (Anti-Chase)', state: rangeLocation <= 0.35 ? 'BULL' : (rangeLocation >= 0.65 ? 'BEAR' : 'NEU'), val: `Loc:${Math.round(rangeLocation * 100)}% (Safe:22-78%)` },
             { name: '9. 4-Candle POC Stepping Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
-            { name: '10. Boundary Stop-Hunt Sweep (BSL/SSL)', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'SSL-Sweep🟢' : (bearSweepReject ? 'BSL-Sweep🔴' : 'None') },
+            { name: '10. Old High/Low Liquidity Sweep', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'OldLowSwept🟢' : (bearSweepReject ? 'OldHighSwept🔴' : 'None') },
             { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
-            { name: '12. RVOL Institutional Participation', state: curRvol >= 0.85 ? execVsAbsState : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
+            { name: '12. RVOL Participation Filter', state: curRvol >= 0.85 ? execVsAbsState : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
         ];
 
         const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
@@ -4020,10 +3997,10 @@ function drawAll() {
 
         const intraMeterList = [
             { name: '1. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
-            { name: '2. Multi-Swing Cluster Absorption', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidClus:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskClus:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
+            { name: '2. Multi-Swing Cluster Absorption', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidAbs:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskAbs:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
             { name: '3. 4-Candle Structure & POC Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `POC Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
             { name: '4. Session Wall Pulling Campaign (PΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `SessPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
-            { name: '5. Session Whale Net Inventory (🐋)', state: (macroInfo && macroInfo.sessWhaleBuyVol > macroInfo.sessWhaleSellVol) ? 'BULL' : ((macroInfo && macroInfo.sessWhaleSellVol > macroInfo.sessWhaleBuyVol) ? 'BEAR' : 'NEU'), val: `🐋B:${macroInfo ? fmt(macroInfo.sessWhaleBuyVol) : 0} vs 🐋S:${macroInfo ? fmt(macroInfo.sessWhaleSellVol) : 0}` },
+            { name: '5. Displacement vs Absorption Balance', state: anchorBullScore > anchorBearScore ? 'BULL' : (anchorBearScore > anchorBullScore ? 'BEAR' : 'NEU'), val: `Bull:${anchorBullScore} vs Bear:${anchorBearScore}` },
             { name: '6. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
             { name: '7. Unfinished Business Magnet Draw', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} vs UB-LO:${ubLoCnt}` },
             { name: '8. Untouched nPOC Gravity', state: nakedPocs.filter(n => n.price > lastC.close).length > nakedPocs.filter(n => n.price < lastC.close).length ? 'BULL' : (nakedPocs.filter(n => n.price < lastC.close).length > nakedPocs.filter(n => n.price > lastC.close).length ? 'BEAR' : 'NEU'), val: `nPOCs:${nakedPocs.length}` },
@@ -4066,6 +4043,8 @@ function drawAll() {
             symbol: symbol,
             timeframe: tf,
             live_price: lastC.close,
+            old_swing_high: prevSwingHigh,
+            old_swing_low: prevSwingLow,
             current_candle: {
                 open: lastC.open,
                 high: lastC.high,
@@ -4084,12 +4063,10 @@ function drawAll() {
                 anchor_bear_score: anchorBearScore,
                 exec_buy_3c: Math.round(totExecBuy),
                 exec_sell_3c: Math.round(totExecSell),
-                whale_buy_vol: Math.round(totWhaleBuy),
-                whale_sell_vol: Math.round(totWhaleSell),
-                retail_buy_vol: Math.round(totRetailBuy),
-                retail_sell_vol: Math.round(totRetailSell),
                 bid_cluster_absorptions: rBidAbs,
                 ask_cluster_absorptions: rAskAbs,
+                bull_displacement_levels: dispBullLevels,
+                bear_displacement_levels: dispBearLevels,
                 iceberg_bid_reloads: Math.round(totIceBid),
                 iceberg_ask_reloads: Math.round(totIceAsk),
                 bid_pulled_10s_plus_flash: Math.round(totPullB),
@@ -4140,7 +4117,7 @@ function drawAll() {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = '#00e5ff';
-        ctx.fillText(`🐋W:${fmt(totWhaleBuy)}B/${fmt(totWhaleSell)}S | 🐑R:${fmt(totRetailBuy)}B/${fmt(totRetailSell)}S | 🧊Ice:${fmt(totIceBid)}B/${fmt(totIceAsk)}A`, domX + 6, 11);
+        ctx.fillText(`Taker3C:${fmt(totExecBuy)}B/${fmt(totExecSell)}S | 🧊Ice:${fmt(totIceBid)}B/${fmt(totIceAsk)}A | ⚡Pull PΔ:${domPullDelta >= 0 ? '+' : ''}${fmt(domPullDelta)}`, domX + 6, 11);
 
         ctx.fillStyle = bwCol;
         ctx.fillText(battleWinner, domX + 6, 25);
@@ -4188,8 +4165,8 @@ function drawAll() {
         ctx.fillStyle = '#90a4ae';
         ctx.font = 'bold 8px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('◀ BID [🐋W/🐑R | 🧊ICE | ⚡PULL]', domX + halfBattleW * 0.5, 82);
-        ctx.fillText('ASK [🐋W/🐑R | 🧊ICE | ⚡PULL] ▶', domSpineX + halfBattleW * 0.5, 82);
+        ctx.fillText('◀ BID [TAKER SELL | 🧊ICE | ⚡PULL]', domX + halfBattleW * 0.5, 82);
+        ctx.fillText('ASK [TAKER BUY | 🧊ICE | ⚡PULL] ▶', domSpineX + halfBattleW * 0.5, 82);
         ctx.fillStyle = '#ffeb3b';
         ctx.fillText('PRICE', domPxScaleX + pxScaleW * 0.5, 82);
 
@@ -4226,10 +4203,8 @@ function drawAll() {
             ctx.textBaseline = 'middle';
             ctx.font = 'bold 8px monospace';
             ctx.fillStyle = '#ff8a80';
-            const wSellHere = Math.max(st.wSell, rawD.wSell);
-            const winBidTag = (rawD.iceBid > effCellBench * 0.35 || (st.sell > st.buy * 1.4 && lastC.close >= p + domStep * 0.4)) ? '🧊ABS ' : '';
-            const wSellTag = wSellHere > 0 ? `🐋${fmt(wSellHere)} ` : '';
-            ctx.fillText(`${winBidTag}${wSellTag}S:${fmt(st.sell)} (Rest:${fmt(bRest)})`, domSpineX - 4, ry + 7);
+            const winBidTag = (rawD.iceBid > effCellBench * 0.35 || (st.sell > st.buy * 1.4 && lastC.close >= p + domStep * 0.4)) ? '🧊BID-HELD ' : '';
+            ctx.fillText(`${winBidTag}S:${fmt(st.sell)} (Rest:${fmt(bRest)})`, domSpineX - 4, ry + 7);
 
             if (totRawBp > 0 || rawD.iceBid > 0) {
                 ctx.font = bSpoofPct >= 55 ? 'bold 7.5px monospace' : '7.5px monospace';
@@ -4253,10 +4228,8 @@ function drawAll() {
             ctx.textAlign = 'left';
             ctx.font = 'bold 8px monospace';
             ctx.fillStyle = '#69f0ae';
-            const wBuyHere = Math.max(st.wBuy, rawD.wBuy);
-            const winAskTag = (rawD.iceAsk > effCellBench * 0.35 || (st.buy > st.sell * 1.4 && lastC.close <= p - domStep * 0.4)) ? ' 🧊CAP' : '';
-            const wBuyTag = wBuyHere > 0 ? ` 🐋${fmt(wBuyHere)}` : '';
-            ctx.fillText(`B:${fmt(st.buy)}${wBuyTag} (Rest:${fmt(aRest)})${winAskTag}`, domSpineX + 4, ry + 7);
+            const winAskTag = (rawD.iceAsk > effCellBench * 0.35 || (st.buy > st.sell * 1.4 && lastC.close <= p - domStep * 0.4)) ? ' 🧊ASK-CAP' : '';
+            ctx.fillText(`B:${fmt(st.buy)} (Rest:${fmt(aRest)})${winAskTag}`, domSpineX + 4, ry + 7);
 
             if (totRawAp > 0 || rawD.iceAsk > 0) {
                 ctx.font = aSpoofPct >= 55 ? 'bold 7.5px monospace' : '7.5px monospace';
@@ -4279,13 +4252,13 @@ function drawAll() {
             if (mag) {
                 subLbl = mag.lbl; subCol = isCurrentRow ? '#000' : '#ffeb3b';
             } else if (rawD.iceBid > rawD.iceAsk && rawD.iceBid > effCellBench * 0.3) {
-                subLbl = '🧊BID CLUS'; subCol = isCurrentRow ? '#004d40' : '#00e5ff';
+                subLbl = '🧊BID ICE'; subCol = isCurrentRow ? '#004d40' : '#00e5ff';
             } else if (rawD.iceAsk > rawD.iceBid && rawD.iceAsk > effCellBench * 0.3) {
-                subLbl = '🧊ASK CLUS'; subCol = isCurrentRow ? '#b71c1c' : '#ff9100';
-            } else if (st.buy > st.sell * 1.3) {
-                subLbl = '🟢BUY WIN'; subCol = isCurrentRow ? '#004d40' : '#00e676';
-            } else if (st.sell > st.buy * 1.3) {
-                subLbl = '🔴SELL WIN'; subCol = isCurrentRow ? '#b71c1c' : '#ff5252';
+                subLbl = '🧊ASK ICE'; subCol = isCurrentRow ? '#b71c1c' : '#ff9100';
+            } else if (st.buy > st.sell * 2.2 && lastC.close > p) {
+                subLbl = '⚡BUY SWEEP'; subCol = isCurrentRow ? '#004d40' : '#00e676';
+            } else if (st.sell > st.buy * 2.2 && lastC.close < p) {
+                subLbl = '⚡SELL SWEEP'; subCol = isCurrentRow ? '#b71c1c' : '#ff5252';
             } else if (Math.abs(rowPDelta) > 1) {
                 subLbl = `PΔ:${rowPDelta > 0 ? '+' : ''}${fmt(rowPDelta)}`; subCol = isCurrentRow ? '#000' : '#ea80fc';
             }
