@@ -340,19 +340,16 @@ def round_price_to_step(price, step):
 
 
 # 100% Dynamic Orderflow Relative Trackers (Adapts to Current Market Liquidity & Book Depth!)
+# Pure Binance Orderbook Depth Baseline & Post-Entry Tick Tracker (Zero Fake Whale Assumptions!)
 rolling_lot_tracker = {"BTCUSDT": 0.04, "ETHUSDT": 0.40, "SOLUSDT": 4.0, "XRPUSDT": 800.0}
 rolling_book_depth_tracker = {"BTCUSDT": 1.2, "ETHUSDT": 10.0, "SOLUSDT": 60.0, "XRPUSDT": 12000.0}
-burst_flow_tracker = {
-    sym: {"ts": 0, "side": None, "price_bucket": 0.0, "cum_qty": 0.0, "count": 0}
-    for sym in SYMBOLS
-}
 paper_post_entry_bounds = {
     "scalp": {"high": None, "low": None},
     "intraday": {"high": None, "low": None},
 }
 
 dom_raw_telemetry = {sym: defaultdict(lambda: {
-    "w_buy": 0.0, "w_sell": 0.0, "r_buy": 0.0, "r_sell": 0.0,
+    "buy_exec": 0.0, "sell_exec": 0.0,
     "ms_bid_add": 0.0, "ms_ask_add": 0.0,
     "flash_bid_pull": 0.0, "flash_ask_pull": 0.0,
     "aged_bid_pull": 0.0, "aged_ask_pull": 0.0,
@@ -374,46 +371,14 @@ def create_empty_candle(symbol, timeframe, start, open_price):
         "volume": 0.0,
         "buy_volume": 0.0,
         "sell_volume": 0.0,
-        "whale_buy_vol": 0.0,
-        "whale_sell_vol": 0.0,
-        "retail_buy_vol": 0.0,
-        "retail_sell_vol": 0.0,
         "delta": 0.0,
         "trades": 0,
         "footprint": {},
     }
 
 
-# Behavioral Institutional Tracker (Tracks Cluster Sticking/Absorption vs Aggressive Price Displacement)
-cluster_behavior_tracker = {
-    sym: {
-        "anchor_px": None,
-        "stuck_start_ms": 0,
-        "stuck_buy_vol": 0.0,
-        "stuck_sell_vol": 0.0,
-        "stuck_trades": 0,
-        "last_px": None,
-        "last_ts": 0,
-        "disp_start_px": None,
-        "disp_ts": 0,
-        "disp_vol": 0.0,
-        "disp_trades": 0,
-        "disp_dir": 0,
-    }
-    for sym in SYMBOLS
-}
-
-
-def add_trade_to_candle(
-    candle, price, quantity, is_buyer_maker, price_level=None,
-    inst_mode="RETAIL", absorbed_vol=0.0
-):
-    """
-    inst_mode:
-      - 'DISP_WHALE': Big chunks + Fast Price Displacement (Aggressive Whale)
-      - 'ABS_WHALE': Price stuck in cluster while eating opposing retail orders (Passive Whale)
-      - 'RETAIL': Standard retail/noise flow
-    """
+def add_trade_to_candle(candle, price, quantity, is_buyer_maker, price_level=None):
+    """Records 100% pure Binance aggTrade Taker Buy vs Taker Sell & exact DOM Iceberg reloads."""
     candle["high"] = max(candle["high"], price)
     candle["low"] = min(candle["low"], price)
     candle["close"] = price
@@ -432,98 +397,42 @@ def add_trade_to_candle(
             "price": price_level,
             "buy": 0.0,
             "sell": 0.0,
-            "whale_buy": 0.0,
-            "whale_sell": 0.0,
-            "retail_buy": 0.0,
-            "retail_sell": 0.0,
-            "whale_trades": 0,
             "delta": 0.0,
             "volume": 0.0,
             "trades": 0,
             "pulled_qty": 0.0,
             "bid_pulled": 0.0,
             "ask_pulled": 0.0,
-            "whale_pull_chunks": 0,
             "status": "NORMAL",
         }
         candle["footprint"][key] = level
 
     if is_buyer_maker:
-        # Market Sell Order hit the Bid
         candle["sell_volume"] += quantity
         level["sell"] += quantity
-        if inst_mode == "DISP_WHALE":
-            # Aggressive Whale dumping & displacing price down!
-            candle["whale_sell_vol"] = float(candle.get("whale_sell_vol", 0.0)) + quantity
-            level["whale_sell"] = float(level.get("whale_sell", 0.0)) + quantity
-            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
-        elif inst_mode == "ABS_WHALE":
-            # Price is STUCK in cluster while retail sells -> Passive Bid Whale is BUYING/ABSORBING them!
-            candle["retail_sell_vol"] = float(candle.get("retail_sell_vol", 0.0)) + quantity
-            level["retail_sell"] = float(level.get("retail_sell", 0.0)) + quantity
-            w_credit = max(quantity, absorbed_vol)
-            candle["whale_buy_vol"] = float(candle.get("whale_buy_vol", 0.0)) + w_credit
-            level["whale_buy"] = float(level.get("whale_buy", 0.0)) + w_credit
-            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
-            level["status"] = "HEAVY ABSORPTION"
-        else:
-            candle["retail_sell_vol"] = float(candle.get("retail_sell_vol", 0.0)) + quantity
-            level["retail_sell"] = float(level.get("retail_sell", 0.0)) + quantity
     else:
-        # Market Buy Order lifted the Ask
         candle["buy_volume"] += quantity
         level["buy"] += quantity
-        if inst_mode == "DISP_WHALE":
-            # Aggressive Whale sweeping & displacing price up!
-            candle["whale_buy_vol"] = float(candle.get("whale_buy_vol", 0.0)) + quantity
-            level["whale_buy"] = float(level.get("whale_buy", 0.0)) + quantity
-            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
-        elif inst_mode == "ABS_WHALE":
-            # Price is STUCK in cluster while retail buys -> Passive Ask Whale is SELLING/CAPPING them!
-            candle["retail_buy_vol"] = float(candle.get("retail_buy_vol", 0.0)) + quantity
-            level["retail_buy"] = float(level.get("retail_buy", 0.0)) + quantity
-            w_credit = max(quantity, absorbed_vol)
-            candle["whale_sell_vol"] = float(candle.get("whale_sell_vol", 0.0)) + w_credit
-            level["whale_sell"] = float(level.get("whale_sell", 0.0)) + w_credit
-            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
-            level["status"] = "HEAVY ABSORPTION"
-        else:
-            candle["retail_buy_vol"] = float(candle.get("retail_buy_vol", 0.0)) + quantity
-            level["retail_buy"] = float(level.get("retail_buy", 0.0)) + quantity
 
     candle["delta"] = candle["buy_volume"] - candle["sell_volume"]
     level["volume"] += quantity
     level["trades"] += 1
     level["delta"] = level["buy"] - level["sell"]
 
-    # Feed Raw Millisecond DOM Telemetry + True Behavioral Iceberg & Whale Tracking
+    # True DOM Iceberg Reload Math: Executed Volume at Price > Peak Visible Book Depth!
     if candle["timeframe"] == "1m":
         d_raw = dom_raw_telemetry[symbol]
         d_cell = d_raw[price_level]
         d_cell["ts"] = now_ms()
         if is_buyer_maker:
-            if inst_mode == "DISP_WHALE":
-                d_cell["w_sell"] += quantity
-            elif inst_mode == "ABS_WHALE":
-                d_cell["r_sell"] += quantity
-                d_cell["w_buy"] += quantity
-                d_cell["iceberg_bid"] = round(d_cell["iceberg_bid"] + quantity, 4)
-            else:
-                d_cell["r_sell"] += quantity
-            c_sell_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("w_sell", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("r_sell", 0.0) for k in (-1, 0, 1))
+            d_cell["sell_exec"] += quantity
+            c_sell_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("sell_exec", 0.0) for k in (-1, 0, 1))
             c_peak_bid = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_bid", 0.0) for k in (-1, 0, 1))
             if c_peak_bid > 0 and c_sell_exec > c_peak_bid * 1.15:
                 d_cell["iceberg_bid"] = max(d_cell["iceberg_bid"], round(c_sell_exec - c_peak_bid, 4))
         else:
-            if inst_mode == "DISP_WHALE":
-                d_cell["w_buy"] += quantity
-            elif inst_mode == "ABS_WHALE":
-                d_cell["r_buy"] += quantity
-                d_cell["w_sell"] += quantity
-                d_cell["iceberg_ask"] = round(d_cell["iceberg_ask"] + quantity, 4)
-            else:
-                d_cell["r_buy"] += quantity
-            c_buy_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("w_buy", 0.0) + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("r_buy", 0.0) for k in (-1, 0, 1))
+            d_cell["buy_exec"] += quantity
+            c_buy_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("buy_exec", 0.0) for k in (-1, 0, 1))
             c_peak_ask = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_ask", 0.0) for k in (-1, 0, 1))
             if c_peak_ask > 0 and c_buy_exec > c_peak_ask * 1.15:
                 d_cell["iceberg_ask"] = max(d_cell["iceberg_ask"], round(c_buy_exec - c_peak_ask, 4))
@@ -1455,79 +1364,13 @@ def store_finished_candle(candle):
 # ============================================================
 
 # Absolute Minimum Institutional Cluster Volume (Below this = 100% Retail / Bot Noise!)
-INST_MIN_CLUSTER_VOL = {
-    "BTCUSDT": 8.0,      # At least 8+ BTC in a fast sweep or stuck cluster to be called Institutional!
-    "ETHUSDT": 80.0,     # At least 80+ ETH
-    "SOLUSDT": 600.0,    # At least 600+ SOL
-    "XRPUSDT": 120000.0, # At least 120k+ XRP
-}
-
 def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
     step = PRICE_STEP[symbol]
     price_level = round_price_to_step(price, step)
 
     with lock:
         record_trade_for_execution_matching(symbol, price, quantity, trade_time, is_buyer_maker)
-
-        cb = cluster_behavior_tracker[symbol]
-        inst_floor = INST_MIN_CLUSTER_VOL.get(symbol, 10.0)
-        dyn_book_avg = max(rolling_book_depth_tracker.get(symbol, inst_floor), inst_floor)
-
-        # 1. Track Price Sticking in a 3-Tick Cluster (Absorption Detection)
-        if cb["anchor_px"] is None or abs(price_level - cb["anchor_px"]) > step * 2.5:
-            cb["anchor_px"] = price_level
-            cb["stuck_start_ms"] = trade_time
-            cb["stuck_buy_vol"] = 0.0 if is_buyer_maker else quantity
-            cb["stuck_sell_vol"] = quantity if is_buyer_maker else 0.0
-            cb["stuck_trades"] = 1
-        else:
-            if is_buyer_maker:
-                cb["stuck_sell_vol"] += quantity
-            else:
-                cb["stuck_buy_vol"] += quantity
-            cb["stuck_trades"] += 1
-
-        # 2. Track Fast Price Displacement / Momentum Sweep (Within 1200ms window)
-        cur_dir = -1 if is_buyer_maker else 1
-        if cb["disp_start_px"] is None or (trade_time - cb["disp_ts"] > 1200) or (cb["disp_dir"] != cur_dir):
-            cb["disp_start_px"] = price
-            cb["disp_ts"] = trade_time
-            cb["disp_vol"] = quantity
-            cb["disp_trades"] = 1
-            cb["disp_dir"] = cur_dir
-        else:
-            cb["disp_vol"] += quantity
-            cb["disp_trades"] += 1
-
-        price_disp_steps = abs(price - cb["disp_start_px"]) / step
-
-        d_raw = dom_raw_telemetry[symbol]
-        zone_bid_pull = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("aged_bid_pull", 0.0) for k in (-1, 0, 1))
-        zone_ask_pull = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("aged_ask_pull", 0.0) for k in (-1, 0, 1))
-
-        inst_mode = "RETAIL"
-        absorbed_credit = 0.0
-
-        # RULE A: AGGRESSIVE WHALE DISPLACEMENT
-        # Must move price >= 3 steps within 1.2s WITH at least inst_floor (e.g. 8+ BTC) or single block >= 3.5+ BTC!
-        if (
-            (price_disp_steps >= 3.0 and cb["disp_vol"] >= inst_floor)
-            or (quantity >= inst_floor * 0.45 and price_disp_steps >= 1.5)
-        ):
-            inst_mode = "DISP_WHALE"
-
-        # RULE B: PASSIVE WHALE ABSORPTION
-        # Price STUCK in 3-tick cluster for >= 1.5s while eating >= inst_floor (8+ BTC) one-sided retail orders!
-        elif cb["stuck_trades"] >= 8 and (trade_time - cb["stuck_start_ms"] >= 1500):
-            if is_buyer_maker and cb["stuck_sell_vol"] >= inst_floor and cb["stuck_sell_vol"] > cb["stuck_buy_vol"] * 1.8 and zone_bid_pull < cb["stuck_sell_vol"] * 0.30:
-                inst_mode = "ABS_WHALE"
-                absorbed_credit = quantity
-            elif (not is_buyer_maker) and cb["stuck_buy_vol"] >= inst_floor and cb["stuck_buy_vol"] > cb["stuck_sell_vol"] * 1.8 and zone_ask_pull < cb["stuck_buy_vol"] * 0.30:
-                inst_mode = "ABS_WHALE"
-                absorbed_credit = quantity
-
-        cb["last_px"] = price
-        cb["last_ts"] = trade_time
+        rolling_lot_tracker[symbol] = (rolling_lot_tracker.get(symbol, 0.04) * 0.995) + (quantity * 0.005)
 
         for timeframe, seconds in TIMEFRAMES.items():
             start = floor_timestamp(trade_time, seconds)
@@ -1544,7 +1387,7 @@ def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
                 current = create_empty_candle(symbol, timeframe, start, prev_close)
                 current_candles[symbol][timeframe] = current
 
-            add_trade_to_candle(current, price, quantity, is_buyer_maker, price_level, inst_mode, absorbed_credit)
+            add_trade_to_candle(current, price, quantity, is_buyer_maker, price_level)
 
         last_trade[symbol] = {
             "time": trade_time,
@@ -2777,20 +2620,14 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
     let macroHigh = -Infinity, macroLow = Infinity, sumCandleRanges = 0;
     let totalCvd = 0, pocUpSteps = 0, pocDownSteps = 0;
     let macroBidAbsorbs = 0, macroAskAbsorbs = 0;
+    let macroBullDisps = 0, macroBearDisps = 0;
     let macroBidPulled = 0, macroAskPulled = 0;
-    let whaleBuyLots = 0, whaleSellLots = 0;
-    let sessWhaleBuyVol = 0, sessWhaleSellVol = 0;
-    let sessRetailBuyVol = 0, sessRetailSellVol = 0;
 
     sample.forEach((c, idx) => {
         if (c.high > macroHigh) macroHigh = c.high;
         if (c.low < macroLow) macroLow = c.low;
         sumCandleRanges += Math.max(c.high - c.low, rawStep);
         totalCvd += (c.delta || 0);
-        sessWhaleBuyVol += (c.whale_buy_vol || 0);
-        sessWhaleSellVol += (c.whale_sell_vol || 0);
-        sessRetailBuyVol += (c.retail_buy_vol || 0);
-        sessRetailSellVol += (c.retail_sell_vol || 0);
 
         if (idx > 0 && c.poc && sample[idx - 1].poc) {
             if (c.poc > sample[idx - 1].poc) pocUpSteps++;
@@ -2799,15 +2636,15 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
 
         const fpGrouped = groupFootprint(c.footprint, c.low, c.high, effStep, c.close, liveRestBench);
         const activeCells = fpGrouped.filter(x => x.volume > 0);
-        const cAvgV = activeCells.length > 0 ? (c.volume || 1) / activeCells.length : 1;
-        const cHeavyCut = Math.max(cAvgV * 1.25, heavyLvlBenchmark * 0.45);
+        const cAvgV = Math.max(activeCells.length > 0 ? (c.volume || 1) / activeCells.length : 1, (avgFlowVol / 12.0) * 0.85);
+        const cHeavyCut = Math.max(cAvgV * 1.55, heavyLvlBenchmark * 0.85);
         const cSpan = Math.max(c.high - c.low, effStep);
         const lowerSwingTop = c.low + cSpan * 0.42;
         const upperSwingBot = c.high - cSpan * 0.42;
 
         for (let i = 0; i < fpGrouped.length; i++) {
             const l = fpGrouped[i];
-            const sv = l.sell || 0, bv = l.buy || 0, tv = l.volume || 0;
+            const sv = l.sell || 0, bv = l.buy || 0;
             const bp = l.bid_pulled || 0, ap = l.ask_pulled || 0;
 
             let clusSell = sv, clusBuy = bv;
@@ -2826,46 +2663,38 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
             macroBidPulled += bp;
             macroAskPulled += ap;
 
-            if (l.price <= lowerSwingTop && clusSell >= cHeavyCut * 1.3 && clusBPct >= 58 && c.close > l.price + effStep * 0.4) {
-                macroBidAbsorbs++;
-            }
-            if (l.price >= upperSwingBot && clusBuy >= cHeavyCut * 1.3 && clusAPct >= 58 && c.close < l.price - effStep * 0.4) {
-                macroAskAbsorbs++;
-            }
+            const isBidAbs = l.price <= lowerSwingTop && clusSell >= cHeavyCut * 1.3 && clusBPct >= 58 && c.close > l.price + effStep * 0.4;
+            const isAskAbs = l.price >= upperSwingBot && clusBuy >= cHeavyCut * 1.3 && clusAPct >= 58 && c.close < l.price - effStep * 0.4;
 
-            // Behavioral Whale: Either Passive Absorption Sticking OR Aggressive Displacement Chunk
-            const lt = Math.max(l.trades || 1, 1);
-            const lotRatio = (tv / lt) / baselineLotSize;
-            const hasBehavioralWhale = (l.whale_buy || 0) + (l.whale_sell || 0) > 0;
-            if (hasBehavioralWhale || (tv >= Math.max(cAvgV * 1.35, heavyLvlBenchmark * 0.65) && lotRatio >= 3.2)) {
-                if ((l.whale_buy || bv) > (l.whale_sell || sv)) whaleBuyLots++;
-                else whaleSellLots++;
-            }
+            if (isBidAbs) macroBidAbsorbs++;
+            if (isAskAbs) macroAskAbsorbs++;
+
+            if (!isAskAbs && bv > sv * 2.5 && bv >= cHeavyCut && c.close > l.price + effStep * 0.3 && c.close > c.open) macroBullDisps++;
+            if (!isBidAbs && sv > bv * 2.5 && sv >= cHeavyCut && c.close < l.price - effStep * 0.3 && c.close < c.open) macroBearDisps++;
         }
     });
 
     const netPriceMove = last.close - first.open;
     const efficiency = Math.abs(netPriceMove) / Math.max(sumCandleRanges, rawStep);
     const macroPullDelta = macroBidPulled - macroAskPulled;
-    const netWhaleVolDelta = sessWhaleBuyVol - sessWhaleSellVol;
 
     let instBuildupPts = 0;
     let macroNotes = [];
 
     if (macroBidAbsorbs > macroAskAbsorbs) {
-        instBuildupPts += Math.min(28, 12 + (macroBidAbsorbs - macroAskAbsorbs) * 4);
-        macroNotes.push(`ClusterBidAbs(${macroBidAbsorbs}v${macroAskAbsorbs})`);
+        instBuildupPts += Math.min(30, 14 + (macroBidAbsorbs - macroAskAbsorbs) * 4);
+        macroNotes.push(`🧊BidAbs(${macroBidAbsorbs}v${macroAskAbsorbs})`);
     } else if (macroAskAbsorbs > macroBidAbsorbs) {
-        instBuildupPts -= Math.min(28, 12 + (macroAskAbsorbs - macroBidAbsorbs) * 4);
-        macroNotes.push(`ClusterAskAbs(${macroAskAbsorbs}v${macroBidAbsorbs})`);
+        instBuildupPts -= Math.min(30, 14 + (macroAskAbsorbs - macroBidAbsorbs) * 4);
+        macroNotes.push(`🧊AskAbs(${macroAskAbsorbs}v${macroBidAbsorbs})`);
     }
 
-    if (whaleBuyLots > whaleSellLots || netWhaleVolDelta > avgFlowVol * 0.3) {
-        instBuildupPts += 24;
-        macroNotes.push(`🐋WhaleNetBuy(+${fmt(netWhaleVolDelta)})`);
-    } else if (whaleSellLots > whaleBuyLots || netWhaleVolDelta < -avgFlowVol * 0.3) {
-        instBuildupPts -= 24;
-        macroNotes.push(`🐋WhaleNetSell(${fmt(netWhaleVolDelta)})`);
+    if (macroBullDisps > macroBearDisps) {
+        instBuildupPts += Math.min(24, 10 + (macroBullDisps - macroBearDisps) * 4);
+        macroNotes.push(`⚡BullDisp(${macroBullDisps}v${macroBearDisps})`);
+    } else if (macroBearDisps > macroBullDisps) {
+        instBuildupPts -= Math.min(24, 10 + (macroBearDisps - macroBullDisps) * 4);
+        macroNotes.push(`⚡BearDisp(${macroBearDisps}v${macroBullDisps})`);
     }
 
     if (macroPullDelta < -avgFlowVol * 0.15) {
@@ -2878,26 +2707,27 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
 
     if (pocUpSteps > pocDownSteps) {
         instBuildupPts += 16;
-        macroNotes.push(`POC-DriftUp(${pocUpSteps}↑)`);
+        macroNotes.push(`POC-Up(${pocUpSteps}↑)`);
     } else if (pocDownSteps > pocUpSteps) {
         instBuildupPts -= 16;
-        macroNotes.push(`POC-DriftDn(${pocDownSteps}↓)`);
+        macroNotes.push(`POC-Dn(${pocDownSteps}↓)`);
     }
 
     if (totalCvd > 0 && (netPriceMove >= 0 || macroBidAbsorbs > macroAskAbsorbs)) {
-        instBuildupPts += 14;
+        instBuildupPts += 12;
         macroNotes.push(`CVD+${fmt(totalCvd)}`);
     } else if (totalCvd < 0 && (netPriceMove <= 0 || macroAskAbsorbs > macroBidAbsorbs)) {
-        instBuildupPts -= 14;
+        instBuildupPts -= 12;
         macroNotes.push(`CVD${fmt(totalCvd)}`);
     }
 
-    // Contradiction Veto: Never call LONG Buildup if Ask Absorption + Whale Net Sell dominate!
-  if (instBuildupPts > 0 && macroAskAbsorbs > macroBidAbsorbs && netWhaleVolDelta < 0) {
-      instBuildupPts = -18;
-  } else if (instBuildupPts < 0 && macroBidAbsorbs > macroAskAbsorbs && netWhaleVolDelta > 0) {
-      instBuildupPts = 18;
-  }
+    // Strict Contradiction Veto: Passive Absorption + Displacement always wins over raw CVD/POC
+    if (instBuildupPts > 0 && macroAskAbsorbs > macroBidAbsorbs && macroBearDisps >= macroBullDisps) {
+        instBuildupPts = -20;
+    } else if (instBuildupPts < 0 && macroBidAbsorbs > macroAskAbsorbs && macroBullDisps >= macroBearDisps) {
+        instBuildupPts = 20;
+    }
+
     const vBox = document.getElementById('masterVerdictBox');
     const vTitle = document.getElementById('masterVerdictTitle');
     const vReasons = document.getElementById('masterVerdictReasons');
@@ -2909,38 +2739,37 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
             vBox.style.background = 'rgba(0, 229, 255, 0.18)';
             vBox.style.borderColor = '#00e5ff';
             vTitle.style.color = '#00e5ff';
-            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: INST ACCUMULATING LONG (Score:+${netMacro}) ➔ EXPECT LOW-SWEEP OR UPSIDE BREAK!`;
+            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: PASSIVE BID ACCUMULATION (Score:+${netMacro}) ➔ WATCH LOW-SWEEP OR BREAKOUT!`;
         } else {
             vBox.style.background = 'rgba(255, 145, 0, 0.20)';
             vBox.style.borderColor = '#ff9100';
             vTitle.style.color = '#ffab00';
-            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: INST DISTRIBUTING SHORT (Score:${netMacro}) ➔ EXPECT HIGH-SWEEP OR DOWNSIDE BREAK!`;
+            vTitle.innerText = `🏦 [${tf.toUpperCase()} CLUSTER BUILDUP]: PASSIVE ASK DISTRIBUTION (Score:${netMacro}) ➔ WATCH HIGH-SWEEP OR BREAKDOWN!`;
         }
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     } else if (netMacro >= 22) {
         vBox.style.background = 'rgba(0, 200, 83, 0.18)';
         vBox.style.borderColor = '#00e676';
         vTitle.style.color = '#00e676';
-        vTitle.innerText = `🟢 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BULLISH CAMPAIGN (Score:+${netMacro}) — LONG BIAS`;
+        vTitle.innerText = `🟢 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BULLISH ORDERFLOW (Score:+${netMacro})`;
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     } else if (netMacro <= -22) {
         vBox.style.background = 'rgba(255, 23, 68, 0.18)';
         vBox.style.borderColor = '#ff5252';
         vTitle.style.color = '#ff5252';
-        vTitle.innerText = `🔴 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BEARISH CAMPAIGN (Score:${netMacro}) — SHORT BIAS`;
+        vTitle.innerText = `🔴 [${tf.toUpperCase()} MACRO]: INSTITUTIONAL BEARISH ORDERFLOW (Score:${netMacro})`;
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     } else {
         vBox.style.background = 'rgba(38, 50, 56, 0.85)';
         vBox.style.borderColor = '#90a4ae';
         vTitle.style.color = '#eceff1';
-        vTitle.innerText = `⚖️ [${tf.toUpperCase()} CLUSTER]: NEUTRAL EQUILIBRIUM — MONITORING ORDERBOOK BUILDUP`;
+        vTitle.innerText = `⚖️ [${tf.toUpperCase()} CLUSTER]: NEUTRAL EQUILIBRIUM — WAITING FOR LIQUIDITY SWEEP`;
         vReasons.innerText = macroNotes.slice(0, 4).join(' | ');
     }
 
     return {
-        netMacro, isCoilingCluster, totalCvd, macroPullDelta, macroBidAbsorbs, macroAskAbsorbs,
-        whaleBuyLots, whaleSellLots, sessWhaleBuyVol, sessWhaleSellVol,
-        sessRetailBuyVol, sessRetailSellVol, macroNotes
+        netMacro, isCoilingCluster, totalCvd, macroPullDelta,
+        macroBidAbsorbs, macroAskAbsorbs, macroBullDisps, macroBearDisps, macroNotes
     };
 }
 
@@ -3820,9 +3649,28 @@ function drawAll() {
 
         const isBigExpansionCandle = cRange >= avgCandleRange * 1.55;
 
-        // Old Swing High / Low Liquidity Sweep vs True Breakout Analysis
-        const bullSweepReject = lastC.low < prevSwingLow && lastC.close > prevSwingLow && (closePos >= 0.48 || rBidAbs > 0 || totIceBid > 0 || lastC.delta < 0);
-        const bearSweepReject = lastC.high > prevSwingHigh && lastC.close < prevSwingHigh && (closePos <= 0.52 || rAskAbs > 0 || totIceAsk > 0 || lastC.delta > 0);
+        // =========================================================================
+        // 4-WAY OLD HIGH/LOW LIQUIDITY ENGINE (FOOTPRINT + LIVE DOM FUSION)
+        // =========================================================================
+        // 1. FAKE SWEEPS (Liquidity Grab + Absorption/Iceberg + Return inside range)
+        const bullSweepReject = lastC.low < prevSwingLow && lastC.close > prevSwingLow && (
+            closePos >= 0.48 || rBidAbs > 0 || totIceBid > 0 || lastC.delta < 0 || domPullDelta < 0
+        );
+        const bearSweepReject = lastC.high > prevSwingHigh && lastC.close < prevSwingHigh && (
+            closePos <= 0.52 || rAskAbs > 0 || totIceAsk > 0 || lastC.delta > 0 || domPullDelta > 0
+        );
+
+        // 2. REAL DISPLACEMENT BREAKOUTS (Old High/Low broken + Displacement Sweep + DOM Wall Cleared/Supported + No Opposite Cap!)
+        const bullBreakoutDrive = (
+            lastC.high > prevSwingHigh && lastC.close > prevSwingHigh
+            && closePos >= 0.62 && dispBullLevels > 0 && rAskAbs === 0
+            && (domPullDelta < -effCellBench * 0.20 || nearBidRest >= nearAskRest * 1.15 || lastC.delta > effCellBench * 0.40)
+        );
+        const bearBreakdownDrive = (
+            lastC.low < prevSwingLow && lastC.close < prevSwingLow
+            && closePos <= 0.38 && dispBearLevels > 0 && rBidAbs === 0
+            && (domPullDelta > effCellBench * 0.20 || nearAskRest >= nearBidRest * 1.15 || lastC.delta < -effCellBench * 0.40)
+        );
 
         const recent20 = candles.slice(-20);
         const r20Hi = Math.max(...recent20.map(x => x.high));
@@ -3832,32 +3680,36 @@ function drawAll() {
 
         const isBullExhaustionTrap = (
             bearSweepReject
-            || (lastC.close > lastC.open && isBigExpansionCandle && rangeLocation >= 0.78 && (rAskAbs > 0 || totIceAsk > effCellBench * 0.4))
+            || (lastC.close > lastC.open && isBigExpansionCandle && rangeLocation >= 0.78 && !bullBreakoutDrive && (rAskAbs > 0 || totIceAsk > effCellBench * 0.4))
             || (lastC.close > lastC.open && anchorBearScore > anchorBullScore + 20 && lastC.close < (anchorResistPx || r20Hi))
             || (lastC.delta > effCellBench * 0.45 && closePos <= 0.46)
         );
 
         const isBearExhaustionTrap = (
             bullSweepReject
-            || (lastC.close < lastC.open && isBigExpansionCandle && rangeLocation <= 0.22 && (rBidAbs > 0 || totIceBid > effCellBench * 0.4))
+            || (lastC.close < lastC.open && isBigExpansionCandle && rangeLocation <= 0.22 && !bearBreakdownDrive && (rBidAbs > 0 || totIceBid > effCellBench * 0.4))
             || (lastC.close < lastC.open && anchorBullScore > anchorBearScore + 20 && lastC.close > (anchorSupportPx || r20Lo))
             || (lastC.delta < -effCellBench * 0.45 && closePos >= 0.54)
         );
 
         const instBullDrive = (
-            !isBullExhaustionTrap
-            && anchorBullScore >= anchorBearScore
-            && (dispBullLevels > dispBearLevels || domPullDelta < -effCellBench * 0.30)
-            && lastC.close > curPoc && prevC.close >= prevPoc
-            && closePos >= 0.60 && rangeLocation <= 0.82
+            bullBreakoutDrive || (
+                !isBullExhaustionTrap
+                && anchorBullScore >= anchorBearScore
+                && (dispBullLevels > dispBearLevels || domPullDelta < -effCellBench * 0.30)
+                && lastC.close > curPoc && prevC.close >= prevPoc
+                && closePos >= 0.60 && rangeLocation <= 0.82
+            )
         );
 
         const instBearDrive = (
-            !isBearExhaustionTrap
-            && anchorBearScore >= anchorBullScore
-            && (dispBearLevels > dispBullLevels || domPullDelta > effCellBench * 0.30)
-            && lastC.close < curPoc && prevC.close <= prevPoc
-            && closePos <= 0.40 && rangeLocation >= 0.18
+            bearBreakdownDrive || (
+                !isBearExhaustionTrap
+                && anchorBearScore >= anchorBullScore
+                && (dispBearLevels > dispBullLevels || domPullDelta > effCellBench * 0.30)
+                && lastC.close < curPoc && prevC.close <= prevPoc
+                && closePos <= 0.40 && rangeLocation >= 0.18
+            )
         );
 
         const clusterLongBuildup = (anchorBullScore >= anchorBearScore + 15) && !instBearDrive;
@@ -3867,11 +3719,17 @@ function drawAll() {
         let bwCol = '#ffd700';
 
         if (bullSweepReject) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] OLD LOW (${prevSwingLow.toFixed(dec)}) SWEPT + 🧊BID ABSORBED ➔ REVERSAL LONG!`;
+            battleWinner = `🎯 [${tf.toUpperCase()}] OLD LOW (${prevSwingLow.toFixed(dec)}) FAKE SWEEP + 🧊BID ABSORBED ➔ REVERSAL LONG!`;
             bwCol = '#00e5ff';
         } else if (bearSweepReject) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] OLD HIGH (${prevSwingHigh.toFixed(dec)}) SWEPT + 🧊ASK CAPPED ➔ REVERSAL SHORT!`;
+            battleWinner = `🎯 [${tf.toUpperCase()}] OLD HIGH (${prevSwingHigh.toFixed(dec)}) FAKE SWEEP + 🧊ASK CAPPED ➔ REVERSAL SHORT!`;
             bwCol = '#ff9100';
+        } else if (bullBreakoutDrive) {
+            battleWinner = `🚀 [${tf.toUpperCase()}] OLD HIGH (${prevSwingHigh.toFixed(dec)}) REAL DISPLACEMENT BREAKOUT (⚡Sweep+DOM Clear)!`;
+            bwCol = '#00e676';
+        } else if (bearBreakdownDrive) {
+            battleWinner = `💥 [${tf.toUpperCase()}] OLD LOW (${prevSwingLow.toFixed(dec)}) REAL DISPLACEMENT BREAKDOWN (⚡Sweep+DOM Clear)!`;
+            bwCol = '#ff1744';
         } else if (lastC.close < lastC.open && isBearExhaustionTrap && clusterLongBuildup) {
             battleWinner = `🛡️ [${tf.toUpperCase()}] SELLERS ABSORBED INTO BID ICEBERG (BidAbs:${rBidAbs}) ➔ LONG HOLD!`;
             bwCol = '#00e5ff';
@@ -3882,7 +3740,7 @@ function drawAll() {
             battleWinner = `🚀 [${tf.toUpperCase()}] TRUE BULL DISPLACEMENT (SweepLvls:${dispBullLevels} | AskPulled:${fmt(totPullA)})`;
             bwCol = '#00e676';
         } else if (instBearDrive) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] TRUE BEAR DISPLACEMENT (SweepLvls:${dispBearLevels} | BidPulled:${fmt(totPullB)})`;
+            battleWinner = `💥 [${tf.toUpperCase()}] TRUE BEAR DISPLACEMENT (SweepLvls:${dispBearLevels} | BidPulled:${fmt(totPullB)})`;
             bwCol = '#ff1744';
         } else if (clusterLongBuildup) {
             battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE BID ACCUMULATION (BidAbs:${rBidAbs} vs AskAbs:${rAskAbs})`;
@@ -3894,12 +3752,15 @@ function drawAll() {
 
         let scalpPts = anchorBullScore - anchorBearScore;
 
+        if (bullSweepReject || bullBreakoutDrive) scalpPts += 22;
+        if (bearSweepReject || bearBreakdownDrive) scalpPts -= 22;
+
         if (domPullDelta < -effCellBench * 0.30) scalpPts += 16;
         else if (domPullDelta > effCellBench * 0.30) scalpPts -= 16;
 
         const minBookFloor = effCellBench * 1.3;
-        if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) scalpPts += 10;
-        else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) scalpPts -= 10;
+        if (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) scalpPts += 12;
+        else if (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) scalpPts -= 12;
 
         let deltaState = 'NEU';
         if (isBearExhaustionTrap) { scalpPts += 20; deltaState = 'BULL'; }
@@ -3919,10 +3780,10 @@ function drawAll() {
         else if (smtState.bias === -1) scalpPts -= 10;
 
         let chasingWarning = null;
-        if (scalpPts > 0 && rangeLocation >= 0.78 && !bullSweepReject) {
+        if (scalpPts > 0 && rangeLocation >= 0.78 && !bullSweepReject && !bullBreakoutDrive) {
             scalpPts = Math.min(scalpPts, 18);
             chasingWarning = '⚠️ AT RANGE HIGH (WAIT PULLBACK)';
-        } else if (scalpPts < 0 && rangeLocation <= 0.22 && !bearSweepReject) {
+        } else if (scalpPts < 0 && rangeLocation <= 0.22 && !bearSweepReject && !bearBreakdownDrive) {
             scalpPts = Math.max(scalpPts, -18);
             chasingWarning = '⚠️ AT RANGE LOW (WAIT BOUNCE)';
         }
@@ -3934,16 +3795,20 @@ function drawAll() {
         if (chasingWarning) {
             scalpFinalTxt = chasingWarning;
             scalpFinalCol = '#ffab00';
-        } else if (scalpPts >= 46 && (bullSweepReject || instBullDrive || (clusterLongBuildup && lastC.close >= curPoc))) {
-            scalpFinalTxt = `🟢 CONFIRMED LONG (Score:+${scalpScoreVal})`;
+        } else if (scalpPts >= 46 && (bullSweepReject || bullBreakoutDrive || instBullDrive || (clusterLongBuildup && lastC.close >= curPoc))) {
+            scalpFinalTxt = bullSweepReject
+                ? `🎯 LOW SWEEP LONG (+${scalpScoreVal})`
+                : (bullBreakoutDrive ? `🚀 BREAKOUT LONG (+${scalpScoreVal})` : `🟢 CONFIRMED LONG (+${scalpScoreVal})`);
             scalpFinalCol = '#00e676';
         } else if (scalpPts >= 22) {
             scalpFinalTxt = lastC.close < lastC.open
                 ? `🛡️ BID BASE HOLDING (ABSORBING SELLS)`
                 : `🟡 LONG BUILDING (WAIT TRIGGER)`;
             scalpFinalCol = '#00e5ff';
-        } else if (scalpPts <= -46 && (bearSweepReject || instBearDrive || (clusterShortBuildup && lastC.close <= curPoc))) {
-            scalpFinalTxt = `🔴 CONFIRMED SHORT (Score:-${scalpScoreVal})`;
+        } else if (scalpPts <= -46 && (bearSweepReject || bearBreakdownDrive || instBearDrive || (clusterShortBuildup && lastC.close <= curPoc))) {
+            scalpFinalTxt = bearSweepReject
+                ? `🎯 HIGH SWEEP SHORT (-${scalpScoreVal})`
+                : (bearBreakdownDrive ? `💥 BREAKDOWN SHORT (-${scalpScoreVal})` : `🔴 CONFIRMED SHORT (-${scalpScoreVal})`);
             scalpFinalCol = '#ff1744';
         } else if (scalpPts <= -22) {
             scalpFinalTxt = lastC.close > lastC.open
@@ -3985,7 +3850,7 @@ function drawAll() {
             { name: '7. True Displacement Sweep Levels (⚡)', state: dispVsTrapState, val: `BullSweep:${dispBullLevels} vs BearSweep:${dispBearLevels}` },
             { name: '8. Range Location Safety (Anti-Chase)', state: rangeLocation <= 0.35 ? 'BULL' : (rangeLocation >= 0.65 ? 'BEAR' : 'NEU'), val: `Loc:${Math.round(rangeLocation * 100)}% (Safe:22-78%)` },
             { name: '9. 4-Candle POC Stepping Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
-            { name: '10. Old High/Low Liquidity Sweep', state: bullSweepReject ? 'BULL' : (bearSweepReject ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'OldLowSwept🟢' : (bearSweepReject ? 'OldHighSwept🔴' : 'None') },
+            { name: '10. Old High/Low Sweep vs Breakout', state: (bullSweepReject || bullBreakoutDrive) ? 'BULL' : ((bearSweepReject || bearBreakdownDrive) ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'LowFakeSweep🟢' : (bearSweepReject ? 'HighFakeSweep🔴' : (bullBreakoutDrive ? 'HighBreakout🚀' : (bearBreakdownDrive ? 'LowBreakdown💥' : 'None'))) },
             { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
             { name: '12. RVOL Participation Filter', state: curRvol >= 0.85 ? execVsAbsState : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
         ];
