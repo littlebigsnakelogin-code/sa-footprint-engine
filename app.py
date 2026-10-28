@@ -4634,7 +4634,7 @@ Analyze ALL parameters and reply in 5 short Hinglish points:
 5. 🌊 INTRADAY ROADMAP: Session CVD & Big Player campaign direction."""
 
     try:
-         g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
+        g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
         list_url = "https://generativelanguage.googleapis.com/v1beta/models"
         list_resp = requests.get(list_url, headers=g_headers, timeout=8)
         if list_resp.status_code != 200:
