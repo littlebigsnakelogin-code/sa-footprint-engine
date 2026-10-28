@@ -876,9 +876,10 @@ def apply_orderbook_event(symbol, event):
     event_time = int(event.get("E", now_ms()))
 
     if event_time - last_liq_finalize_ms.get(symbol, 0) >= 250:
-    last_liq_finalize_ms[symbol] = event_time
-    finalize_liquidity_records(symbol, event_time)
-    liquidity_index = state["liquidity_match_index"]
+            last_liq_finalize_ms[symbol] = event_time
+            finalize_liquidity_records(symbol, event_time)
+
+        liquidity_index = state["liquidity_match_index"]
 
     step = PRICE_STEP.get(symbol, 1.0)
     live_px = last_trade.get(symbol, {}).get("price")
