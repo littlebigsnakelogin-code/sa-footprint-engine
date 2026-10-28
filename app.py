@@ -339,18 +339,17 @@ def round_price_to_step(price, step):
         return float(price)
 
 
-# 100% Dynamic Orderflow Relative Trackers (Adapts to Current Market Liquidity & Book Depth!)
-# Pure Binance Orderbook Depth Baseline & Post-Entry Tick Tracker (Zero Fake Whale Assumptions!)
+# Pure Orderbook & Trade Accounting Trackers (Zero Circular Volume Inflation!)
 rolling_lot_tracker = {"BTCUSDT": 0.04, "ETHUSDT": 0.40, "SOLUSDT": 4.0, "XRPUSDT": 800.0}
 rolling_book_depth_tracker = {"BTCUSDT": 1.2, "ETHUSDT": 10.0, "SOLUSDT": 60.0, "XRPUSDT": 12000.0}
+last_liq_finalize_ms = {sym: 0 for sym in SYMBOLS}
 paper_post_entry_bounds = {
     "scalp": {"high": None, "low": None},
     "intraday": {"high": None, "low": None},
 }
 
 dom_raw_telemetry = {sym: defaultdict(lambda: {
-    "buy_exec": 0.0, "sell_exec": 0.0,
-    "ms_bid_add": 0.0, "ms_ask_add": 0.0,
+    "w_buy": 0.0, "w_sell": 0.0, "r_buy": 0.0, "r_sell": 0.0,
     "flash_bid_pull": 0.0, "flash_ask_pull": 0.0,
     "aged_bid_pull": 0.0, "aged_ask_pull": 0.0,
     "iceberg_bid": 0.0, "iceberg_ask": 0.0,
@@ -371,14 +370,42 @@ def create_empty_candle(symbol, timeframe, start, open_price):
         "volume": 0.0,
         "buy_volume": 0.0,
         "sell_volume": 0.0,
+        "whale_buy_vol": 0.0,
+        "whale_sell_vol": 0.0,
+        "retail_buy_vol": 0.0,
+        "retail_sell_vol": 0.0,
         "delta": 0.0,
         "trades": 0,
         "footprint": {},
     }
 
 
-def add_trade_to_candle(candle, price, quantity, is_buyer_maker, price_level=None):
-    """Records 100% pure Binance aggTrade Taker Buy vs Taker Sell & exact DOM Iceberg reloads."""
+cluster_behavior_tracker = {
+    sym: {
+        "anchor_px": None,
+        "stuck_start_ms": 0,
+        "stuck_buy_vol": 0.0,
+        "stuck_sell_vol": 0.0,
+        "stuck_trades": 0,
+        "disp_start_px": None,
+        "disp_ts": 0,
+        "disp_vol": 0.0,
+        "disp_trades": 0,
+        "disp_dir": 0,
+    }
+    for sym in SYMBOLS
+}
+
+
+def add_trade_to_candle(
+    candle, price, quantity, is_buyer_maker, price_level=None,
+    inst_mode="RETAIL", absorbed_vol=0.0
+):
+    """
+    100% Pure Accounting:
+    - Never fabricates or double-credits opposite volume on absorption.
+    - Iceberg reload is strictly max(0, Executed_Volume - Peak_Visible_Book).
+    """
     candle["high"] = max(candle["high"], price)
     candle["low"] = min(candle["low"], price)
     candle["close"] = price
@@ -397,12 +424,18 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker, price_level=Non
             "price": price_level,
             "buy": 0.0,
             "sell": 0.0,
+            "whale_buy": 0.0,
+            "whale_sell": 0.0,
+            "retail_buy": 0.0,
+            "retail_sell": 0.0,
+            "whale_trades": 0,
             "delta": 0.0,
             "volume": 0.0,
             "trades": 0,
             "pulled_qty": 0.0,
             "bid_pulled": 0.0,
             "ask_pulled": 0.0,
+            "whale_pull_chunks": 0,
             "status": "NORMAL",
         }
         candle["footprint"][key] = level
@@ -410,32 +443,70 @@ def add_trade_to_candle(candle, price, quantity, is_buyer_maker, price_level=Non
     if is_buyer_maker:
         candle["sell_volume"] += quantity
         level["sell"] += quantity
+        if inst_mode == "DISP_WHALE":
+            candle["whale_sell_vol"] = float(candle.get("whale_sell_vol", 0.0)) + quantity
+            level["whale_sell"] = float(level.get("whale_sell", 0.0)) + quantity
+            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
+        else:
+            candle["retail_sell_vol"] = float(candle.get("retail_sell_vol", 0.0)) + quantity
+            level["retail_sell"] = float(level.get("retail_sell", 0.0)) + quantity
+            if inst_mode == "ABS_WHALE":
+                level["status"] = "HEAVY ABSORPTION"
     else:
         candle["buy_volume"] += quantity
         level["buy"] += quantity
+        if inst_mode == "DISP_WHALE":
+            candle["whale_buy_vol"] = float(candle.get("whale_buy_vol", 0.0)) + quantity
+            level["whale_buy"] = float(level.get("whale_buy", 0.0)) + quantity
+            level["whale_trades"] = int(level.get("whale_trades", 0)) + 1
+        else:
+            candle["retail_buy_vol"] = float(candle.get("retail_buy_vol", 0.0)) + quantity
+            level["retail_buy"] = float(level.get("retail_buy", 0.0)) + quantity
+            if inst_mode == "ABS_WHALE":
+                level["status"] = "HEAVY ABSORPTION"
 
     candle["delta"] = candle["buy_volume"] - candle["sell_volume"]
     level["volume"] += quantity
     level["trades"] += 1
     level["delta"] = level["buy"] - level["sell"]
 
-    # True DOM Iceberg Reload Math: Executed Volume at Price > Peak Visible Book Depth!
+    # Single-Formula Iceberg Reload Math (Zero Double Counting!)
     if candle["timeframe"] == "1m":
         d_raw = dom_raw_telemetry[symbol]
         d_cell = d_raw[price_level]
         d_cell["ts"] = now_ms()
         if is_buyer_maker:
-            d_cell["sell_exec"] += quantity
-            c_sell_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("sell_exec", 0.0) for k in (-1, 0, 1))
-            c_peak_bid = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_bid", 0.0) for k in (-1, 0, 1))
+            if inst_mode == "DISP_WHALE":
+                d_cell["w_sell"] += quantity
+            else:
+                d_cell["r_sell"] += quantity
+            c_sell_exec = sum(
+                (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("w_sell", 0.0)
+                + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("r_sell", 0.0)
+                for k in (-1, 0, 1)
+            )
+            c_peak_bid = sum(
+                (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_bid", 0.0)
+                for k in (-1, 0, 1)
+            )
             if c_peak_bid > 0 and c_sell_exec > c_peak_bid * 1.15:
-                d_cell["iceberg_bid"] = max(d_cell["iceberg_bid"], round(c_sell_exec - c_peak_bid, 4))
+                d_cell["iceberg_bid"] = round(c_sell_exec - c_peak_bid, 4)
         else:
-            d_cell["buy_exec"] += quantity
-            c_buy_exec = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("buy_exec", 0.0) for k in (-1, 0, 1))
-            c_peak_ask = sum((d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_ask", 0.0) for k in (-1, 0, 1))
+            if inst_mode == "DISP_WHALE":
+                d_cell["w_buy"] += quantity
+            else:
+                d_cell["r_buy"] += quantity
+            c_buy_exec = sum(
+                (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("w_buy", 0.0)
+                + (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("r_buy", 0.0)
+                for k in (-1, 0, 1)
+            )
+            c_peak_ask = sum(
+                (d_raw.get(round_price_to_step(price_level + k * step, step)) or {}).get("peak_ask", 0.0)
+                for k in (-1, 0, 1)
+            )
             if c_peak_ask > 0 and c_buy_exec > c_peak_ask * 1.15:
-                d_cell["iceberg_ask"] = max(d_cell["iceberg_ask"], round(c_buy_exec - c_peak_ask, 4))
+                d_cell["iceberg_ask"] = round(c_buy_exec - c_peak_ask, 4)
 
 
 def stamp_liquidity_event_to_active_candles(symbol, price_str, side, pulled_qty, old_book_qty, status_str):
@@ -804,6 +875,8 @@ def apply_orderbook_event(symbol, event):
     event_update_id = int(event["u"])
     event_time = int(event.get("E", now_ms()))
 
+    if event_time - last_liq_finalize_ms.get(symbol, 0) >= 250:
+    last_liq_finalize_ms[symbol] = event_time
     finalize_liquidity_records(symbol, event_time)
     liquidity_index = state["liquidity_match_index"]
 
@@ -1395,6 +1468,7 @@ def process_trade(symbol, price, quantity, trade_time, is_buyer_maker):
             "quantity": quantity,
         }
 
+    with paper_bot_lock:
         if paper_bot_state.get("enabled") and paper_bot_state.get("symbol") == symbol:
             for mode in ("scalp", "intraday"):
                 act = paper_bot_state.get(mode, {}).get("active")
@@ -2513,19 +2587,22 @@ function fmt(v) {
     return v.toFixed(2);
 }
 
-// Zero-CPU Cached groupFootprint for smooth P4 2GB RAM rendering
+const fpGlobalCache = new Map();
+
 function groupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench) {
-    if (fpRaw && typeof fpRaw === 'object') {
-        const cacheKey = `${effStep.toFixed(6)}_${low}_${high}_${closePx}_${Math.round(liveRestBench || 0)}`;
-        if (fpRaw._cacheKey === cacheKey && fpRaw._cachedOut) {
-            return fpRaw._cachedOut;
-        }
-        const res = _computeGroupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench);
-        fpRaw._cacheKey = cacheKey;
-        fpRaw._cachedOut = res;
-        return res;
-    }
-    return _computeGroupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench);
+    if (!fpRaw) return [];
+    const arr = Array.isArray(fpRaw) ? fpRaw : Object.values(fpRaw);
+    if (arr.length === 0) return [];
+    const firstV = arr[0] ? (arr[0].volume || 0) : 0;
+    const lastV = arr[arr.length - 1] ? (arr[arr.length - 1].volume || 0) : 0;
+    const cacheKey = `${symbol}_${tf}_${effStep.toFixed(6)}_${low}_${high}_${arr.length}_${firstV.toFixed(3)}_${lastV.toFixed(3)}`;
+    const hit = fpGlobalCache.get(cacheKey);
+    if (hit) return hit;
+
+    if (fpGlobalCache.size > 400) fpGlobalCache.clear();
+    const res = _computeGroupFootprint(arr, low, high, effStep, closePx, liveRestBench);
+    fpGlobalCache.set(cacheKey, res);
+    return res;
 }
 
 function _computeGroupFootprint(fpRaw, low, high, effStep, closePx, liveRestBench) {
@@ -3602,9 +3679,9 @@ function drawAll() {
             }
         }
 
-        // Old Swing High & Old Swing Low (Last 8 closed candles)
+        // Unified Old Swing High & Old Swing Low (Strict Last 6 Closed Candles)
         let prevSwingHigh = -Infinity, prevSwingLow = Infinity;
-        for (let k = Math.max(0, candles.length - 9); k < candles.length - 1; k++) {
+        for (let k = Math.max(0, candles.length - 7); k < candles.length - 1; k++) {
             if (candles[k].high > prevSwingHigh) prevSwingHigh = candles[k].high;
             if (candles[k].low < prevSwingLow) prevSwingLow = candles[k].low;
         }
@@ -4558,8 +4635,9 @@ Analyze ALL parameters and reply in 5 short Hinglish points:
 5. 🌊 INTRADAY ROADMAP: Session CVD & Big Player campaign direction."""
 
     try:
-        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}"
-        list_resp = requests.get(list_url, timeout=8)
+         g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
+        list_url = "https://generativelanguage.googleapis.com/v1beta/models"
+        list_resp = requests.get(list_url, headers=g_headers, timeout=8)
         if list_resp.status_code != 200:
             return jsonify({"status": "error", "message": f"Gemini Model list error: {list_resp.text}"}), 400
 
@@ -4584,9 +4662,10 @@ Analyze ALL parameters and reply in 5 short Hinglish points:
         reply_text = None
         used_model = ""
         for model_path in available_models[:5]:
-            url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={gemini_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent"
             resp = requests.post(
                 url,
+                headers=g_headers,
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.1}
@@ -5020,8 +5099,8 @@ def _evaluate_server_orderflow(sym, tf_key):
             elif float(last4[m]["poc"]) < float(last4[m - 1]["poc"]):
                 s_poc_dn += 1
 
-    prev5_hi = max(float(x["high"]) for x in c_list[-6:-1])
-    prev5_lo = min(float(x["low"]) for x in c_list[-6:-1])
+    prev5_hi = max(float(x["high"]) for x in c_list[-7:-1])
+    prev5_lo = min(float(x["low"]) for x in c_list[-7:-1])
 
     # Iron-Anchor Closed Candle Scoring (Matches Frontend JS 100%)
     closed6 = c_list[:-1][-6:]
@@ -5266,7 +5345,7 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
     dec = 4 if sig["step"] < 0.01 else (2 if sig["step"] < 1 else 1)
 
     if init_risk > 0:
-        fee_plus_prof = max(entry_px * 0.0014, init_risk * 0.25)
+        fee_plus_prof = max(entry_px * 0.0018, init_risk * 0.25)
         if act["side"] == "LONG":
             if hi >= (entry_px + init_risk * 1.35) and float(act["sl"]) < (entry_px + init_risk * 0.75):
                 act["sl"] = round(entry_px + init_risk * 0.75, dec)
