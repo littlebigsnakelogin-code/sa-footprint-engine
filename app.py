@@ -2203,8 +2203,7 @@ setInterval(() => {
     if (document.hidden) return;
     const m = document.getElementById('paperModal');
     if (m && m.style.display === 'block') fetchPaperStatus();
-}, 5000);
-setTimeout(fetchPaperStatus, 1500);
+}, 12000);
 
 </script>
 <!-- ==================== END DEMO BOT UI ==================== -->
@@ -5473,7 +5472,7 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
     if not act:
         return False
 
-    # STRICT POST-ENTRY TICK BOUNDS (Never triggers on pre-entry candle wicks!)
+    # STRICT POST-ENTRY TICK BOUNDS (Zero Network / Pure RAM Check!)
     bounds = paper_post_entry_bounds.get(mode, {})
     live_px = sig["live_px"]
     hi = bounds["high"] if bounds.get("high") is not None else live_px
@@ -5535,14 +5534,14 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
         "entry": act["entry"], "exit": round(exit_px, dec),
         "outcome": outcome, "pnl": round(net_pnl, 3), "reason": act["reason"]
     })
-    book["history"] = book["history"][:30]
+    # Keep compact 12-trade log to minimize Outbound DB & HTTP Bandwidth!
+    book["history"] = book["history"][:12]
     book["active"] = None
     book["last_close"] = time.time()
     paper_post_entry_bounds[mode] = {"high": None, "low": None}
     return True
 
 def _paper_bot_worker():
-    global _last_self_ping
     _load_paper_state_from_turso()
     while True:
         try:
@@ -5553,19 +5552,11 @@ def _paper_bot_worker():
                 lev = int(paper_bot_state.get("leverage", 10))
 
             if not enabled:
-                time.sleep(8.0)
+                time.sleep(10.0)
                 continue
 
-            time.sleep(4.0)
-
-            if time.time() - _last_self_ping > 540:
-                _last_self_ping = time.time()
-                ext_url = os.environ.get("RENDER_EXTERNAL_URL")
-                if ext_url:
-                    try:
-                        requests.get(f"{ext_url.rstrip('/')}/hello", timeout=4)
-                    except Exception:
-                        pass
+            # Lightweight 6-second pure in-memory evaluation (0 KB network usage!)
+            time.sleep(6.0)
 
             sig = _evaluate_server_orderflow(sym, tf_key)
             if not sig:
