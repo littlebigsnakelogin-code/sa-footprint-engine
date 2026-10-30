@@ -1728,22 +1728,12 @@ def home():
         background: #0d111a;
         border-bottom: 1px solid #232838;
         display: flex;
-        align-items: center;
-        padding: 2px 8px;
+        align-items: stretch;
+        flex-wrap: wrap;
+        padding: 4px 8px;
         gap: 6px;
         font-size: 11px;
-        overflow-x: auto;
-        white-space: nowrap;
-        scrollbar-width: thin;
-        scrollbar-color: #2962ff #0d111a;
         flex-shrink: 0;
-    }
-    .decision-bar::-webkit-scrollbar {
-        height: 4px;
-    }
-    .decision-bar::-webkit-scrollbar-thumb {
-        background: #2962ff;
-        border-radius: 2px;
     }
     .bench-box {
         background: #151a28;
@@ -1751,9 +1741,9 @@ def home():
         padding: 3px 7px;
         border-radius: 3px;
         display: flex;
+        flex-wrap: wrap;
         gap: 6px;
         align-items: center;
-        flex-shrink: 0;
     }
     .smt-box {
         background: #181d2c;
@@ -1761,36 +1751,28 @@ def home():
         padding: 3px 8px;
         border-radius: 3px;
         font-weight: bold;
-        font-size: 10px;
-        flex-shrink: 0;
+        font-size: 10.5px;
+        display: flex;
+        align-items: center;
+        white-space: nowrap;
         color: #90a4ae;
     }
     .verdict-box {
-        flex: 1;
+        flex: 1 1 360px;
         min-width: 260px;
-        padding: 3px 8px;
+        padding: 4px 10px;
         border-radius: 4px;
         font-size: 10.5px;
         display: flex;
         flex-direction: column;
+        align-items: flex-start;
         justify-content: center;
         gap: 2px;
         border: 1px solid #2c3347;
         background: #141926;
-    }
-    .verdict-top {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        font-weight: bold;
-        font-size: 11px;
-    }
-    .verdict-sub {
-        font-size: 9.5px;
-        color: #cfd8dc;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        white-space: normal;
+        word-break: break-word;
+        line-height: 1.35;
     }
     .brand { color: #00e676; font-weight: bold; margin-right: 4px; font-size: 12px; flex-shrink: 0; }
     select, .btn {
@@ -1955,7 +1937,7 @@ def home():
         <span id="bmCur" style="color:#fff;">Cur:--</span>
     </div>
     <div class="smt-box" id="smtRadarBox">🔗 SMT: SCANNING...</div>
-    <div class="verdict-box" id="masterVerdictBox" style="flex-direction:row;justify-content:space-between;align-items:center;">
+    <div class="verdict-box" id="masterVerdictBox">
         <span id="masterVerdictTitle" style="font-weight:bold;font-size:11px;">SCANNING MACRO MARKET ORDERFLOW...</span>
         <span id="masterVerdictReasons" style="font-size:10px;font-weight:normal;color:#cfd8dc;">Calculating structure...</span>
     </div>
@@ -2346,14 +2328,14 @@ function toggleViewMode() {
 
 function getDomWidth() {
     if (!showDOM) return 0;
-    return cv.width < 768 ? Math.min(310, Math.floor(cv.width * 0.82)) : 460;
+    return cv.width < 768 ? cv.width : Math.min(440, Math.max(360, Math.floor(cv.width * 0.35)));
 }
 
 function updateSlideTabUI() {
     const domW = getDomWidth();
     const btn = document.getElementById('domToggleBtn');
     if (showDOM) {
-        slideTab.style.right = domW + 'px';
+        slideTab.style.right = (cv.width < 768 ? Math.max(0, cv.width - 28) : domW) + 'px';
         slideTab.innerText = '❯ HIDE DOM';
         btn.innerText = 'DOM: ON';
         btn.classList.add('active');
@@ -2367,9 +2349,9 @@ function updateSlideTabUI() {
 
 function getLayout() {
     isMobile = cv.width < 768;
-    const yAxisW = isMobile ? 60 : 74;
     const domW = getDomWidth();
-    const chartW = Math.max(100, cv.width - domW - yAxisW);
+    const yAxisW = (isMobile && showDOM) ? 0 : (isMobile ? 54 : 70);
+    const chartW = (isMobile && showDOM) ? 0 : Math.max(80, cv.width - domW - yAxisW);
     const chartH = cv.height - TIME_H - PILL_SAFE_H;
     return { yAxisW, domW, chartW, chartH };
 }
@@ -5002,7 +4984,7 @@ def _pick_server_magnet_tp(side, entry_px, sl_dist, min_rr, max_rr, magnets):
     return fallback_tp, f"{min_rr}R-Target"
 
 def _evaluate_server_orderflow(sym, tf_key):
-    """100% Synced with V6 Frontend: Dual-DOM + Candle-Close Wall Invalidation + True Displacement."""
+    """Sniper V6 Server Bot Evaluator: Structure-Confirmed + Anti-Falling-Knife + True Wall Purging."""
     raw_step = PRICE_STEP.get(sym, 1.0)
     peer_sym = "ETHUSDT" if sym == "BTCUSDT" else "BTCUSDT"
 
@@ -5013,7 +4995,7 @@ def _evaluate_server_orderflow(sym, tf_key):
         curr = current_candles[sym][tf_key]
         if curr is not None:
             c_list.append(finalize_candle(curr))
-        if len(c_list) < 7:
+        if len(c_list) < 8:
             return None
 
         peer_list = list(candles[peer_sym][tf_key])[-6:]
@@ -5023,6 +5005,7 @@ def _evaluate_server_orderflow(sym, tf_key):
 
         last_c = c_list[-1]
         prev_c = c_list[-2]
+        prev2_c = c_list[-3]
         live_px = float(last_c["close"])
         bids_dict = dict(orderbook[sym]["bids"])
         asks_dict = dict(orderbook[sym]["asks"])
@@ -5121,18 +5104,18 @@ def _evaluate_server_orderflow(sym, tf_key):
     efficiency = abs(net_move) / max(sum_ranges, raw_step)
     range_location = (live_px - macro_lo) / macro_span
 
-    # Candle-Close Wall Validity Helpers (Purges broken walls immediately!)
+    # Strict Candle-Close AND Live-Price Wall Validity (Never holds broken walls in a trend!)
     def is_bid_wall_valid(wall_px, formed_idx):
         for m in range(formed_idx + 1, len(c_list) - 1):
-            if float(c_list[m]["close"]) < wall_px - eff_step * 0.25:
+            if float(c_list[m]["close"]) < wall_px - eff_step * 0.20:
                 return False
-        return live_px >= wall_px - eff_step * 3.5
+        return live_px >= wall_px - eff_step * 0.50
 
     def is_ask_wall_valid(wall_px, formed_idx):
         for m in range(formed_idx + 1, len(c_list) - 1):
-            if float(c_list[m]["close"]) > wall_px + eff_step * 0.25:
+            if float(c_list[m]["close"]) > wall_px + eff_step * 0.20:
                 return False
-        return live_px <= wall_px + eff_step * 3.5
+        return live_px <= wall_px + eff_step * 0.50
 
     tot_cvd = 0.0
     poc_up, poc_dn = 0, 0
@@ -5212,7 +5195,7 @@ def _evaluate_server_orderflow(sym, tf_key):
     elif net_macro < 0 and macro_bid_abs > macro_ask_abs and macro_bull_disps >= macro_bear_disps:
         net_macro = 20
 
-    # 6-Candle Structure Cluster Evaluation (With Candle-Close Wall Purging!)
+    # 6-Candle Structure Cluster Evaluation (Exact Row-Level Matching with Frontend!)
     tot_aged_10s_bp = sum(v["aged_bp"] for v in raw_dom_cluster.values())
     tot_aged_10s_ap = sum(v["aged_ap"] for v in raw_dom_cluster.values())
     tot_aged_bid_abs = sum(v["aged_bid_exec"] for v in raw_dom_cluster.values())
@@ -5227,6 +5210,7 @@ def _evaluate_server_orderflow(sym, tf_key):
     r_bid_abs, r_ask_abs = 0, 0
     disp_bull_levels, disp_bear_levels = 0, 0
     lowest_bid_abs_px, highest_ask_abs_px = None, None
+    fp_3c_bp, fp_3c_ap = 0.0, 0.0
 
     struct_set = c_list[-6:]
     for s_idx, rc in enumerate(struct_set):
@@ -5242,8 +5226,8 @@ def _evaluate_server_orderflow(sym, tf_key):
         g_list = _group_fp_server(rc.get("footprint"), rc_lo, rc_hi, eff_step, rc_cls, live_rest_bench)
         for i_g, gl in enumerate(g_list):
             if is_rec3:
-                tot_aged_10s_bp = max(tot_aged_10s_bp, gl["bid_pulled"])
-                tot_aged_10s_ap = max(tot_aged_10s_ap, gl["ask_pulled"])
+                fp_3c_bp += gl["bid_pulled"]
+                fp_3c_ap += gl["ask_pulled"]
 
             clus_s, clus_b = gl["sell"], gl["buy"]
             if i_g > 0 and abs(g_list[i_g - 1]["price"] - gl["price"]) <= eff_step * 1.5:
@@ -5292,6 +5276,8 @@ def _evaluate_server_orderflow(sym, tf_key):
                 if not is_bid_abs and gl["sell"] > gl["buy"] * 2.5 and gl["sell"] >= eff_cell_bench * 1.4 and rc_cls < gl["price"] - eff_step * 0.3:
                     disp_bear_levels += 1
 
+    tot_aged_10s_bp = max(tot_aged_10s_bp, fp_3c_bp)
+    tot_aged_10s_ap = max(tot_aged_10s_ap, fp_3c_ap)
     aged_10s_pull_delta = tot_aged_10s_bp - tot_aged_10s_ap
     aged_10s_abs_delta = tot_aged_bid_abs - tot_aged_ask_abs
     ms_live_dom_delta = (tot_ms_bid_add - tot_flash_bp) - (tot_ms_ask_add - tot_flash_ap)
@@ -5317,24 +5303,26 @@ def _evaluate_server_orderflow(sym, tf_key):
 
     closed6 = c_list[:-1][-6:]
     avg_c_rng = sum(max(float(x["high"]) - float(x["low"]), raw_step) for x in closed6) / max(1, len(closed6))
+    avg_6c_px = sum(float(x["close"]) for x in closed6) / max(1, len(closed6))
     anchor_bull, anchor_bear = 0, 0
     anchor_sup, anchor_res = None, None
     prev_closed_px = float(prev_c["close"])
+    prev_open_px = float(prev_c["open"])
 
     for cc in closed6:
         cc_rng = max(float(cc["high"]) - float(cc["low"]), raw_step * 0.5)
         cc_pos = (float(cc["close"]) - float(cc["low"])) / cc_rng
         cc_d = float(cc.get("delta", 0.0))
 
-        if cc_d < -eff_cell_bench * 0.35 and cc_pos >= 0.55 and prev_closed_px >= float(cc["low"]):
+        if cc_d < -eff_cell_bench * 0.35 and cc_pos >= 0.55 and prev_closed_px >= float(cc["low"]) and live_px >= float(cc["low"]):
             anchor_bull += 20
             anchor_sup = float(cc["low"]) if anchor_sup is None else min(anchor_sup, float(cc["low"]))
-        elif cc_d > eff_cell_bench * 0.35 and cc_pos <= 0.45 and prev_closed_px <= float(cc["high"]):
+        elif cc_d > eff_cell_bench * 0.35 and cc_pos <= 0.45 and prev_closed_px <= float(cc["high"]) and live_px <= float(cc["high"]):
             anchor_bear += 20
             anchor_res = float(cc["high"]) if anchor_res is None else max(anchor_res, float(cc["high"]))
-        elif cc_d > eff_cell_bench * 0.45 and float(cc["close"]) > float(cc["open"]) and cc_pos >= 0.68:
+        elif cc_d > eff_cell_bench * 0.45 and float(cc["close"]) > float(cc["open"]) and cc_pos >= 0.68 and live_px >= float(cc["open"]):
             anchor_bull += 14
-        elif cc_d < -eff_cell_bench * 0.45 and float(cc["close"]) < float(cc["open"]) and cc_pos <= 0.32:
+        elif cc_d < -eff_cell_bench * 0.45 and float(cc["close"]) < float(cc["open"]) and cc_pos <= 0.32 and live_px <= float(cc["open"]):
             anchor_bear += 14
 
     if r_bid_abs > r_ask_abs:
@@ -5354,56 +5342,60 @@ def _evaluate_server_orderflow(sym, tf_key):
 
     is_big_exp = c_range >= avg_c_rng * 1.55
 
-    bull_sweep_reject = float(last_c["low"]) < prev5_lo and live_px > prev5_lo and (
-        close_pos >= 0.48 or r_bid_abs > 0 or tot_ice_bid > 0 or tot_aged_bid_abs > 0 or last_delta < 0 or aged_10s_pull_delta < 0
+    # Sweep Reject MUST also be green/reclaiming (for bull) or red/rejecting (for bear)!
+    bull_sweep_reject = (
+        (float(last_c["low"]) < prev5_lo or float(prev_c["low"]) < prev5_lo)
+        and live_px > prev5_lo and live_px > float(last_c["open"])
+        and (close_pos >= 0.55 or r_bid_abs > 0 or tot_ice_bid > 0 or tot_aged_bid_abs > 0)
     )
-    bear_sweep_reject = float(last_c["high"]) > prev5_hi and live_px < prev5_hi and (
-        close_pos <= 0.52 or r_ask_abs > 0 or tot_ice_ask > 0 or tot_aged_ask_abs > 0 or last_delta > 0 or aged_10s_pull_delta > 0
+    bear_sweep_reject = (
+        (float(last_c["high"]) > prev5_hi or float(prev_c["high"]) > prev5_hi)
+        and live_px < prev5_hi and live_px < float(last_c["open"])
+        and (close_pos <= 0.45 or r_ask_abs > 0 or tot_ice_ask > 0 or tot_aged_ask_abs > 0)
     )
 
     bull_breakout_drive = (
-        float(last_c["high"]) > prev5_hi and live_px > prev5_hi
+        float(last_c["high"]) > prev5_hi and live_px > prev5_hi and live_px > float(last_c["open"])
         and close_pos >= 0.62 and disp_bull_levels > 0 and r_ask_abs == 0
         and (aged_10s_pull_delta < -eff_cell_bench * 0.15 or ms_live_dom_delta > 0 or near_bid_rest >= near_ask_rest * 1.15)
     )
     bear_breakdown_drive = (
-        float(last_c["low"]) < prev5_lo and live_px < prev5_lo
+        float(last_c["low"]) < prev5_lo and live_px < prev5_lo and live_px < float(last_c["open"])
         and close_pos <= 0.38 and disp_bear_levels > 0 and r_bid_abs == 0
         and (aged_10s_pull_delta > eff_cell_bench * 0.15 or ms_live_dom_delta < 0 or near_ask_rest >= near_bid_rest * 1.15)
     )
 
+    # Strict Exhaustion Trap: NEVER trigger Bear Exhaustion (Long) on a red falling candle!
     is_bull_exhaust = (
         bear_sweep_reject
-        or (live_px > float(last_c["open"]) and is_big_exp and range_location >= 0.78 and not bull_breakout_drive and disp_bull_levels == 0 and (r_ask_abs > 0 or tot_ice_ask > eff_cell_bench * 0.4))
-        or (live_px > float(last_c["open"]) and anchor_bear > anchor_bull + 20 and live_px < (anchor_res or macro_hi))
-        or (last_delta > eff_cell_bench * 0.45 and close_pos <= 0.46)
+        or (live_px < float(last_c["open"]) and last_delta > eff_cell_bench * 0.45 and close_pos <= 0.42 and r_ask_abs > 0)
     )
     is_bear_exhaust = (
         bull_sweep_reject
-        or (live_px < float(last_c["open"]) and is_big_exp and range_location <= 0.22 and not bear_breakdown_drive and disp_bear_levels == 0 and (r_bid_abs > 0 or tot_ice_bid > eff_cell_bench * 0.4))
-        or (live_px < float(last_c["open"]) and anchor_bull > anchor_bear + 20 and live_px > (anchor_sup or macro_lo))
-        or (last_delta < -eff_cell_bench * 0.45 and close_pos >= 0.54)
+        or (live_px > float(last_c["open"]) and last_delta < -eff_cell_bench * 0.45 and close_pos >= 0.58 and r_bid_abs > 0)
     )
 
     inst_bull_drive = (
         bull_breakout_drive or (
             not is_bull_exhaust and anchor_bull >= anchor_bear
+            and live_px > float(last_c["open"])
             and (disp_bull_levels > disp_bear_levels or aged_10s_pull_delta < -eff_cell_bench * 0.20 or ms_live_dom_delta > eff_cell_bench * 0.40)
             and live_px > cur_poc and prev_closed_px >= prev_poc
-            and close_pos >= 0.60 and range_location <= 0.82
+            and close_pos >= 0.60 and range_location <= 0.84
         )
     )
     inst_bear_drive = (
         bear_breakdown_drive or (
             not is_bear_exhaust and anchor_bear >= anchor_bull
+            and live_px < float(last_c["open"])
             and (disp_bear_levels > disp_bull_levels or aged_10s_pull_delta > eff_cell_bench * 0.20 or ms_live_dom_delta < -eff_cell_bench * 0.40)
             and live_px < cur_poc and prev_closed_px <= prev_poc
-            and close_pos <= 0.40 and range_location >= 0.18
+            and close_pos <= 0.40 and range_location >= 0.16
         )
     )
 
-    cluster_long_buildup = (anchor_bull >= anchor_bear + 15) and not inst_bear_drive
-    cluster_short_buildup = (anchor_bear >= anchor_bull + 15) and not inst_bull_drive
+    cluster_long_buildup = (anchor_bull >= anchor_bear + 15) and not inst_bear_drive and live_px >= float(last_c["open"])
+    cluster_short_buildup = (anchor_bear >= anchor_bull + 15) and not inst_bull_drive and live_px <= float(last_c["open"])
     retail_buys_trapped = is_bull_exhaust
     retail_sells_trapped = is_bear_exhaust
 
@@ -5482,9 +5474,9 @@ def _evaluate_server_orderflow(sym, tf_key):
     elif smt_bias == -1:
         scalp_pts -= 10
 
-    if scalp_pts > 0 and range_location >= 0.78 and not bull_sweep_reject and not bull_breakout_drive:
+    if scalp_pts > 0 and range_location >= 0.82 and not bull_sweep_reject and not bull_breakout_drive:
         scalp_pts = min(scalp_pts, 18)
-    elif scalp_pts < 0 and range_location <= 0.22 and not bear_sweep_reject and not bear_breakdown_drive:
+    elif scalp_pts < 0 and range_location <= 0.18 and not bear_sweep_reject and not bear_breakdown_drive:
         scalp_pts = max(scalp_pts, -18)
 
     exec_vs_abs_state = "BULL" if inst_bull_drive else ("BEAR" if inst_bear_drive else ("BULL" if cluster_long_buildup else ("BEAR" if cluster_short_buildup else "NEU")))
@@ -5540,7 +5532,14 @@ def _evaluate_server_orderflow(sym, tf_key):
     ]
     i_bull, i_bear, i_neu = i_states.count("BULL"), i_states.count("BEAR"), i_states.count("NEU")
 
+    tf_sec = TIMEFRAMES.get(tf_key, 300)
     candle_age_sec = (now_ms() - int(last_c["start"])) / 1000.0
+
+    # Strict Structure & Candle Confirmation Flags (Prevents Falling-Knife Longs & Top Shorts!)
+    prev_bull_confirmed = (prev_closed_px > prev_open_px and live_px >= prev_poc) or (live_px > float(prev_c["high"]))
+    prev_bear_confirmed = (prev_closed_px < prev_open_px and live_px <= prev_poc) or (live_px < float(prev_c["low"]))
+    structure_up = (live_px >= avg_6c_px and prev_closed_px >= float(prev2_c["low"])) or bull_sweep_reject or bull_breakout_drive
+    structure_dn = (live_px <= avg_6c_px and prev_closed_px <= float(prev2_c["high"])) or bear_sweep_reject or bear_breakdown_drive
 
     return {
         "live_px": live_px,
@@ -5559,6 +5558,7 @@ def _evaluate_server_orderflow(sym, tf_key):
         "efficiency": efficiency,
         "range_location": range_location,
         "candle_age_sec": candle_age_sec,
+        "tf_sec": tf_sec,
         "inst_bull_drive": inst_bull_drive,
         "inst_bear_drive": inst_bear_drive,
         "bull_breakout_drive": bull_breakout_drive,
@@ -5569,6 +5569,10 @@ def _evaluate_server_orderflow(sym, tf_key):
         "retail_sells_trapped": retail_sells_trapped,
         "bull_sweep_reject": bull_sweep_reject,
         "bear_sweep_reject": bear_sweep_reject,
+        "prev_bull_confirmed": prev_bull_confirmed,
+        "prev_bear_confirmed": prev_bear_confirmed,
+        "structure_up": structure_up,
+        "structure_dn": structure_dn,
         "s_poc_up": s_poc_up,
         "s_poc_dn": s_poc_dn,
         "tot_cvd": tot_cvd,
@@ -5594,38 +5598,39 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
     init_risk = float(act.get("init_risk", abs(entry_px - float(act["sl"]))))
     dec = 4 if sig["step"] < 0.01 else (2 if sig["step"] < 1 else 1)
 
+    # SMART BREATHING TRAIL: Gives trade room to hit 1.35R TP without premature BE choke!
     if init_risk > 0:
-        fee_plus_prof = max(entry_px * 0.0018, init_risk * 0.25)
+        lock_prof = max(entry_px * 0.0018, init_risk * 0.38)
         if act["side"] == "LONG":
-            if hi >= (entry_px + init_risk * 1.35) and float(act["sl"]) < (entry_px + init_risk * 0.75):
-                act["sl"] = round(entry_px + init_risk * 0.75, dec)
+            if hi >= (entry_px + init_risk * 1.25) and float(act["sl"]) < (entry_px + init_risk * 0.80):
+                act["sl"] = round(entry_px + init_risk * 0.80, dec)
                 act["be_locked"] = "TRAIL"
-            elif not act.get("be_locked") and hi >= (entry_px + init_risk * 0.95):
-                act["sl"] = round(entry_px + fee_plus_prof, dec)
+            elif not act.get("be_locked") and hi >= (entry_px + init_risk * 1.08):
+                act["sl"] = round(entry_px + lock_prof, dec)
                 act["be_locked"] = "BE"
         else:
-            if lo <= (entry_px - init_risk * 1.35) and float(act["sl"]) > (entry_px - init_risk * 0.75):
-                act["sl"] = round(entry_px - init_risk * 0.75, dec)
+            if lo <= (entry_px - init_risk * 1.25) and float(act["sl"]) > (entry_px - init_risk * 0.80):
+                act["sl"] = round(entry_px - init_risk * 0.80, dec)
                 act["be_locked"] = "TRAIL"
-            elif not act.get("be_locked") and lo <= (entry_px - init_risk * 0.95):
-                act["sl"] = round(entry_px - fee_plus_prof, dec)
+            elif not act.get("be_locked") and lo <= (entry_px - init_risk * 1.08):
+                act["sl"] = round(entry_px - lock_prof, dec)
                 act["be_locked"] = "BE"
 
     exit_px, outcome = None, None
     if act["side"] == "LONG":
-        if lo <= act["sl"]:
-            exit_px = act["sl"]
-            outcome = "TRAIL WIN 🎯" if act.get("be_locked") == "TRAIL" else ("BE+ LOCK 🔒" if act.get("be_locked") == "BE" else "SL HIT ❌")
-        elif hi >= act["tp"]:
+        if hi >= act["tp"]:
             exit_px = act["tp"]
             outcome = f"TP HIT ({act.get('tp_tag', 'TARGET')}) ✅"
+        elif lo <= act["sl"]:
+            exit_px = act["sl"]
+            outcome = "TRAIL WIN 🎯" if act.get("be_locked") == "TRAIL" else ("BE+ LOCK 🔒" if act.get("be_locked") == "BE" else "SL HIT ❌")
     else:
-        if hi >= act["sl"]:
-            exit_px = act["sl"]
-            outcome = "TRAIL WIN 🎯" if act.get("be_locked") == "TRAIL" else ("BE+ LOCK 🔒" if act.get("be_locked") == "BE" else "SL HIT ❌")
-        elif lo <= act["tp"]:
+        if lo <= act["tp"]:
             exit_px = act["tp"]
             outcome = f"TP HIT ({act.get('tp_tag', 'TARGET')}) ✅"
+        elif hi >= act["sl"]:
+            exit_px = act["sl"]
+            outcome = "TRAIL WIN 🎯" if act.get("be_locked") == "TRAIL" else ("BE+ LOCK 🔒" if act.get("be_locked") == "BE" else "SL HIT ❌")
 
     if exit_px is None:
         return False
@@ -5636,7 +5641,6 @@ def _check_book_sl_tp(book, sig, mode="scalp"):
 
     book["balance"] = round(max(0.0, float(book["balance"]) + net_pnl), 3)
     book.setdefault("be_count", 0)
-    # STRICT OUTCOME ACCOUNTING: BE+ LOCK is NEVER counted as a TP Hit!
     if "BE+ LOCK" in outcome:
         book["be_count"] += 1
     elif net_pnl > 0:
@@ -5680,34 +5684,37 @@ def _paper_bot_worker():
             now_s = time.time()
             dec = 4 if sig["step"] < 0.01 else (2 if sig["step"] < 1 else 1)
 
+            # Timeframe-Adaptive Maturity Gate (Wait at least 35% of candle duration so opening wick traps finish!)
+            min_wait_sec = max(30.0, min(sig["tf_sec"] * 0.35, 110.0))
+
             with paper_bot_lock:
                 if _check_book_sl_tp(paper_bot_state["scalp"], sig, "scalp"):
                     changed = True
                 if _check_book_sl_tp(paper_bot_state["intraday"], sig, "intraday"):
                     changed = True
 
-                if enabled and sig["candle_age_sec"] >= 25:
+                if enabled and sig["candle_age_sec"] >= min_wait_sec:
                     sb = paper_bot_state["scalp"]
-                    if not sb["active"] and sb["balance"] >= 1.0 and (now_s - sb.get("last_close", 0) > 45):
-                        # STRICT MACRO TREND-LOCK: Never fight an active POC-stepping + Macro-aligned trend unless a verified liquidity sweep occurs!
-                        macro_bull_lock = (sig["i_pts"] >= 10) or (sig["s_poc_up"] > sig["s_poc_dn"] and sig["tot_cvd"] > 0) or sig["bull_sweep_reject"]
-                        macro_bear_lock = (sig["i_pts"] <= -10) or (sig["s_poc_dn"] > sig["s_poc_up"] and sig["tot_cvd"] < 0) or sig["bear_sweep_reject"]
+                    if not sb["active"] and sb["balance"] >= 1.0 and (now_s - sb.get("last_close", 0) > 90):
+                        # STRICT TREND + CANDLE COLOR + STRUCTURE CONFIRMATION
+                        macro_bull_ok = (sig["i_pts"] >= 15 and sig["s_poc_up"] >= sig["s_poc_dn"]) or sig["bull_sweep_reject"] or sig["bull_breakout_drive"]
+                        macro_bear_ok = (sig["i_pts"] <= -15 and sig["s_poc_dn"] >= sig["s_poc_up"]) or sig["bear_sweep_reject"] or sig["bear_breakdown_drive"]
 
                         s_long = (
-                            sig["s_pts"] >= 46 and sig["s_bull"] >= 6 and (sig["s_bull"] - sig["s_bear"] >= 3)
-                            and macro_bull_lock
+                            sig["s_pts"] >= 50 and sig["s_bull"] >= 7 and (sig["s_bull"] - sig["s_bear"] >= 4)
+                            and macro_bull_ok and sig["structure_up"] and sig["prev_bull_confirmed"]
+                            and sig["live_px"] > sig["open"] and sig["live_px"] > sig["cur_poc"]
                             and not sig["inst_bear_drive"] and not sig["retail_buys_trapped"]
-                            and (sig["range_location"] <= 0.78 or sig["bull_breakout_drive"])
-                            and sig["live_px"] >= sig["cur_poc"]
-                            and (sig["inst_bull_drive"] or sig["bull_breakout_drive"] or sig["cluster_long_buildup"] or sig["bull_sweep_reject"])
+                            and (sig["range_location"] <= 0.76 or sig["bull_breakout_drive"])
+                            and (sig["inst_bull_drive"] or sig["bull_breakout_drive"] or sig["bull_sweep_reject"])
                         )
                         s_short = (
-                            sig["s_pts"] <= -46 and sig["s_bear"] >= 6 and (sig["s_bear"] - sig["s_bull"] >= 3)
-                            and macro_bear_lock
+                            sig["s_pts"] <= -50 and sig["s_bear"] >= 7 and (sig["s_bear"] - sig["s_bull"] >= 4)
+                            and macro_bear_ok and sig["structure_dn"] and sig["prev_bear_confirmed"]
+                            and sig["live_px"] < sig["open"] and sig["live_px"] < sig["cur_poc"]
                             and not sig["inst_bull_drive"] and not sig["retail_sells_trapped"]
-                            and (sig["range_location"] >= 0.22 or sig["bear_breakdown_drive"])
-                            and sig["live_px"] <= sig["cur_poc"]
-                            and (sig["inst_bear_drive"] or sig["bear_breakdown_drive"] or sig["cluster_short_buildup"] or sig["bear_sweep_reject"])
+                            and (sig["range_location"] >= 0.24 or sig["bear_breakdown_drive"])
+                            and (sig["inst_bear_drive"] or sig["bear_breakdown_drive"] or sig["bear_sweep_reject"])
                         )
 
                         if s_long or s_short:
@@ -5715,18 +5722,19 @@ def _paper_bot_worker():
                             ep = sig["live_px"]
                             if side == "LONG":
                                 struct_fl = sig["lowest_bid_abs_px"] if sig["lowest_bid_abs_px"] else min(sig["low"], sig["prev_lo"])
-                                raw_d = (ep - struct_fl) + sig["eff_step"] * 1.5
+                                raw_d = (ep - struct_fl) + sig["eff_step"] * 2.0
                             else:
                                 struct_cl = sig["highest_ask_abs_px"] if sig["highest_ask_abs_px"] else max(sig["high"], sig["prev_hi"])
-                                raw_d = (struct_cl - ep) + sig["eff_step"] * 1.5
+                                raw_d = (struct_cl - ep) + sig["eff_step"] * 2.0
 
-                            sl_d = max(ep * 0.0014, min(raw_d, ep * 0.0030))
+                            # Realistic structure breathing SL (0.20% to 0.36%) & high-hit-rate TP (1.35R to 1.85R)
+                            sl_d = max(ep * 0.0020, min(raw_d, ep * 0.0036))
                             sl = round(ep - sl_d if side == "LONG" else ep + sl_d, dec)
-                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 1.55, 2.5, sig["magnets"])
+                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 1.35, 1.85, sig["magnets"])
                             tp = round(tp_raw, dec)
 
                             sl_pct = sl_d / ep
-                            max_loss_usd = sb["balance"] * 0.032
+                            max_loss_usd = sb["balance"] * 0.028
                             safe_notional = min(sb["balance"] * lev, max_loss_usd / max(sl_pct, 0.0005))
                             eff_margin = round(safe_notional / lev, 2)
 
@@ -5741,31 +5749,35 @@ def _paper_bot_worker():
                             changed = True
 
                     ib = paper_bot_state["intraday"]
-                    if not ib["active"] and ib["balance"] >= 1.0 and (now_s - ib.get("last_close", 0) > 60):
+                    if not ib["active"] and ib["balance"] >= 1.0 and (now_s - ib.get("last_close", 0) > 120):
                         i_long = (
-                            sig["i_pts"] >= 46 and sig["i_bull"] >= 6 and (sig["i_bull"] - sig["i_bear"] >= 3)
-                            and sig["s_pts"] >= 28 and not sig["inst_bear_drive"] and not sig["retail_buys_trapped"]
-                            and sig["live_px"] >= sig["cur_poc"] and (sig["range_location"] <= 0.78 or sig["bull_breakout_drive"])
+                            sig["i_pts"] >= 50 and sig["i_bull"] >= 7 and (sig["i_bull"] - sig["i_bear"] >= 4)
+                            and sig["s_pts"] >= 36 and sig["structure_up"] and sig["prev_bull_confirmed"]
+                            and sig["live_px"] > sig["open"] and sig["live_px"] > sig["cur_poc"]
+                            and not sig["inst_bear_drive"] and not sig["retail_buys_trapped"]
+                            and (sig["range_location"] <= 0.76 or sig["bull_breakout_drive"])
                         )
                         i_short = (
-                            sig["i_pts"] <= -46 and sig["i_bear"] >= 6 and (sig["i_bear"] - sig["i_bull"] >= 3)
-                            and sig["s_pts"] <= -28 and not sig["inst_bull_drive"] and not sig["retail_sells_trapped"]
-                            and sig["live_px"] <= sig["cur_poc"] and (sig["range_location"] >= 0.22 or sig["bear_breakdown_drive"])
+                            sig["i_pts"] <= -50 and sig["i_bear"] >= 7 and (sig["i_bear"] - sig["i_bull"] >= 4)
+                            and sig["s_pts"] <= -36 and sig["structure_dn"] and sig["prev_bear_confirmed"]
+                            and sig["live_px"] < sig["open"] and sig["live_px"] < sig["cur_poc"]
+                            and not sig["inst_bull_drive"] and not sig["retail_sells_trapped"]
+                            and (sig["range_location"] >= 0.24 or sig["bear_breakdown_drive"])
                         )
 
                         if i_long or i_short:
                             side = "LONG" if i_long else "SHORT"
                             ep = sig["live_px"]
                             sw_ref = min(sig["low"], sig["prev5_lo"]) if side == "LONG" else max(sig["high"], sig["prev5_hi"])
-                            raw_d = abs(ep - sw_ref) + sig["eff_step"] * 2.0
+                            raw_d = abs(ep - sw_ref) + sig["eff_step"] * 2.5
 
-                            sl_d = max(ep * 0.0022, min(raw_d, ep * 0.0045))
+                            sl_d = max(ep * 0.0026, min(raw_d, ep * 0.0048))
                             sl = round(ep - sl_d if side == "LONG" else ep + sl_d, dec)
-                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 1.85, 3.2, sig["magnets"])
+                            tp_raw, tp_tag = _pick_server_magnet_tp(side, ep, sl_d, 1.50, 2.20, sig["magnets"])
                             tp = round(tp_raw, dec)
 
                             sl_pct = sl_d / ep
-                            max_loss_usd = ib["balance"] * 0.045
+                            max_loss_usd = ib["balance"] * 0.038
                             safe_notional = min(ib["balance"] * lev, max_loss_usd / max(sl_pct, 0.0005))
                             eff_margin = round(safe_notional / lev, 2)
 
