@@ -4349,7 +4349,9 @@ function drawAll() {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = '#00e5ff';
-        ctx.fillText(`⚡LIVE DOM:${fmt(totExecBuy)}B/${fmt(totExecSell)}S msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} | 🎭10sWALL PΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} Abs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A`, domX + 6, 11);
+        const srvMs = obData.ms_telemetry || {};
+        const msSrvLabel = srvMs.dir_label || '⚪MS:NEU';
+        ctx.fillText(`⚡DOM:${fmt(totExecBuy)}B/${fmt(totExecSell)}S msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}]`, domX + 6, 11);
 
         ctx.fillStyle = bwCol;
         ctx.fillText(battleWinner, domX + 6, 25);
