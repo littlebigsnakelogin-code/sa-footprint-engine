@@ -1815,7 +1815,7 @@ def home():
     .lg { padding: 1px 4px; border-radius: 2px; font-weight: bold; }
     .status-right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
     .live-px { font-size: 13px; font-weight: bold; padding: 2px 6px; background: #1a2030; border-radius: 3px; }
-    #wrap { flex: 1; position: relative; overflow: hidden; background: #090b10; touch-action: none; }
+    #wrap { flex: 1 1 auto; min-height: 0; width: 100%; position: relative; overflow: hidden; background: #090b10; touch-action: none; }
     canvas { display: block; touch-action: none; }
 
     .dom-slide-tab {
@@ -2338,7 +2338,7 @@ let curX = -1, curY = -1;
 let pinchDist = null;
 let needsRender = true;
 
-const TIME_H = 26;
+let TIME_H = window.innerWidth < 768 ? 34 : 26;
 const PILL_SAFE_H = 78;
 
 function toggleViewMode() {
@@ -2372,6 +2372,7 @@ function updateSlideTabUI() {
 
 function getLayout() {
     isMobile = cv.width < 768;
+    TIME_H = isMobile ? 34 : 26;
     const domW = getDomWidth();
     const yAxisW = (isMobile && showDOM) ? 0 : (isMobile ? 54 : 70);
     const chartW = (isMobile && showDOM) ? 0 : Math.max(80, cv.width - domW - yAxisW);
@@ -2380,15 +2381,23 @@ function getLayout() {
 }
 
 function resize() {
-    const r = wrap.getBoundingClientRect();
-    cv.width = Math.floor(r.width);
-    cv.height = Math.floor(r.height);
+    const vH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    const vW = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+    document.body.style.height = Math.floor(vH) + 'px';
+    const wrapTop = wrap.getBoundingClientRect().top;
+    const availH = Math.max(180, Math.floor(vH - wrapTop));
+    cv.width = Math.floor(vW);
+    cv.height = availH;
     updateSlideTabUI();
     needsRender = true;
 }
 window.addEventListener('resize', resize);
-if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', resize);
+    window.visualViewport.addEventListener('scroll', resize);
+}
 setTimeout(resize, 150);
+setTimeout(resize, 500);
 resize();
 
 function toggleDOM() {
@@ -3147,7 +3156,9 @@ function drawAll() {
     const timeBarTop = H - TIME_H;
     ctx.fillStyle = '#11151f';
     ctx.fillRect(0, timeBarTop, chartW, TIME_H);
-
+    ctx.strokeStyle = '#263147';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, timeBarTop); ctx.lineTo(chartW, timeBarTop); ctx.stroke();
     let cvd = 0;
     let hoveredCellInfo = null;
 
@@ -3525,10 +3536,11 @@ function drawAll() {
 
         if (candleW >= 40) {
             const tStr = new Date(c.start).toTimeString().slice(0, 5);
-            ctx.fillStyle = '#9ba2b0';
+            ctx.fillStyle = '#cfd8dc';
             ctx.font = 'bold 10px monospace';
             ctx.textAlign = 'center';
-            ctx.fillText(tStr, cx, timeBarTop + TIME_H * 0.55);
+            ctx.textBaseline = 'middle';
+            ctx.fillText(tStr, cx, timeBarTop + 12);
         }
     });
 
