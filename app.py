@@ -893,11 +893,16 @@ def apply_orderbook_event(symbol, event):
     aged_10s_gate = max(dyn_book_avg * 0.22, rolling_lot_tracker.get(symbol, 0.04) * 1.6)
     MIN_WALL_AGE_MS = 10000  # STRICT 10-SECOND RESTING WALL THRESHOLD
 
-    if event_update_id % 60 == 0 and dom_raw:
-        cutoff_ts = event_time - 300000
+    if event_update_id % 15 == 0 and dom_raw:
+        cutoff_ts = event_time - 90000
         for k_px, v_obj in list(dom_raw.items()):
             if v_obj["ts"] > 0 and v_obj["ts"] < cutoff_ts:
                 dom_raw.pop(k_px, None)
+            else:
+                v_obj["ms_bid_add"] = round(float(v_obj.get("ms_bid_add", 0.0)) * 0.82, 4)
+                v_obj["ms_ask_add"] = round(float(v_obj.get("ms_ask_add", 0.0)) * 0.82, 4)
+                v_obj["flash_bid_pull"] = round(float(v_obj.get("flash_bid_pull", 0.0)) * 0.82, 4)
+                v_obj["flash_ask_pull"] = round(float(v_obj.get("flash_ask_pull", 0.0)) * 0.82, 4)
 
     def process_side(side, event_levels, book):
         nonlocal dyn_book_avg
