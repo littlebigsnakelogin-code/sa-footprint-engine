@@ -1689,16 +1689,39 @@ def home():
 <style>
     * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
     html, body {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
         background: #090b10;
         color: #d1d4dc;
         font-family: monospace;
         overflow: hidden;
-        height: 100vh;
-        height: 100dvh;
-        width: 100vw;
         display: flex;
         flex-direction: column;
         touch-action: none;
+    }
+    @media (max-width: 768px) {
+        .decision-bar {
+            padding: 2px 6px !important;
+            gap: 3px !important;
+        }
+        .bench-box, .smt-box {
+            font-size: 9.5px !important;
+            padding: 2px 5px !important;
+        }
+        .verdict-box {
+            flex: 1 1 100% !important;
+            padding: 2px 6px !important;
+            font-size: 9.5px !important;
+            line-height: 1.2 !important;
+        }
+        #masterVerdictTitle {
+            font-size: 10px !important;
+        }
+        #masterVerdictReasons {
+            font-size: 9px !important;
+        }
     }
     .topbar {
         min-height: 38px;
@@ -2357,12 +2380,15 @@ function getLayout() {
 }
 
 function resize() {
-    cv.width = wrap.clientWidth;
-    cv.height = wrap.clientHeight;
+    const r = wrap.getBoundingClientRect();
+    cv.width = Math.floor(r.width);
+    cv.height = Math.floor(r.height);
     updateSlideTabUI();
     needsRender = true;
 }
 window.addEventListener('resize', resize);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
+setTimeout(resize, 150);
 resize();
 
 function toggleDOM() {
