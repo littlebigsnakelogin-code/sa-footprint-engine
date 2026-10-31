@@ -358,6 +358,20 @@ dom_raw_telemetry = {sym: defaultdict(lambda: {
     "peak_bid": 0.0, "peak_ask": 0.0, "ts": 0
 }) for sym in SYMBOLS}
 
+# 100% Render-Side Millisecond Sliding Window & Real/Fake Direction Engine
+ms_engine_state = {
+    sym: {
+        "ticks": deque(maxlen=160),
+        "ms_delta": 0.0,
+        "accel_1s": 0.0,
+        "peak_burst": 0.0,
+        "state": "NEU",
+        "dir_label": "NEU",
+        "updated_ms": 0,
+    }
+    for sym in SYMBOLS
+}
+
 
 def create_empty_candle(symbol, timeframe, start, open_price):
     return {
@@ -887,25 +901,29 @@ def apply_orderbook_event(symbol, event):
     dom_raw = dom_raw_telemetry[symbol]
 
     dyn_book_avg = rolling_book_depth_tracker.get(symbol, 1.0)
-    # 1. Millisecond Live Flow Gate (<10s HFT directional adds & flash pulls for DOM only)
     ms_flash_gate = max(dyn_book_avg * 0.10, rolling_lot_tracker.get(symbol, 0.04) * 0.6)
-    # 2. >=10s Heavy Institutional Resting Wall Gate (10s, 20s, 1h+ old walls for DOM + Footprint + Pill)
     aged_10s_gate = max(dyn_book_avg * 0.22, rolling_lot_tracker.get(symbol, 0.04) * 1.6)
-    MIN_WALL_AGE_MS = 10000  # STRICT 10-SECOND RESTING WALL THRESHOLD
+    MIN_WALL_AGE_MS = 10000
 
+    # Keep row-level flash counters fresh via smooth decay, while ms_engine_state tracks exact 3.5s window!
     if event_update_id % 15 == 0 and dom_raw:
         cutoff_ts = event_time - 90000
         for k_px, v_obj in list(dom_raw.items()):
             if v_obj["ts"] > 0 and v_obj["ts"] < cutoff_ts:
                 dom_raw.pop(k_px, None)
             else:
-                v_obj["ms_bid_add"] = round(float(v_obj.get("ms_bid_add", 0.0)) * 0.82, 4)
-                v_obj["ms_ask_add"] = round(float(v_obj.get("ms_ask_add", 0.0)) * 0.82, 4)
-                v_obj["flash_bid_pull"] = round(float(v_obj.get("flash_bid_pull", 0.0)) * 0.82, 4)
-                v_obj["flash_ask_pull"] = round(float(v_obj.get("flash_ask_pull", 0.0)) * 0.82, 4)
+                v_obj["ms_bid_add"] = round(float(v_obj.get("ms_bid_add", 0.0)) * 0.78, 4)
+                v_obj["ms_ask_add"] = round(float(v_obj.get("ms_ask_add", 0.0)) * 0.78, 4)
+                v_obj["flash_bid_pull"] = round(float(v_obj.get("flash_bid_pull", 0.0)) * 0.78, 4)
+                v_obj["flash_ask_pull"] = round(float(v_obj.get("flash_ask_pull", 0.0)) * 0.78, 4)
+
+    tick_bid_add = 0.0
+    tick_ask_add = 0.0
+    tick_bid_pull = 0.0
+    tick_ask_pull = 0.0
 
     def process_side(side, event_levels, book):
-        nonlocal dyn_book_avg
+        nonlocal dyn_book_avg, tick_bid_add, tick_ask_add, tick_bid_pull, tick_ask_pull
         is_bid = (side == "bid")
         for price, quantity in event_levels:
             price = str(price)
@@ -923,6 +941,8 @@ def apply_orderbook_event(symbol, event):
 
             b_px = round_price_to_step(p_flt, step)
             near_live = (live_px is None) or (abs(b_px - float(live_px)) <= step * 35.0)
+            near_active_zone = (live_px is None) or (abs(b_px - float(live_px)) <= step * 16.0)
+
             if near_live and new_quantity > 0:
                 capped_q = min(new_quantity, dyn_book_avg * 3.5)
                 dyn_book_avg = (dyn_book_avg * 0.998) + (capped_q * 0.002)
@@ -938,7 +958,6 @@ def apply_orderbook_event(symbol, event):
 
             lots = state["liquidity_lots"][side][price]
 
-            # Track EVERY Millisecond Order Addition in DOM
             if added_qty > 1e-8:
                 lots.append({
                     "original_qty": added_qty,
@@ -952,6 +971,12 @@ def apply_orderbook_event(symbol, event):
                         d_cell["ms_bid_add"] = round(d_cell["ms_bid_add"] + added_qty, 4)
                     else:
                         d_cell["ms_ask_add"] = round(d_cell["ms_ask_add"] + added_qty, 4)
+                if near_active_zone and added_qty >= ms_flash_gate:
+                    cap_add = min(added_qty, dyn_book_avg * 6.0)
+                    if is_bid:
+                        tick_bid_add += cap_add
+                    else:
+                        tick_ask_add += cap_add
 
             aged_consumed_qty = 0.0
             aged_executed_qty = 0.0
@@ -965,7 +990,6 @@ def apply_orderbook_event(symbol, event):
                 executed_qty = min(max(float(executed_qty), 0.0), reduced_qty)
                 canceled_qty = max(reduced_qty - executed_qty, 0.0)
 
-                # 1. FIFO Execution: Check if a >=10s Aged Resting Wall was ABSORBED/EATEN when price reached it!
                 rem_exec = executed_qty
                 while rem_exec > 1e-12 and lots:
                     oldest_lot = lots[0]
@@ -985,7 +1009,6 @@ def apply_orderbook_event(symbol, event):
                     if oldest_lot["remaining_qty"] <= 1e-12:
                         lots.popleft()
 
-                # 2. LIFO Cancellation: Separate >=10s Aged Wall Pulls (Manipulation) vs <10s Millisecond Flash Pulls!
                 rem_cancel = canceled_qty
                 while rem_cancel > 1e-12 and lots:
                     newest_lot = lots[-1]
@@ -1016,7 +1039,6 @@ def apply_orderbook_event(symbol, event):
                 if not lots:
                     state["liquidity_lots"][side].pop(price, None)
 
-                # Update DOM Telemetry with BOTH Millisecond Flow AND >=10s Wall Reaction (Absorbed vs Pulled)
                 if d_cell is not None:
                     if is_bid:
                         d_cell["flash_bid_pull"] = round(d_cell["flash_bid_pull"] + flash_unmatched_qty, 4)
@@ -1027,7 +1049,13 @@ def apply_orderbook_event(symbol, event):
                         if aged_executed_qty > 0:
                             d_cell["aged_ask_exec"] = round(d_cell["aged_ask_exec"] + aged_executed_qty, 4)
 
-                # ONLY >=10s Aged Resting Wall Pulls (within 18 steps of live price) go to Footprint, HUD & Pill!
+                if near_active_zone and flash_unmatched_qty > 0:
+                    cap_pull = min(flash_unmatched_qty, dyn_book_avg * 6.0)
+                    if is_bid:
+                        tick_bid_pull += cap_pull
+                    else:
+                        tick_ask_pull += cap_pull
+
                 if aged_unmatched_qty >= aged_10s_gate and (live_px is None or abs(b_px - float(live_px)) <= step * 18.0):
                     if d_cell is not None:
                         if is_bid:
@@ -1073,6 +1101,61 @@ def apply_orderbook_event(symbol, event):
 
     process_side("bid", event.get("b", []), state["bids"])
     process_side("ask", event.get("a", []), state["asks"])
+
+    # =========================================================================
+    # RENDER-SIDE 100ms SLIDING WINDOW IMPULSE & FAKE/REAL DIRECTION ENGINE
+    # =========================================================================
+    ms_st = ms_engine_state[symbol]
+    ticks_q = ms_st["ticks"]
+    tick_net = (tick_bid_add - tick_bid_pull) - (tick_ask_add - tick_ask_pull)
+    cur_px_val = float(live_px) if live_px is not None else 0.0
+
+    if abs(tick_net) > 1e-6 or not ticks_q:
+        ticks_q.append((event_time, tick_net, cur_px_val))
+
+    # Purge any tick older than 3.5 seconds (3500ms) so msΔ NEVER gets stuck!
+    win_cutoff = event_time - 3500
+    while ticks_q and ticks_q[0][0] < win_cutoff:
+        ticks_q.popleft()
+
+    win_ms_delta = 0.0
+    recent_1s_delta = 0.0
+    peak_burst = 0.0
+    cut_1s = event_time - 1100
+
+    for t_ms, t_net, _ in ticks_q:
+        win_ms_delta += t_net
+        if t_ms >= cut_1s:
+            recent_1s_delta += t_net
+        if abs(t_net) > abs(peak_burst):
+            peak_burst = t_net
+
+    px_drift = (cur_px_val - ticks_q[0][2]) if (len(ticks_q) >= 2 and ticks_q[0][2] > 0 and cur_px_val > 0) else 0.0
+    sig_thresh = max(dyn_book_avg * 0.85, rolling_lot_tracker.get(symbol, 0.04) * 5.0)
+
+    ms_dir_state = "NEU"
+    ms_dir_label = "⚪MS:NEU"
+    if win_ms_delta >= sig_thresh:
+        if px_drift < -step * 0.5 and recent_1s_delta > sig_thresh * 0.35:
+            ms_dir_state = "BULL"
+            ms_dir_label = "🛡️MS:BEAR-TRAP(BID-RELOAD)"
+        elif recent_1s_delta >= -sig_thresh * 0.25:
+            ms_dir_state = "BULL"
+            ms_dir_label = "🟢MS:BULL-DRIVE"
+    elif win_ms_delta <= -sig_thresh:
+        if px_drift > step * 0.5 and recent_1s_delta < -sig_thresh * 0.35:
+            ms_dir_state = "BEAR"
+            ms_dir_label = "🎭MS:BULL-TRAP(ASK-CAP)"
+        elif recent_1s_delta <= sig_thresh * 0.25:
+            ms_dir_state = "BEAR"
+            ms_dir_label = "🔴MS:BEAR-DRIVE"
+
+    ms_st["ms_delta"] = round(win_ms_delta, 3)
+    ms_st["accel_1s"] = round(recent_1s_delta, 3)
+    ms_st["peak_burst"] = round(peak_burst, 3)
+    ms_st["state"] = ms_dir_state
+    ms_st["dir_label"] = ms_dir_label
+    ms_st["updated_ms"] = event_time
 
     state["last_update_id"] = event_update_id
     state["last_depth_update_id"] = event_update_id
@@ -3845,8 +3928,13 @@ function drawAll() {
         const aged10sPullDelta = totAged10sBp - totAged10sAp;
         const aged10sAbsDelta = totAged10sBidAbs - totAged10sAskAbs;
 
-        // CATEGORY 1 METRIC (Live Total DOM Millisecond Pressure: Net Bid Adds + Ask Pulls vs Net Ask Adds + Bid Pulls)
-        const msLiveDomDelta = (totMsBidAdd - totFlashBp) - (totMsAskAdd - totFlashAp);
+        // CATEGORY 1 METRIC (100% Render-Side 3.5s Sliding Window Millisecond Impulse & Trap Detector)
+        const srvMs = obData.ms_telemetry || {};
+        const msLiveDomDelta = (srvMs.ms_delta !== undefined)
+            ? Number(srvMs.ms_delta)
+            : ((totMsBidAdd - totFlashBp) - (totMsAskAdd - totFlashAp));
+        const msSrvState = srvMs.state || 'NEU';
+        const msSrvLabel = srvMs.dir_label || '⚪MS:NEU';
         const domPullDelta = (totAged10sBp + totFlashBp) - (totAged10sAp + totFlashAp);
 
         const curRvol = (lastC.volume || 0) / avgFlowVol;
@@ -4026,14 +4114,14 @@ function drawAll() {
             wall10sState = 'BEAR';
         }
 
-        // CATEGORY 1 SCORE: LIVE TOTAL DOM MILLISECOND FLOW (0ms-1h+ Adds, Flash Pulls & Resting Depth)
+        // CATEGORY 1 SCORE: RENDER-VERIFIED 100ms IMPULSE & RESTING DEPTH
         const minBookFloor = effCellBench * 1.3;
-        let liveDomFlowState = 'NEU';
-        if ((nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25) || msLiveDomDelta > effCellBench * 0.35) {
-            scalpPts += 14;
+        let liveDomFlowState = msSrvState;
+        if (liveDomFlowState === 'BULL' || (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25 && msLiveDomDelta >= 0)) {
+            scalpPts += 16;
             liveDomFlowState = 'BULL';
-        } else if ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25) || msLiveDomDelta < -effCellBench * 0.35) {
-            scalpPts -= 14;
+        } else if (liveDomFlowState === 'BEAR' || (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25 && msLiveDomDelta <= 0)) {
+            scalpPts -= 16;
             liveDomFlowState = 'BEAR';
         }
 
@@ -4636,6 +4724,9 @@ def api_orderbook():
             if live_px is None or abs(float(px_k) - float(live_px)) <= step * 60.0:
                 raw_list.append({"price": float(px_k), **d_obj})
 
+        ms_snap = dict(ms_engine_state.get(symbol, {}))
+        ms_snap.pop("ticks", None)
+
         return jsonify({
             "status": "ok",
             "symbol": symbol,
@@ -4651,6 +4742,7 @@ def api_orderbook():
             "bids": [{"price": float(p), "quantity": q} for p, q in bids],
             "asks": [{"price": float(p), "quantity": q} for p, q in asks],
             "dom_raw": raw_list,
+            "ms_telemetry": ms_snap,
         })
 
 
