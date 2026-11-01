@@ -4349,8 +4349,6 @@ function drawAll() {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = '#00e5ff';
-        const srvMs = obData.ms_telemetry || {};
-        const msSrvLabel = srvMs.dir_label || '⚪MS:NEU';
         ctx.fillText(`⚡DOM:${fmt(totExecBuy)}B/${fmt(totExecSell)}S msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}]`, domX + 6, 11);
 
         ctx.fillStyle = bwCol;
