@@ -4924,7 +4924,15 @@ def api_ai_mentor():
     live_news = fetch_live_crypto_news(symbol)
     news_block = "\n".join(live_news)
 
-    prompt = f"""You are an Institutional Crypto Quant & Orderflow Mentor speaking in sharp, practical Hinglish.
+    q_low = (question or "").strip().lower()
+    is_button_click = (not q_low) or (
+        "abi ka live orderflow, dom walls, aur news dekh kar" in q_low
+        or "mai yahan long (buy) setup dekh raha hu" in q_low
+        or "mai yahan short (sell) setup dekh raha hu" in q_low
+    )
+
+    if is_button_click:
+        prompt = f"""You are an Institutional Crypto Quant & Orderflow Mentor speaking in sharp, practical Hinglish.
 STRICT RULE: DO NOT hallucinate any numbers. Base 100% of your analysis strictly on the JSON telemetry and Live News Headlines below.
 
 Asset: {symbol} ({timeframe})
@@ -4939,9 +4947,26 @@ COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
 Analyze ALL parameters and reply in 5 short Hinglish points:
 1. ⚖️ FINAL VERDICT & ALIGNMENT: State Scalp Bias ({engine_data.get('scalp_10factor_verdict', {}).get('final_bias')}) & Intraday Bias ({engine_data.get('intraday_10factor_verdict', {}).get('final_bias')}) with Quant Scores. Is the trader's view 🟢 100% ALIGNED, 🔴 TRAP, or ⏳ WAIT FOR TRIGGER?
 2. 📰 LIVE NEWS & SENTIMENT IMPACT: Any breaking news risk/tailwind, or pure technical orderflow?
-3. ⚔️ DOM & ABSORPTION X-RAY: Exact numbers from 6-Candle Anchor Score, Buy/Sell Executions, 10s Pull Delta (PΔ), Resting Walls, Absorptions, and Sweeps.
+3. ⚔️ DOM & ABSORPTION X-RAY: Exact numbers from 6-Candle Anchor Score, Buy/Sell Executions, 10s Pull Delta (PΔ), Millisecond Delta (msΔ), Resting Walls, Absorptions, and Sweeps.
 4. 🎯 EXACT SCALP PLAN: Entry Zone, Invalidation/SL level, and Target (using active UB-HIGH/LOW or nPOC magnets).
 5. 🌊 INTRADAY ROADMAP: Session CVD & Big Player campaign direction."""
+    else:
+        prompt = f"""You are an Institutional Crypto Quant & Orderflow Mentor speaking in sharp, practical Hinglish.
+STRICT RULE: DO NOT hallucinate any numbers. Base 100% of your answer strictly on the JSON telemetry and Live News Headlines below.
+
+Asset: {symbol} ({timeframe})
+TRADER'S CUSTOM MESSAGE / CHART OBSERVATION: "{question}"
+
+LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT:
+{news_block}
+
+COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
+{json.dumps(engine_data, indent=2)}
+
+IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
+- The trader manually typed: "{question}". DO NOT output the generic 5-point button template!
+- Directly answer their specific question or evaluate the chart setup they described by cross-checking it against our live engine data (DOM 10s Walls, 10sPΔ, msΔ impulse, Bid/Ask Absorptions, Sweeps, POC/CVD, and Scalp/Intraday scores).
+- Tell them clearly in raw, practical Hinglish whether our live institutional orderflow supports what they are seeing on their chart or if it is a trap, citing exact numbers and price levels from the JSON."""
 
     try:
         g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
