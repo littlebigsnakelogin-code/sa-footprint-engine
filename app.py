@@ -4922,7 +4922,7 @@ def api_ai_mentor():
     engine_data = data.get("engine_data", {})
 
     live_news = fetch_live_crypto_news(symbol)
-    news_block = "\n".join(live_news)
+    news_block = "\n".join(live_news) if live_news else "No major breaking news in the last few minutes."
 
     q_low = (question or "").strip().lower()
     is_button_click = (not q_low) or (
@@ -4938,15 +4938,15 @@ STRICT RULE: DO NOT hallucinate any numbers. Base 100% of your analysis strictly
 Asset: {symbol} ({timeframe})
 Trader's Question / TradingView Observation: "{question}"
 
-LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT:
+LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT (MUST ANALYZE):
 {news_block}
 
 COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
 {json.dumps(engine_data, indent=2)}
 
-Analyze ALL parameters and reply in 5 short Hinglish points:
+Analyze ALL parameters (including Live News) and reply in 5 short Hinglish points:
 1. ⚖️ FINAL VERDICT & ALIGNMENT: State Scalp Bias ({engine_data.get('scalp_10factor_verdict', {}).get('final_bias')}) & Intraday Bias ({engine_data.get('intraday_10factor_verdict', {}).get('final_bias')}) with Quant Scores. Is the trader's view 🟢 100% ALIGNED, 🔴 TRAP, or ⏳ WAIT FOR TRIGGER?
-2. 📰 LIVE NEWS & SENTIMENT IMPACT: Any breaking news risk/tailwind, or pure technical orderflow?
+2. 📰 LIVE NEWS & SENTIMENT IMPACT: Explicitly analyze the headlines from LIVE BREAKING CRYPTO NEWS above—tell if there is any breaking news risk/tailwind affecting {symbol} or if orderflow is purely technical right now.
 3. ⚔️ DOM & ABSORPTION X-RAY: Exact numbers from 6-Candle Anchor Score, Buy/Sell Executions, 10s Pull Delta (PΔ), Millisecond Delta (msΔ), Resting Walls, Absorptions, and Sweeps.
 4. 🎯 EXACT SCALP PLAN: Entry Zone, Invalidation/SL level, and Target (using active UB-HIGH/LOW or nPOC magnets).
 5. 🌊 INTRADAY ROADMAP: Session CVD & Big Player campaign direction."""
@@ -4957,7 +4957,7 @@ STRICT RULE: DO NOT hallucinate any numbers. Base 100% of your answer strictly o
 Asset: {symbol} ({timeframe})
 TRADER'S CUSTOM MESSAGE / CHART OBSERVATION: "{question}"
 
-LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT:
+LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT (MUST CHECK & INCLUDE):
 {news_block}
 
 COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
@@ -4965,8 +4965,9 @@ COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
 
 IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
 - The trader manually typed: "{question}". DO NOT output the generic 5-point button template!
-- Directly answer their specific question or evaluate the chart setup they described by cross-checking it against our live engine data (DOM 10s Walls, 10sPΔ, msΔ impulse, Bid/Ask Absorptions, Sweeps, POC/CVD, and Scalp/Intraday scores).
-- Tell them clearly in raw, practical Hinglish whether our live institutional orderflow supports what they are seeing on their chart or if it is a trap, citing exact numbers and price levels from the JSON."""
+- Directly answer their specific question or evaluate the chart setup they described by cross-checking it against BOTH our live engine data (DOM 10s Walls, 10sPΔ, msΔ impulse, Bid/Ask Absorptions, Sweeps, POC/CVD, Scalp/Intraday scores) AND the LIVE BREAKING CRYPTO NEWS above.
+- MANDATORY NEWS CHECK: Always include a specific line in your reply telling the trader what the current Live News / Macro Sentiment says and whether any headline supports or threatens their setup.
+- Tell them clearly in raw, practical Hinglish whether our live institutional orderflow + news supports what they are seeing on their chart or if it is a trap, citing exact numbers and price levels."""
 
     try:
         g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
@@ -4996,23 +4997,27 @@ IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
         reply_text = None
         used_model = ""
         for model_path in available_models[:5]:
-            url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent"
-            resp = requests.post(
-                url,
-                headers=g_headers,
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.1}
-                },
-                timeout=14
-            )
-            rjson = resp.json()
-            if resp.status_code == 200 and "candidates" in rjson:
-                parts = rjson["candidates"][0].get("content", {}).get("parts", [])
-                if parts and "text" in parts[0]:
-                    used_model = model_path.replace("models/", "")
-                    reply_text = parts[0]["text"]
-                    break
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent"
+                resp = requests.post(
+                    url,
+                    headers=g_headers,
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"temperature": 0.1}
+                    },
+                    timeout=22
+                )
+                if resp.status_code == 200:
+                    rjson = resp.json()
+                    if "candidates" in rjson and rjson["candidates"]:
+                        parts = rjson["candidates"][0].get("content", {}).get("parts", [])
+                        if parts and "text" in parts[0]:
+                            used_model = model_path.replace("models/", "")
+                            reply_text = parts[0]["text"]
+                            break
+            except Exception:
+                continue
 
         if not reply_text:
             return jsonify({"status": "error", "message": "Gemini se response generate nahi ho paya."}), 500
