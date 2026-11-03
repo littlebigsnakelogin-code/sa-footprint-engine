@@ -4015,14 +4015,36 @@ function drawAll() {
             && (aged10sPullDelta > effCellBench * 0.15 || msLiveDomDelta < 0 || nearAskRest >= nearBidRest * 1.15)
         );
 
-        const recent20 = candles.slice(-20);
-        const r20Hi = Math.max(...recent20.map(x => x.high));
-        const r20Lo = Math.min(...recent20.map(x => x.low));
+        const recentMacro = candles.slice(-30);
+        const r20Hi = Math.max(...recentMacro.map(x => x.high));
+        const r20Lo = Math.min(...recentMacro.map(x => x.low));
         const r20Span = Math.max(r20Hi - r20Lo, rawStep);
         const rangeLocation = (lastC.close - r20Lo) / r20Span;
 
+        const supplyCapReject = (
+            rangeLocation >= 0.62 && !bullBreakoutDrive
+            && (rAskAbs > 0 || totIceAsk > effCellBench * 0.35 || totAged10sAskAbs > effCellBench * 0.35 || bearSweepReject)
+            && (lastC.close < lastC.open || closePos <= 0.45 || lastC.close < curPoc)
+            && (msLiveDomDelta < 0 || aged10sPullDelta > 0 || lastC.delta < 0)
+        );
+        const demandHoldBounce = (
+            rangeLocation <= 0.38 && !bearBreakdownDrive
+            && (rBidAbs > 0 || totIceBid > effCellBench * 0.35 || totAged10sBidAbs > effCellBench * 0.35 || bullSweepReject)
+            && (lastC.close > lastC.open || closePos >= 0.55 || lastC.close > curPoc)
+            && (msLiveDomDelta > 0 || aged10sPullDelta < 0 || lastC.delta > 0)
+        );
+
+        if (supplyCapReject && anchorBullScore > anchorBearScore) {
+            anchorBullScore = Math.round(anchorBullScore * 0.40);
+            anchorBearScore += 24;
+        } else if (demandHoldBounce && anchorBearScore > anchorBullScore) {
+            anchorBearScore = Math.round(anchorBearScore * 0.40);
+            anchorBullScore += 24;
+        }
+
         const isBullExhaustionTrap = (
             bearSweepReject
+            || supplyCapReject
             || (lastC.close > lastC.open && isBigExpansionCandle && rangeLocation >= 0.78 && !bullBreakoutDrive && (rAskAbs > 0 || totIceAsk > effCellBench * 0.4))
             || (lastC.close > lastC.open && anchorBearScore > anchorBullScore + 20 && lastC.close < (anchorResistPx || r20Hi))
             || (lastC.delta > effCellBench * 0.45 && closePos <= 0.46)
@@ -4030,6 +4052,7 @@ function drawAll() {
 
         const isBearExhaustionTrap = (
             bullSweepReject
+            || demandHoldBounce
             || (lastC.close < lastC.open && isBigExpansionCandle && rangeLocation <= 0.22 && !bearBreakdownDrive && (rBidAbs > 0 || totIceBid > effCellBench * 0.4))
             || (lastC.close < lastC.open && anchorBullScore > anchorBearScore + 20 && lastC.close > (anchorSupportPx || r20Lo))
             || (lastC.delta < -effCellBench * 0.45 && closePos >= 0.54)
@@ -4926,9 +4949,9 @@ def api_ai_mentor():
 
     q_low = (question or "").strip().lower()
     is_button_click = (not q_low) or (
-        "abi ka live orderflow, dom walls, aur news dekh kar" in q_low
-        or "mai yahan long (buy) setup dekh raha hu" in q_low
-        or "mai yahan short (sell) setup dekh raha hu" in q_low
+        "abhi live sa engine data ke hisab se" in q_low
+        or "main long trade dekh raha hu" in q_low
+        or "main short trade dekh raha hu" in q_low
     )
 
     if is_button_click:
