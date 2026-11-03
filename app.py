@@ -3153,23 +3153,40 @@ function drawAll() {
         mult = parseInt(tickMultMode, 10) || 1;
     }
 
-    const effStep = rawStep * mult;
     const lastC = candles[candles.length - 1];
-    const liveRestBench = getLiveRestingBenchmark(effStep, lastC.close);
 
-    let totalVisBuckets = 0, totalVisVol = 0;
-    vis.forEach(({ c }) => {
-        const gFp = groupFootprint(c.footprint, c.low, c.high, effStep, c.close, liveRestBench).filter(x => x.volume > 0);
-        totalVisBuckets += Math.max(gFp.length, 1);
-        totalVisVol += (c.volume || 0);
+    let calcMult = mult;
+    if (tickMultMode === 'auto') {
+        const ref4 = candles.slice(-4);
+        const refLo = Math.min(...ref4.map(x => x.low));
+        const refHi = Math.max(...ref4.map(x => x.high));
+        const refSpan = Math.max((refHi - refLo) * 1.26, rawStep * 10);
+        const rawRowsRef = refSpan / rawStep;
+        if (rawRowsRef > 24) {
+            const neededRef = rawRowsRef / 24;
+            const niceSteps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500];
+            calcMult = niceSteps.find(s => s >= neededRef) || Math.ceil(neededRef);
+        } else {
+            calcMult = 1;
+        }
+    }
+    const calcStep = rawStep * calcMult;
+    const effStep = rawStep * mult;
+    const liveRestBench = getLiveRestingBenchmark(calcStep, lastC.close);
+
+    let totalCalcBuckets = 0, totalCalcVol = 0;
+    candles.slice(-12).forEach(c => {
+        const gFp = groupFootprint(c.footprint, c.low, c.high, calcStep, c.close, liveRestBench).filter(x => x.volume > 0);
+        totalCalcBuckets += Math.max(gFp.length, 1);
+        totalCalcVol += (c.volume || 0);
     });
-    const tfAvgCellVol = Math.max(totalVisVol / Math.max(totalVisBuckets, 1), (avgFlowVol / 12.0) * 0.85);
+    const tfAvgCellVol = Math.max(totalCalcVol / Math.max(totalCalcBuckets, 1), (avgFlowVol / 12.0) * 0.85);
 
     const heavyLvlBenchmark = liveRestBench > 0
         ? Math.max(tfAvgCellVol * 1.50, Math.min(tfAvgCellVol * 2.2, liveRestBench * 1.25))
         : tfAvgCellVol * 1.65;
 
-    const macroInfo = updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPocs, heavyLvlBenchmark, liveRestBench);
+    const macroInfo = updateMacroMarketDecision(avgFlowVol, calcStep, baselineLotSize, nakedPocs, heavyLvlBenchmark, liveRestBench);
 
     const pToY = p => chartH - ((p - minP) / pSpan) * chartH;
     const yToP = y => minP + ((chartH - y) / chartH) * pSpan;
@@ -3677,7 +3694,7 @@ function drawAll() {
     // DUAL-CATEGORY DOM ENGINE + TIMEFRAME CANDLE-CLOSE WALL INVALIDATION
     // =========================================================================
     try {
-        const domStep = Math.max(effStep || rawStep || 1.0, 1e-6);
+        const domStep = Math.max(calcStep || rawStep || 1.0, 1e-6);
         const bidsArr = Array.isArray(obData.bids) ? obData.bids : [];
         const asksArr = Array.isArray(obData.asks) ? obData.asks : [];
         const rawDomArr = Array.isArray(obData.dom_raw) ? obData.dom_raw : [];
@@ -4932,6 +4949,8 @@ def fetch_live_crypto_news(symbol="BTCUSDT"):
     return headlines or ["No major breaking news in the last hour."]
 
 
+_gemini_models_cache = {"time": 0, "models": []}
+
 @app.route("/api/ai-mentor", methods=["POST"])
 def api_ai_mentor():
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip().strip('"').strip("'")
@@ -4965,7 +4984,7 @@ LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT (MUST ANALYZE):
 {news_block}
 
 COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
-{json.dumps(engine_data, indent=2)}
+{json.dumps(engine_data, separators=(",", ":"))}
 
 Analyze ALL parameters (including Live News) and reply in 5 short Hinglish points:
 1. ⚖️ FINAL VERDICT & ALIGNMENT: State Scalp Bias ({engine_data.get('scalp_10factor_verdict', {}).get('final_bias')}) & Intraday Bias ({engine_data.get('intraday_10factor_verdict', {}).get('final_bias')}) with Quant Scores. Is the trader's view 🟢 100% ALIGNED, 🔴 TRAP, or ⏳ WAIT FOR TRIGGER?
@@ -4984,7 +5003,7 @@ LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT (MUST CHECK & INCLUDE):
 {news_block}
 
 COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
-{json.dumps(engine_data, indent=2)}
+{json.dumps(engine_data, separators=(",", ":"))}
 
 IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
 - The trader manually typed: "{question}". DO NOT output the generic 5-point button template!
@@ -4994,32 +5013,42 @@ IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
 
     try:
         g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
-        list_url = "https://generativelanguage.googleapis.com/v1beta/models"
-        list_resp = requests.get(list_url, headers=g_headers, timeout=8)
-        if list_resp.status_code != 200:
-            return jsonify({"status": "error", "message": f"Gemini Model list error: {list_resp.text}"}), 400
+        now_t = time.time()
 
-        models_json = list_resp.json()
-        available_models = []
-        for m in models_json.get("models", []):
-            name = m.get("name", "")
-            methods = m.get("supportedGenerationMethods", [])
-            if "generateContent" in methods and "2.5" not in name and "omni" not in name.lower():
-                available_models.append(name)
+        if now_t - _gemini_models_cache["time"] < 600 and _gemini_models_cache["models"]:
+            available_models = _gemini_models_cache["models"]
+        else:
+            list_url = "https://generativelanguage.googleapis.com/v1beta/models"
+            list_resp = requests.get(list_url, headers=g_headers, timeout=5)
+            if list_resp.status_code == 200:
+                models_json = list_resp.json()
+                available_models = []
+                for m in models_json.get("models", []):
+                    name = m.get("name", "")
+                    methods = m.get("supportedGenerationMethods", [])
+                    if "generateContent" in methods and "2.5" not in name and "omni" not in name.lower() and "tts" not in name.lower() and "image" not in name.lower():
+                        available_models.append(name)
 
-        def orig_priority(x):
-            xl = x.lower()
-            if "gemini-flash-lite-latest" in xl or "flash-lite" in xl:
-                return 0
-            if "flash" in xl:
-                return 1
-            return 2
+                def orig_priority(x):
+                    xl = x.lower()
+                    if "gemini-2.0-flash" in xl and "lite" not in xl and "exp" not in xl:
+                        return 0
+                    if "gemini-flash-lite-latest" in xl or "flash-lite" in xl:
+                        return 1
+                    if "flash" in xl:
+                        return 2
+                    return 3
 
-        available_models.sort(key=orig_priority)
+                available_models.sort(key=orig_priority)
+                if available_models:
+                    _gemini_models_cache["time"] = now_t
+                    _gemini_models_cache["models"] = available_models
+            else:
+                available_models = ["models/gemini-2.0-flash", "models/gemini-flash-lite-latest", "models/gemini-1.5-flash"]
 
         reply_text = None
         used_model = ""
-        for model_path in available_models[:5]:
+        for model_path in available_models[:3]:
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent"
                 resp = requests.post(
@@ -5029,7 +5058,7 @@ IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
                         "contents": [{"parts": [{"text": prompt}]}],
                         "generationConfig": {"temperature": 0.1}
                     },
-                    timeout=22
+                    timeout=(3.5, 9.5)
                 )
                 if resp.status_code == 200:
                     rjson = resp.json()
@@ -5043,7 +5072,7 @@ IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
                 continue
 
         if not reply_text:
-            return jsonify({"status": "error", "message": "Gemini se response generate nahi ho paya."}), 500
+            return jsonify({"status": "error", "message": "Gemini server busy tha, ek baar phir ASK AI dabayein."}), 500
 
         news_header = "📰 === LIVE CRYPTO NEWS & SENTIMENT DESK ===\n" + "\n".join(f"• {h}" for h in live_news[:4])
         final_output = f"{news_header}\n\n" + "="*55 + f"\n\n🧠 === GEMINI MENTOR AI ({used_model} | T=0.1) ===\n{reply_text}"
