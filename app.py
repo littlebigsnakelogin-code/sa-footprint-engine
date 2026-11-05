@@ -2494,19 +2494,32 @@ function toggleDOM() {
     needsRender = true;
 }
 
+let dayLevels = { cdh: null, cdl: null, pdh: null, pdl: null };
+let oiState = { active: false, oi: 0, baseOi: 0, candleStartTs: 0, oiDelta: 0, oiPct: 0, updatedAt: 0 };
+
 function setSym(s) {
     symbol = s;
     rawStep = STEP_MAP[s] || 1.0;
+    candles = [];
+    peerCandles = [];
+    obData = { bids: [], asks: [], dom_raw: [] };
+    dayLevels = { cdh: null, cdl: null, pdh: null, pdl: null };
+    oiState = { active: false, oi: 0, baseOi: 0, candleStartTs: 0, oiDelta: 0, oiPct: 0, updatedAt: 0 };
+    fpGlobalCache.clear();
     resetCamera();
-    fetchData();
+    fetchClientOI();
+    fetchData(true);
     fetchSmtPeer();
 }
 function setTF(t, b) {
     tf = t;
     document.querySelectorAll('#tfBtns .btn').forEach(el => el.classList.remove('active'));
     b.classList.add('active');
+    candles = [];
+    peerCandles = [];
+    fpGlobalCache.clear();
     resetCamera();
-    fetchData();
+    fetchData(true);
     fetchSmtPeer();
 }
 function setTickMult(v) {
@@ -2668,20 +2681,64 @@ cv.addEventListener('touchmove', e => {
 
 cv.addEventListener('touchend', () => { dragMode = null; pinchDist = null; });
 
+// STEALTH CLIENT-SIDE BINANCE OPEN INTEREST FETCHER (Uses Local PC/Mobile IP — Zero Render Load!)
+async function fetchClientOI() {
+    if (document.hidden) return;
+    const reqSym = symbol;
+    try {
+        const res = await fetch(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${reqSym}`);
+        if (!res.ok) return;
+        const d = await res.json();
+        if (reqSym !== symbol || !d || d.openInterest === undefined) return;
+        const curOi = parseFloat(d.openInterest) || 0;
+        if (curOi <= 0) return;
+
+        const curCandleStart = candles.length > 0 ? candles[candles.length - 1].start : 0;
+        if (!oiState.active || oiState.baseOi <= 0) {
+            oiState.baseOi = curOi;
+            oiState.candleStartTs = curCandleStart;
+        } else if (curCandleStart > 0 && curCandleStart !== oiState.candleStartTs) {
+            // Smoothly anchor OI baseline to current candle transition
+            oiState.baseOi = (oiState.baseOi * 0.35) + (oiState.oi * 0.65);
+            oiState.candleStartTs = curCandleStart;
+        }
+        oiState.oi = curOi;
+        oiState.oiDelta = curOi - oiState.baseOi;
+        oiState.oiPct = oiState.baseOi > 0 ? ((oiState.oiDelta / oiState.baseOi) * 100) : 0;
+        oiState.active = true;
+        oiState.updatedAt = Date.now();
+        needsRender = true;
+    } catch (e) {
+        if (Date.now() - oiState.updatedAt > 30000) oiState.active = false;
+    }
+}
+setInterval(() => {
+    if (!document.hidden) fetchClientOI();
+}, 6400);
+setTimeout(fetchClientOI, 800);
+
 let fetching = false;
-async function fetchData() {
-    if (fetching) return;
+let fetchSeq = 0;
+async function fetchData(forceNow = false) {
+    if (fetching && !forceNow) return;
     fetching = true;
+    const mySeq = ++fetchSeq;
+    const reqSym = symbol;
+    const reqTf = tf;
+    const oiQuery = oiState.active ? `&c_oi=${oiState.oi.toFixed(2)}&c_oid=${oiState.oiDelta.toFixed(2)}` : '';
     try {
         const [cRes, obRes] = await Promise.all([
-            fetch(`/api/candles?symbol=${symbol}&timeframe=${tf}&limit=18`),
-            fetch(`/api/orderbook?symbol=${symbol}&limit=80`)
+            fetch(`/api/candles?symbol=${reqSym}&timeframe=${reqTf}&limit=30`),
+            fetch(`/api/orderbook?symbol=${reqSym}&limit=80${oiQuery}`)
         ]);
         const cData = await cRes.json();
         const oData = await obRes.json();
 
-        if (cData.status === 'ok' && cData.candles) {
+        if (mySeq !== fetchSeq || reqSym !== symbol || reqTf !== tf) return;
+
+        if (cData.status === 'ok' && cData.candles && cData.symbol === symbol) {
             candles = cData.candles;
+            if (cData.day_levels) dayLevels = cData.day_levels;
             if (candles.length > 0) {
                 const last = candles[candles.length - 1];
                 const pxEl = document.getElementById('pxBox');
@@ -2689,7 +2746,7 @@ async function fetchData() {
                 pxEl.style.color = last.close >= last.open ? '#00e676' : '#ff5252';
             }
         }
-        if (oData.status === 'ok') {
+        if (oData.status === 'ok' && oData.symbol === symbol) {
             obData = oData;
         }
         document.getElementById('connTxt').innerText = '● SYNC';
@@ -2699,7 +2756,7 @@ async function fetchData() {
         document.getElementById('connTxt').innerText = '● RETRY';
         document.getElementById('connTxt').style.color = '#ff9800';
     } finally {
-        fetching = false;
+        if (mySeq === fetchSeq) fetching = false;
     }
 }
 
@@ -2923,8 +2980,15 @@ function updateMacroMarketDecision(avgFlowVol, effStep, baselineLotSize, nakedPo
             macroBidPulled += bp;
             macroAskPulled += ap;
 
-            const isBidAbs = l.price <= lowerSwingTop && clusSell >= cHeavyCut * 1.3 && clusBPct >= 58 && c.close > l.price + effStep * 0.4;
-            const isAskAbs = l.price >= upperSwingBot && clusBuy >= cHeavyCut * 1.3 && clusAPct >= 58 && c.close < l.price - effStep * 0.4;
+            let macroBidValid = last.close >= l.price - effStep * 3.5;
+            let macroAskValid = last.close <= l.price + effStep * 3.5;
+            for (let m = idx + 1; m < sample.length - 1; m++) {
+                if (sample[m].close < l.price - effStep * 0.25) macroBidValid = false;
+                if (sample[m].close > l.price + effStep * 0.25) macroAskValid = false;
+            }
+            const isBidAbs = macroBidValid && l.price <= lowerSwingTop && clusSell >= cHeavyCut * 1.3 && clusBPct >= 58 && c.close > l.price + effStep * 0.4;
+            const isAskAbs = macroAskValid && l.price >= upperSwingBot && clusBuy >= cHeavyCut * 1.3 && clusAPct >= 58 && c.close < l.price - effStep * 0.4;
+            
 
             if (isBidAbs) macroBidAbsorbs++;
             if (isAskAbs) macroAskAbsorbs++;
@@ -4033,46 +4097,60 @@ function drawAll() {
         );
 
         const recentMacro = candles.slice(-30);
-        const r20Hi = Math.max(...recentMacro.map(x => x.high));
-        const r20Lo = Math.min(...recentMacro.map(x => x.low));
-        const r20Span = Math.max(r20Hi - r20Lo, rawStep);
-        const rangeLocation = (lastC.close - r20Lo) / r20Span;
+        const r30Hi = Math.max(...recentMacro.map(x => x.high));
+        const r30Lo = Math.min(...recentMacro.map(x => x.low));
+        const r20Hi = r30Hi;
+        const r20Lo = r30Lo;
+        const r20Span = Math.max(r30Hi - r30Lo, rawStep);
+        const rangeLocation = (lastC.close - r30Lo) / r20Span;
 
-        const supplyCapReject = (
-            rangeLocation >= 0.62 && !bullBreakoutDrive
-            && (rAskAbs > 0 || totIceAsk > effCellBench * 0.35 || totAged10sAskAbs > effCellBench * 0.35 || bearSweepReject)
-            && (lastC.close < lastC.open || closePos <= 0.45 || lastC.close < curPoc)
-            && (msLiveDomDelta < 0 || aged10sPullDelta > 0 || lastC.delta < 0)
-        );
-        const demandHoldBounce = (
-            rangeLocation <= 0.38 && !bearBreakdownDrive
-            && (rBidAbs > 0 || totIceBid > effCellBench * 0.35 || totAged10sBidAbs > effCellBench * 0.35 || bullSweepReject)
-            && (lastC.close > lastC.open || closePos >= 0.55 || lastC.close > curPoc)
-            && (msLiveDomDelta > 0 || aged10sPullDelta < 0 || lastC.delta > 0)
-        );
+        // 3-LAYER INSTITUTIONAL LIQUIDITY MEMORY (Day High/Low + PDH/PDL + 30c Major Swing + 6c Micro Swing)
+        let prevMajorHigh = -Infinity, prevMajorLow = Infinity;
+        for (let k = Math.max(0, candles.length - 30); k < candles.length - 1; k++) {
+            if (candles[k].high > prevMajorHigh) prevMajorHigh = candles[k].high;
+            if (candles[k].low < prevMajorLow) prevMajorLow = candles[k].low;
+        }
+        const cdh = dayLevels.cdh || r30Hi;
+        const cdl = dayLevels.cdl || r30Lo;
+        const pdh = dayLevels.pdh || null;
+        const pdl = dayLevels.pdl || null;
 
-        if (supplyCapReject && anchorBullScore > anchorBearScore) {
-            anchorBullScore = Math.round(anchorBullScore * 0.40);
-            anchorBearScore += 24;
-        } else if (demandHoldBounce && anchorBearScore > anchorBullScore) {
-            anchorBearScore = Math.round(anchorBearScore * 0.40);
-            anchorBullScore += 24;
+        // Detect which High/Low Liquidity Pool is currently under attack
+        const nearDayHigh = (Math.abs(lastC.high - cdh) <= domStep * 3.5) || (pdh && Math.abs(lastC.high - pdh) <= domStep * 4.0);
+        const nearDayLow = (Math.abs(lastC.low - cdl) <= domStep * 3.5) || (pdl && Math.abs(lastC.low - pdl) <= domStep * 4.0);
+        const sweptMajorHigh = candles.length > 3 && lastC.high >= prevMajorHigh - domStep * 0.5;
+        const sweptMajorLow = candles.length > 3 && lastC.low <= prevMajorLow + domStep * 0.5;
+
+        let activeHighPoolLbl = sweptMajorHigh ? `MAJOR-HI(${prevMajorHigh.toFixed(dec)})` : `6C-HI(${prevSwingHigh.toFixed(dec)})`;
+        if (pdh && Math.abs(lastC.high - pdh) <= domStep * 4.0) activeHighPoolLbl = `PDH(${pdh.toFixed(dec)})`;
+        else if (Math.abs(lastC.high - cdh) <= domStep * 3.5) activeHighPoolLbl = `DAY-HI(${cdh.toFixed(dec)})`;
+
+        let activeLowPoolLbl = sweptMajorLow ? `MAJOR-LO(${prevMajorLow.toFixed(dec)})` : `6C-LO(${prevSwingLow.toFixed(dec)})`;
+        if (pdl && Math.abs(lastC.low - pdl) <= domStep * 4.0) activeLowPoolLbl = `PDL(${pdl.toFixed(dec)})`;
+        else if (Math.abs(lastC.low - cdl) <= domStep * 3.5) activeLowPoolLbl = `DAY-LO(${cdl.toFixed(dec)})`;
+
+        // Update Top Benchmark Bar with Live OI if browser OI is active
+        const oiActive = oiState.active && (Date.now() - oiState.updatedAt < 30000);
+        const oiDeltaVal = oiActive ? oiState.oiDelta : 0;
+        if (oiActive) {
+            const curEl = document.getElementById('bmCur');
+            if (curEl) {
+                curEl.innerText = `Cur:${fmt(lastC.volume)}(${curRvol.toFixed(1)}x) | OIΔ:${oiDeltaVal >= 0 ? '+' : ''}${fmt(oiDeltaVal)}`;
+            }
         }
 
         const isBullExhaustionTrap = (
             bearSweepReject
-            || supplyCapReject
-            || (lastC.close > lastC.open && isBigExpansionCandle && rangeLocation >= 0.78 && !bullBreakoutDrive && (rAskAbs > 0 || totIceAsk > effCellBench * 0.4))
-            || (lastC.close > lastC.open && anchorBearScore > anchorBullScore + 20 && lastC.close < (anchorResistPx || r20Hi))
-            || (lastC.delta > effCellBench * 0.45 && closePos <= 0.46)
+            || (lastC.close > lastC.open && isBigExpansionCandle && rangeLocation >= 0.78 && !bullBreakoutDrive && (rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.3))
+            || (lastC.close > lastC.open && anchorBearScore > anchorBullScore + 20 && lastC.close < (anchorResistPx || r30Hi))
+            || (lastC.delta > effCellBench * 0.45 && closePos <= 0.44 && rAskAbs > rBidAbs)
         );
 
         const isBearExhaustionTrap = (
             bullSweepReject
-            || demandHoldBounce
-            || (lastC.close < lastC.open && isBigExpansionCandle && rangeLocation <= 0.22 && !bearBreakdownDrive && (rBidAbs > 0 || totIceBid > effCellBench * 0.4))
-            || (lastC.close < lastC.open && anchorBullScore > anchorBearScore + 20 && lastC.close > (anchorSupportPx || r20Lo))
-            || (lastC.delta < -effCellBench * 0.45 && closePos >= 0.54)
+            || (lastC.close < lastC.open && isBigExpansionCandle && rangeLocation <= 0.22 && !bearBreakdownDrive && (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.3))
+            || (lastC.close < lastC.open && anchorBullScore > anchorBearScore + 20 && lastC.close > (anchorSupportPx || r30Lo))
+            || (lastC.delta < -effCellBench * 0.45 && closePos >= 0.56 && rBidAbs > rAskAbs)
         );
 
         const instBullDrive = (
@@ -4080,8 +4158,8 @@ function drawAll() {
                 !isBullExhaustionTrap
                 && anchorBullScore >= anchorBearScore
                 && (dispBullLevels > dispBearLevels || aged10sPullDelta < -effCellBench * 0.20 || msLiveDomDelta > effCellBench * 0.40)
-                && lastC.close > curPoc && prevClosedC.close >= prevPoc
-                && closePos >= 0.60 && rangeLocation <= 0.82
+                && lastC.close >= curPoc && prevClosedC.close >= prevPoc
+                && closePos >= 0.58
             )
         );
 
@@ -4090,41 +4168,197 @@ function drawAll() {
                 !isBearExhaustionTrap
                 && anchorBearScore >= anchorBullScore
                 && (dispBearLevels > dispBullLevels || aged10sPullDelta > effCellBench * 0.20 || msLiveDomDelta < -effCellBench * 0.40)
-                && lastC.close < curPoc && prevClosedC.close <= prevPoc
-                && closePos <= 0.40 && rangeLocation >= 0.18
+                && lastC.close <= curPoc && prevClosedC.close <= prevPoc
+                && closePos <= 0.42
             )
         );
 
-        const clusterLongBuildup = (anchorBullScore >= anchorBearScore + 15) && !instBearDrive;
-        const clusterShortBuildup = (anchorBearScore >= anchorBullScore + 15) && !instBullDrive;
+        const clusterLongBuildup = (anchorBullScore >= anchorBearScore + 12) && !instBearDrive;
+        const clusterShortBuildup = (anchorBearScore >= anchorBullScore + 12) && !instBullDrive;
 
-        let battleWinner = `⚖️ [${tf.toUpperCase()}] CHOP / INDUCEMENT ZONE — WAIT FOR LIQUIDITY SWEEP`;
+        // =========================================================================
+        // DYNAMIC CONTEXT-DRIVEN SCORING ENGINE (LOCATION + SYNERGY MULTIPLIERS!)
+        // =========================================================================
+        const atKeyHighZone = (rangeLocation >= 0.70 || lastC.high >= prevSwingHigh || sweptMajorHigh || nearDayHigh);
+        const atKeyLowZone = (rangeLocation <= 0.30 || lastC.low <= prevSwingLow || sweptMajorLow || nearDayLow);
+
+        const hasAskDefense = (rAskAbs > 0 || totIceAsk > effCellBench * 0.35 || totAged10sAskAbs > effCellBench * 0.35);
+        const hasBidDefense = (rBidAbs > 0 || totIceBid > effCellBench * 0.35 || totAged10sBidAbs > effCellBench * 0.35);
+
+        let wall10sState = 'NEU';
+        if (aged10sPullDelta < -effCellBench * 0.18 || aged10sAbsDelta > effCellBench * 0.32) wall10sState = 'BULL';
+        else if (aged10sPullDelta > effCellBench * 0.18 || aged10sAbsDelta < -effCellBench * 0.32) wall10sState = 'BEAR';
+
+        const minBookFloor = effCellBench * 1.25;
+        let liveDomFlowState = msSrvState;
+        if (liveDomFlowState === 'BULL' || (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25 && msLiveDomDelta >= 0)) {
+            liveDomFlowState = 'BULL';
+        } else if (liveDomFlowState === 'BEAR' || (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25 && msLiveDomDelta <= 0)) {
+            liveDomFlowState = 'BEAR';
+        }
+
+        // 4 GOLDEN INSTITUTIONAL COMBOS AT KEY HIGH / LOW POOLS:
+        // 1. High Sweep + Ask Absorption + 10s Bid Support Pulled / Negative msΔ -> FAKE BREAKOUT / SHORT REVERSAL!
+        const comboHighFakeSweepShort = atKeyHighZone && !bullBreakoutDrive && (
+            bearSweepReject || (
+                hasAskDefense
+                && (aged10sPullDelta > effCellBench * 0.15 || msLiveDomDelta < -effCellBench * 0.20 || liveDomFlowState === 'BEAR')
+                && (lastC.close < lastC.open || closePos <= 0.48 || lastC.close < curPoc)
+            )
+        );
+
+        // 2. Low Sweep + Bid Absorption + 10s Ask Resistance Pulled / Positive msΔ -> FAKE BREAKDOWN / LONG REVERSAL!
+        const comboLowFakeSweepLong = atKeyLowZone && !bearBreakdownDrive && (
+            bullSweepReject || (
+                hasBidDefense
+                && (aged10sPullDelta < -effCellBench * 0.15 || msLiveDomDelta > effCellBench * 0.20 || liveDomFlowState === 'BULL')
+                && (lastC.close > lastC.open || closePos >= 0.52 || lastC.close > curPoc)
+            )
+        );
+
+        // 3. Key High Breakout + ZERO Ask-Cap + 10s Ask Wall Pulled (Vacuum) + Displacement + msΔ -> REAL BREAKOUT LONG!
+        const comboHighRealBreakoutLong = (
+            bullBreakoutDrive || (
+                atKeyHighZone && rAskAbs === 0 && lastC.close > prevSwingHigh
+                && closePos >= 0.60 && (dispBullLevels > 0 || aged10sPullDelta < -effCellBench * 0.18)
+                && (msLiveDomDelta >= 0 || liveDomFlowState === 'BULL')
+            )
+        );
+
+        // 4. Key Low Breakdown + ZERO Bid-Hold + 10s Bid Wall Pulled (Vacuum) + Displacement + msΔ -> REAL BREAKDOWN SHORT!
+        const comboLowRealBreakdownShort = (
+            bearBreakdownDrive || (
+                atKeyLowZone && rBidAbs === 0 && lastC.close < prevSwingLow
+                && closePos <= 0.40 && (dispBearLevels > 0 || aged10sPullDelta > effCellBench * 0.18)
+                && (msLiveDomDelta <= 0 || liveDomFlowState === 'BEAR')
+            )
+        );
+
+        // Determine Active Market Context Regime & Dynamic Weight Multipliers
+        let activeRegime = 'MID_RANGE_AUCTION';
+        let wWall = 1.0, wAnchor = 1.0, wPull10s = 1.0, wMsDom = 1.0, wDisp = 1.0;
+
+        if (comboHighFakeSweepShort || comboLowFakeSweepLong) {
+            activeRegime = comboHighFakeSweepShort ? `KEY_HIGH_FAKE_SWEEP_REVERSAL (${activeHighPoolLbl})` : `KEY_LOW_FAKE_SWEEP_REVERSAL (${activeLowPoolLbl})`;
+            // At Liquidity Sweep Reversal: Absorption + 10s Pulling + msΔ get 2.2x weight; lagging 6c anchor gets 0.45x!
+            wWall = 2.1; wPull10s = 2.4; wMsDom = 1.8; wDisp = 1.4; wAnchor = 0.45;
+        } else if (comboHighRealBreakoutLong || comboLowRealBreakdownShort) {
+            activeRegime = comboHighRealBreakoutLong ? `KEY_HIGH_REAL_VACUUM_BREAKOUT (${activeHighPoolLbl})` : `KEY_LOW_REAL_VACUUM_BREAKDOWN (${activeLowPoolLbl})`;
+            // At Real Breakout: 10s Vacuum Pull + Displacement + msΔ get 2.3x weight!
+            wPull10s = 2.3; wDisp = 2.2; wMsDom = 1.8; wWall = 1.5; wAnchor = 1.0;
+        } else if (atKeyHighZone || atKeyLowZone) {
+            activeRegime = atKeyHighZone ? `TESTING_KEY_HIGH_ZONE (${activeHighPoolLbl})` : `TESTING_KEY_LOW_ZONE (${activeLowPoolLbl})`;
+            wWall = 1.7; wPull10s = 1.8; wMsDom = 1.4; wAnchor = 0.65;
+        } else if (Math.abs(anchorBullScore - anchorBearScore) >= 18 && (sPocUp !== sPocDn)) {
+            activeRegime = anchorBullScore > anchorBearScore ? 'BULL_TREND_PULLBACK_DEFENSE' : 'BEAR_TREND_PULLBACK_DEFENSE';
+            // In Trend Pullback: Surviving Walls + 6c Anchor + POC Migration get 1.6x weight; single pullback ticks get 0.6x!
+            wWall = 1.65; wAnchor = 1.55; wPull10s = 1.1; wMsDom = 0.65;
+        }
+
+        // Compute Dynamically Weighted Component Scores:
+        let dynWallPts = 0;
+        if (rBidAbs > rAskAbs) dynWallPts += Math.min(20, 10 + (rBidAbs - rAskAbs) * 4);
+        else if (rAskAbs > rBidAbs) dynWallPts -= Math.min(20, 10 + (rAskAbs - rBidAbs) * 4);
+        if (totIceBid > totIceAsk * 1.25 || aged10sAbsDelta > effCellBench * 0.35) dynWallPts += 10;
+        else if (totIceAsk > totIceBid * 1.25 || aged10sAbsDelta < -effCellBench * 0.35) dynWallPts -= 10;
+        dynWallPts = Math.round(dynWallPts * wWall);
+
+        let locState = 'NEU';
+        let pocStructPts = 0;
+        if (lastC.close >= curPoc && prevClosedC.close >= prevPoc && !comboHighFakeSweepShort) {
+            pocStructPts += 10; locState = 'BULL';
+        } else if (lastC.close <= curPoc && prevClosedC.close <= prevPoc && !comboLowFakeSweepLong) {
+            pocStructPts -= 10; locState = 'BEAR';
+        }
+        if (sPocUp > sPocDn && !comboHighFakeSweepShort) pocStructPts += 6;
+        else if (sPocDn > sPocUp && !comboLowFakeSweepLong) pocStructPts -= 6;
+
+        const rawAnchorDiff = Math.max(-20, Math.min(20, Math.round((anchorBullScore - anchorBearScore) * 0.45)));
+        let dynAnchorPts = Math.round((rawAnchorDiff + pocStructPts) * wAnchor);
+
+        // If Key High/Low Reversal Combo fires, flip stale anchor drag into reversal synergy!
+        if (comboHighFakeSweepShort) dynAnchorPts = Math.min(-18, -Math.abs(dynAnchorPts));
+        else if (comboLowFakeSweepLong) dynAnchorPts = Math.max(18, Math.abs(dynAnchorPts));
+
+        let dynPull10sPts = 0;
+        if (wall10sState === 'BULL') dynPull10sPts = Math.round(14 * wPull10s);
+        else if (wall10sState === 'BEAR') dynPull10sPts = -Math.round(14 * wPull10s);
+
+        let dispVsTrapState = 'NEU';
+        let deltaState = 'NEU';
+        let baseTrigPts = 0;
+        if (comboLowFakeSweepLong || comboHighRealBreakoutLong) baseTrigPts += 18;
+        else if (comboHighFakeSweepShort || comboLowRealBreakdownShort) baseTrigPts -= 18;
+
+        if (dispBullLevels > dispBearLevels && !comboHighFakeSweepShort) { baseTrigPts += 10; dispVsTrapState = 'BULL'; }
+        else if (dispBearLevels > dispBullLevels && !comboLowFakeSweepLong) { baseTrigPts -= 10; dispVsTrapState = 'BEAR'; }
+
+        if (isBearExhaustionTrap || comboLowFakeSweepLong) { baseTrigPts += 10; deltaState = 'BULL'; }
+        else if (isBullExhaustionTrap || comboHighFakeSweepShort) { baseTrigPts -= 10; deltaState = 'BEAR'; }
+        else if (instBullDrive) { baseTrigPts += 6; deltaState = 'BULL'; }
+        else if (instBearDrive) { baseTrigPts -= 6; deltaState = 'BEAR'; }
+        let dynTrigPts = Math.round(baseTrigPts * wDisp);
+
+        let baseLiveDomPts = 0;
+        if (liveDomFlowState === 'BULL') baseLiveDomPts += 10;
+        else if (liveDomFlowState === 'BEAR') baseLiveDomPts -= 10;
+        if (smtState.bias === 1) baseLiveDomPts += 4;
+        else if (smtState.bias === -1) baseLiveDomPts -= 4;
+        let dynLiveDomPts = Math.round(baseLiveDomPts * wMsDom);
+
+        // LIVE OPEN INTEREST (OIΔ) SYNERGY BOOSTER (Only active when PC/Mobile fetches OI; 0 when standby!)
+        let oiPts = 0;
+        let oiVerdictTxt = 'OI:STANDBY';
+        let oiStateBadge = 'NEU';
+        if (oiActive) {
+            const sigOiCut = Math.max(oiState.oi * 0.00015, 0.5);
+            if (oiDeltaVal >= sigOiCut) {
+                if (comboHighFakeSweepShort || (atKeyHighZone && hasAskDefense && lastC.close <= lastC.open)) {
+                    oiPts = -14; oiStateBadge = 'BEAR'; oiVerdictTxt = `OIΔ+${fmt(oiDeltaVal)}(TrappedLongs/NewShorts🔴)`;
+                } else if (comboLowFakeSweepLong || (atKeyLowZone && hasBidDefense && lastC.close >= lastC.open)) {
+                    oiPts = 14; oiStateBadge = 'BULL'; oiVerdictTxt = `OIΔ+${fmt(oiDeltaVal)}(TrappedShorts/LimitBids🟢)`;
+                } else if (lastC.close > lastC.open) {
+                    oiPts = 10; oiStateBadge = 'BULL'; oiVerdictTxt = `OIΔ+${fmt(oiDeltaVal)}(FreshLongBuildup🟢)`;
+                } else {
+                    oiPts = -10; oiStateBadge = 'BEAR'; oiVerdictTxt = `OIΔ+${fmt(oiDeltaVal)}(FreshShortBuildup🔴)`;
+                }
+            } else if (oiDeltaVal <= -sigOiCut) {
+                if (lastC.close > lastC.open && atKeyHighZone && !comboHighRealBreakoutLong) {
+                    oiPts = -8; oiStateBadge = 'BEAR'; oiVerdictTxt = `OIΔ${fmt(oiDeltaVal)}(ShortCoverExhaustion⚠️)`;
+                } else if (lastC.close < lastC.open && atKeyLowZone && !comboLowRealBreakdownShort) {
+                    oiPts = 8; oiStateBadge = 'BULL'; oiVerdictTxt = `OIΔ${fmt(oiDeltaVal)}(LongLiqExhaustion⚠️)`;
+                } else {
+                    oiVerdictTxt = `OIΔ${fmt(oiDeltaVal)}(PositionUnwind⚪)`;
+                }
+            } else {
+                oiVerdictTxt = `OI:${fmt(oiState.oi)}(Flat⚪)`;
+            }
+        }
+
+        let scalpPts = Math.max(-99, Math.min(99, dynWallPts + dynAnchorPts + dynPull10sPts + dynTrigPts + dynLiveDomPts + oiPts));
+
+        // Battle Winner Banner (Synced with Key Levels + 10s Walls + msΔ)
+        let battleWinner = `⚖️ [${tf.toUpperCase()}] MID-RANGE AUCTION — ${activeHighPoolLbl} vs ${activeLowPoolLbl}`;
         let bwCol = '#ffd700';
 
-        if (bullSweepReject) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] OLD LOW (${prevSwingLow.toFixed(dec)}) SWEPT + 🧊10s WALL HELD ➔ REVERSAL LONG!`;
+        if (comboLowFakeSweepLong) {
+            battleWinner = `🎯 [${tf.toUpperCase()}] ${activeLowPoolLbl} SWEPT + 🧊BID HELD + 🎭10s/msΔ FLIP ➔ REVERSAL LONG!`;
             bwCol = '#00e5ff';
-        } else if (bearSweepReject) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] OLD HIGH (${prevSwingHigh.toFixed(dec)}) SWEPT + 🧊10s WALL CAPPED ➔ REVERSAL SHORT!`;
+        } else if (comboHighFakeSweepShort) {
+            battleWinner = `🎯 [${tf.toUpperCase()}] ${activeHighPoolLbl} SWEPT + 🧊ASK CAPPED + 🎭10s/msΔ FLIP ➔ REVERSAL SHORT!`;
             bwCol = '#ff9100';
-        } else if (bullBreakoutDrive) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] OLD HIGH (${prevSwingHigh.toFixed(dec)}) REAL DISPLACEMENT BREAKOUT (⚡Book Eaten)!`;
+        } else if (comboHighRealBreakoutLong) {
+            battleWinner = `🚀 [${tf.toUpperCase()}] ${activeHighPoolLbl} REAL VACUUM BREAKOUT (⚡Disp + 🎭AskPulled)!`;
             bwCol = '#00e676';
-        } else if (bearBreakdownDrive) {
-            battleWinner = `💥 [${tf.toUpperCase()}] OLD LOW (${prevSwingLow.toFixed(dec)}) REAL DISPLACEMENT BREAKDOWN (⚡Book Eaten)!`;
+        } else if (comboLowRealBreakdownShort) {
+            battleWinner = `💥 [${tf.toUpperCase()}] ${activeLowPoolLbl} REAL VACUUM BREAKDOWN (⚡Disp + 🎭BidPulled)!`;
             bwCol = '#ff1744';
-        } else if (aged10sPullDelta < -effCellBench * 0.20 && lastC.close > lastC.open) {
-            battleWinner = `🎭 [${tf.toUpperCase()}] >=10s FAKE ASK WALL PULLED (10sPΔ:${fmt(aged10sPullDelta)}) ➔ BULL BREAK!`;
+        } else if (aged10sPullDelta < -effCellBench * 0.20 && lastC.close > lastC.open && rAskAbs === 0) {
+            battleWinner = `🎭 [${tf.toUpperCase()}] >=10s FAKE ASK WALL PULLED (10sPΔ:${fmt(aged10sPullDelta)}) ➔ BULL VACUUM!`;
             bwCol = '#e040fb';
-        } else if (aged10sPullDelta > effCellBench * 0.20 && lastC.close < lastC.open) {
-            battleWinner = `🎭 [${tf.toUpperCase()}] >=10s FAKE BID WALL PULLED (10sPΔ:+${fmt(aged10sPullDelta)}) ➔ BEAR DUMP!`;
+        } else if (aged10sPullDelta > effCellBench * 0.20 && lastC.close < lastC.open && rBidAbs === 0) {
+            battleWinner = `🎭 [${tf.toUpperCase()}] >=10s FAKE BID WALL PULLED (10sPΔ:+${fmt(aged10sPullDelta)}) ➔ BEAR VACUUM!`;
             bwCol = '#ff4081';
-        } else if (lastC.close < lastC.open && isBearExhaustionTrap && clusterLongBuildup) {
-            battleWinner = `🛡️ [${tf.toUpperCase()}] SELLERS ABSORBED AT BID WALL (10sAbs:${fmt(totAged10sBidAbs)}) ➔ LONG HOLD!`;
-            bwCol = '#00e5ff';
-        } else if (lastC.close > lastC.open && isBullExhaustionTrap && clusterShortBuildup) {
-            battleWinner = `🛡️ [${tf.toUpperCase()}] BUYERS CAPPED AT ASK WALL (10sAbs:${fmt(totAged10sAskAbs)}) ➔ SHORT HOLD!`;
-            bwCol = '#ff9100';
         } else if (instBullDrive) {
             battleWinner = `🚀 [${tf.toUpperCase()}] TRUE BULL DISPLACEMENT (SweepLvls:${dispBullLevels} | 10sAskPull:${fmt(totAged10sAp)})`;
             bwCol = '#00e676';
@@ -4139,120 +4373,110 @@ function drawAll() {
             bwCol = '#ff9100';
         }
 
-        let scalpPts = anchorBullScore - anchorBearScore;
+        // Intraday Campaign Score (Aligned with Purged Macro Walls + Key Level Combos)
+        let intraPts = macroInfo ? macroInfo.netMacro : 0;
+        if (sPocUp > sPocDn) intraPts += 14;
+        else if (sPocDn > sPocUp) intraPts -= 14;
+        if (dynWallPts >= 14) intraPts += 16;
+        else if (dynWallPts <= -14) intraPts -= 16;
+        if (smtState.bias === 1) intraPts += 10;
+        else if (smtState.bias === -1) intraPts -= 10;
+        intraPts += Math.round(oiPts * 0.5);
 
-        if (bullSweepReject || bullBreakoutDrive) scalpPts += 22;
-        if (bearSweepReject || bearBreakdownDrive) scalpPts -= 22;
-
-        // CATEGORY 2 SCORE: >=10s INSTITUTIONAL WALL REACTION (Pulled Fake Wall vs Absorbed Real Wall)
-        let wall10sState = 'NEU';
-        if (aged10sPullDelta < -effCellBench * 0.20 || aged10sAbsDelta > effCellBench * 0.35) {
-            scalpPts += 22;
-            wall10sState = 'BULL';
-        } else if (aged10sPullDelta > effCellBench * 0.20 || aged10sAbsDelta < -effCellBench * 0.35) {
-            scalpPts -= 22;
-            wall10sState = 'BEAR';
+        if (intraPts < 0 && dynWallPts > 0 && dynAnchorPts > 0 && lastC.close >= curPoc && !comboHighFakeSweepShort) {
+            intraPts = Math.max(24, Math.round((dynWallPts + dynAnchorPts) * 0.8));
+        } else if (intraPts > 0 && dynWallPts < 0 && dynAnchorPts < 0 && lastC.close <= curPoc && !comboLowFakeSweepLong) {
+            intraPts = Math.min(-24, Math.round((dynWallPts + dynAnchorPts) * 0.8));
         }
 
-        // CATEGORY 1 SCORE: RENDER-VERIFIED 100ms IMPULSE & RESTING DEPTH
-        const minBookFloor = effCellBench * 1.3;
-        let liveDomFlowState = msSrvState;
-        if (liveDomFlowState === 'BULL' || (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25 && msLiveDomDelta >= 0)) {
-            scalpPts += 16;
-            liveDomFlowState = 'BULL';
-        } else if (liveDomFlowState === 'BEAR' || (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25 && msLiveDomDelta <= 0)) {
-            scalpPts -= 16;
-            liveDomFlowState = 'BEAR';
-        }
-
-        let deltaState = 'NEU';
-        if (isBearExhaustionTrap) { scalpPts += 20; deltaState = 'BULL'; }
-        else if (isBullExhaustionTrap) { scalpPts -= 20; deltaState = 'BEAR'; }
-        else if (instBullDrive) { scalpPts += 14; deltaState = 'BULL'; }
-        else if (instBearDrive) { scalpPts -= 14; deltaState = 'BEAR'; }
-
-        let dispVsTrapState = 'NEU';
-        if (dispBullLevels > dispBearLevels && !isBullExhaustionTrap) { scalpPts += 16; dispVsTrapState = 'BULL'; }
-        else if (dispBearLevels > dispBullLevels && !isBearExhaustionTrap) { scalpPts -= 16; dispVsTrapState = 'BEAR'; }
-
-        let locState = 'NEU';
-        if (lastC.close >= curPoc && prevClosedC.close >= prevPoc && !isBullExhaustionTrap) { scalpPts += 12; locState = 'BULL'; }
-        else if (lastC.close <= curPoc && prevClosedC.close <= prevPoc && !isBearExhaustionTrap) { scalpPts -= 12; locState = 'BEAR'; }
-
-        if (smtState.bias === 1) scalpPts += 10;
-        else if (smtState.bias === -1) scalpPts -= 10;
+        // Smart Location Handling (Never blocks a valid Trend Continuation or Real Breakout!)
+        const bullContinuationValid = (scalpPts >= 32 && rAskAbs === 0 && lastC.close >= curPoc && !comboHighFakeSweepShort);
+        const bearContinuationValid = (scalpPts <= -32 && rBidAbs === 0 && lastC.close <= curPoc && !comboLowFakeSweepLong);
 
         let chasingWarning = null;
-        if (scalpPts > 0 && rangeLocation >= 0.78 && !bullSweepReject && !bullBreakoutDrive) {
-            scalpPts = Math.min(scalpPts, 18);
-            chasingWarning = '⚠️ AT RANGE HIGH (WAIT PULLBACK)';
-        } else if (scalpPts < 0 && rangeLocation <= 0.22 && !bearSweepReject && !bearBreakdownDrive) {
-            scalpPts = Math.max(scalpPts, -18);
-            chasingWarning = '⚠️ AT RANGE LOW (WAIT BOUNCE)';
+        if (scalpPts > 0 && rangeLocation >= 0.84 && !comboLowFakeSweepLong && !comboHighRealBreakoutLong && !bullContinuationValid) {
+            scalpPts = Math.min(scalpPts, 22);
+            chasingWarning = `⚠️ AT ${activeHighPoolLbl} RESISTANCE (+${scalpPts} | WAIT POC ${curPoc.toFixed(dec)} DIP)`;
+        } else if (scalpPts < 0 && rangeLocation <= 0.16 && !comboHighFakeSweepShort && !comboLowRealBreakdownShort && !bearContinuationValid) {
+            scalpPts = Math.max(scalpPts, -22);
+            chasingWarning = `⚠️ AT ${activeLowPoolLbl} SUPPORT (${scalpPts} | WAIT POC ${curPoc.toFixed(dec)} BOUNCE)`;
         }
 
         const scalpScoreVal = Math.abs(scalpPts);
-        let scalpFinalTxt = `⏳ WAIT / NO CLEAR EDGE`;
+        let scalpFinalTxt = `⏳ MID-RANGE EQUILIBRIUM (${scalpPts >= 0 ? '+' : ''}${scalpPts})`;
         let scalpFinalCol = '#ffca28';
 
         if (chasingWarning) {
             scalpFinalTxt = chasingWarning;
             scalpFinalCol = '#ffab00';
-        } else if (scalpPts >= 46 && (bullSweepReject || bullBreakoutDrive || instBullDrive || wall10sState === 'BULL' || (clusterLongBuildup && lastC.close >= curPoc))) {
-            scalpFinalTxt = bullSweepReject
-                ? `🎯 LOW SWEEP LONG (+${scalpScoreVal})`
-                : (bullBreakoutDrive ? `🚀 BREAKOUT LONG (+${scalpScoreVal})` : `🟢 CONFIRMED LONG (+${scalpScoreVal})`);
+        } else if (comboLowFakeSweepLong && scalpPts >= 28) {
+            scalpFinalTxt = `🎯 ${activeLowPoolLbl} SWEEP REVERSAL LONG (+${scalpScoreVal})`;
             scalpFinalCol = '#00e676';
-        } else if (scalpPts >= 22) {
-            scalpFinalTxt = lastC.close < lastC.open
-                ? `🛡️ BID WALL HOLDING (LIVE ${tf.toUpperCase()} WICK)`
-                : `🟡 LONG BUILDING (WAIT TRIGGER)`;
-            scalpFinalCol = '#00e5ff';
-        } else if (scalpPts <= -46 && (bearSweepReject || bearBreakdownDrive || instBearDrive || wall10sState === 'BEAR' || (clusterShortBuildup && lastC.close <= curPoc))) {
-            scalpFinalTxt = bearSweepReject
-                ? `🎯 HIGH SWEEP SHORT (-${scalpScoreVal})`
-                : (bearBreakdownDrive ? `💥 BREAKDOWN SHORT (-${scalpScoreVal})` : `🔴 CONFIRMED SHORT (-${scalpScoreVal})`);
+        } else if (comboHighFakeSweepShort && scalpPts <= -28) {
+            scalpFinalTxt = `🎯 ${activeHighPoolLbl} SWEEP REVERSAL SHORT (-${scalpScoreVal})`;
             scalpFinalCol = '#ff1744';
-        } else if (scalpPts <= -22) {
+        } else if (comboHighRealBreakoutLong && scalpPts >= 28) {
+            scalpFinalTxt = `🚀 ${activeHighPoolLbl} REAL BREAKOUT LONG (+${scalpScoreVal})`;
+            scalpFinalCol = '#00e676';
+        } else if (comboLowRealBreakdownShort && scalpPts <= -28) {
+            scalpFinalTxt = `💥 ${activeLowPoolLbl} REAL BREAKDOWN SHORT (-${scalpScoreVal})`;
+            scalpFinalCol = '#ff1744';
+        } else if (scalpPts >= 32) {
+            scalpFinalTxt = rangeLocation >= 0.76
+                ? `🟢 TREND LONG CONTINUATION (+${scalpScoreVal} | HOLD > ${curPoc.toFixed(dec)})`
+                : `🟢 CONFIRMED LONG (+${scalpScoreVal})`;
+            scalpFinalCol = '#00e676';
+        } else if (scalpPts <= -32) {
+            scalpFinalTxt = rangeLocation <= 0.24
+                ? `🔴 TREND SHORT CONTINUATION (-${scalpScoreVal} | HOLD < ${curPoc.toFixed(dec)})`
+                : `🔴 CONFIRMED SHORT (-${scalpScoreVal})`;
+            scalpFinalCol = '#ff1744';
+        } else if (scalpPts >= 16) {
+            scalpFinalTxt = lastC.close < lastC.open
+                ? `🛡️ BID WALL HOLDING (+${scalpScoreVal} | TREND PULLBACK)`
+                : `🟡 BULLISH EDGE (+${scalpScoreVal} | NEED CLOSE > ${curPoc.toFixed(dec)})`;
+            scalpFinalCol = '#00e5ff';
+        } else if (scalpPts <= -16) {
             scalpFinalTxt = lastC.close > lastC.open
-                ? `🛡️ ASK CAP HOLDING (LIVE ${tf.toUpperCase()} WICK)`
-                : `🟠 SHORT BUILDING (WAIT TRIGGER)`;
+                ? `🛡️ ASK CAP HOLDING (-${scalpScoreVal} | TREND BOUNCE)`
+                : `🟠 BEARISH EDGE (-${scalpScoreVal} | NEED CLOSE < ${curPoc.toFixed(dec)})`;
             scalpFinalCol = '#ff9100';
-        }
-
-        let intraPts = macroInfo ? macroInfo.netMacro : 0;
-        if (sPocUp > sPocDn) intraPts += 14;
-        else if (sPocDn > sPocUp) intraPts -= 14;
-        if (smtState.bias === 1) intraPts += 12;
-        else if (smtState.bias === -1) intraPts -= 12;
-
-        if (macroInfo) {
-            if (intraPts > 0 && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs && sPocDn >= sPocUp) intraPts = -20;
-            else if (intraPts < 0 && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs && sPocUp >= sPocDn) intraPts = 20;
         }
 
         const intraScoreVal = Math.abs(intraPts);
         let intraFinalTxt = `⏳ ${tf.toUpperCase()} ROTATIONAL RANGE`;
         let intraFinalCol = '#ffca28';
-        if (intraPts >= 46) { intraFinalTxt = `🟢 MACRO LONG CAMPAIGN (Score:+${intraScoreVal})`; intraFinalCol = '#00e676'; }
-        else if (intraPts >= 22) { intraFinalTxt = `🏦 ACCUMULATING LONG (Score:+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
-        else if (intraPts <= -46) { intraFinalTxt = `🔴 MACRO SHORT CAMPAIGN (Score:-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
-        else if (intraPts <= -22) { intraFinalTxt = `🏦 DISTRIBUTING SHORT (Score:-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
+        if (intraPts >= 40) { intraFinalTxt = `🟢 MACRO LONG CAMPAIGN (Score:+${intraScoreVal})`; intraFinalCol = '#00e676'; }
+        else if (intraPts >= 18) { intraFinalTxt = `🏦 ACCUMULATING LONG (Score:+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
+        else if (intraPts <= -40) { intraFinalTxt = `🔴 MACRO SHORT CAMPAIGN (Score:-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
+        else if (intraPts <= -18) { intraFinalTxt = `🏦 DISTRIBUTING SHORT (Score:-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
+
+        // UNIFY TOP DECISION BAR (#masterVerdictBox) WITH DYNAMIC ENGINE SO ALL WINDOWS MATCH 100%!
+        const vBox = document.getElementById('masterVerdictBox');
+        const vTitle = document.getElementById('masterVerdictTitle');
+        const vReasons = document.getElementById('masterVerdictReasons');
+        if (vBox && vTitle && vReasons) {
+            vTitle.style.color = scalpFinalCol;
+            vBox.style.borderColor = scalpFinalCol;
+            vBox.style.background = scalpPts >= 28 ? 'rgba(0, 200, 83, 0.16)' : (scalpPts <= -28 ? 'rgba(255, 23, 68, 0.16)' : 'rgba(20, 25, 38, 0.92)');
+            vTitle.innerText = `⚡ [${tf.toUpperCase()}] ${scalpFinalTxt}  |  🌊 ${intraFinalTxt}`;
+            vReasons.innerText = `${battleWinner} | CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)}${pdh ? ' PDH:' + pdh.toFixed(dec) : ''} | ${oiVerdictTxt}`;
+        }
 
         const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : (clusterLongBuildup ? 'BULL' : (clusterShortBuildup ? 'BEAR' : 'NEU')));
         const execVsAbsLbl = isBearExhaustionTrap ? 'SellsAbsorbedAtBid🟢' : (isBullExhaustionTrap ? 'BuysCappedAtAsk🔴' : (clusterLongBuildup ? `BullAnchor(+${anchorBullScore})` : (clusterShortBuildup ? `BearAnchor(-${anchorBearScore})` : 'NeutralFight')));
 
         const scalpMeterList = [
-            { name: '1. 6-Candle Institutional Anchor (TF-Close Verified)', state: execVsAbsState, val: execVsAbsLbl },
-            { name: '2. Intact Passive Iceberg & Cluster Hold', state: (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) ? 'BULL' : ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) ? 'BEAR' : 'NEU'), val: `BidAbs:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskAbs:${rAskAbs}(🧊${fmt(totIceAsk)})` },
-            { name: '3. >=10s Heavy Wall Reaction (🎭Pull vs 🛡️Abs)', state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | 10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
-            { name: '4. Live Total DOM Flow (0ms-1h+ Adds/Pulls/Rest)', state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
-            { name: '5. Effort vs Result (Delta Divergence)', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}` },
-            { name: '6. Two-Candle POC Structure Control', state: locState, val: `Px:${lastC.close.toFixed(dec)} vs POC:${curPoc.toFixed(dec)}` },
-            { name: '7. True Displacement Sweep Levels (⚡)', state: dispVsTrapState, val: `BullSweep:${dispBullLevels} vs BearSweep:${dispBearLevels}` },
-            { name: '8. Range Location Safety (Anti-Chase)', state: rangeLocation <= 0.35 ? 'BULL' : (rangeLocation >= 0.65 ? 'BEAR' : 'NEU'), val: `Loc:${Math.round(rangeLocation * 100)}% (Safe:22-78%)` },
-            { name: '9. 4-Candle POC Stepping Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
-            { name: '10. Old High/Low Sweep vs Breakout', state: (bullSweepReject || bullBreakoutDrive) ? 'BULL' : ((bearSweepReject || bearBreakdownDrive) ? 'BEAR' : 'NEU'), val: bullSweepReject ? 'LowFakeSweep🟢' : (bearSweepReject ? 'HighFakeSweep🔴' : (bullBreakoutDrive ? 'HighBreakout🚀' : (bearBreakdownDrive ? 'LowBreakdown💥' : 'None'))) },
+            { name: `1. [x${wWall.toFixed(1)}] Passive Iceberg & Cluster Hold (${dynWallPts >= 0 ? '+' : ''}${dynWallPts}pt)`, state: (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) ? 'BULL' : ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) ? 'BEAR' : 'NEU'), val: `BidAbs:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskAbs:${rAskAbs}(🧊${fmt(totIceAsk)})` },
+            { name: `2. [x${wPull10s.toFixed(1)}] >=10s Heavy Wall Pull/Abs (${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts}pt)`, state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | 10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
+            { name: `3. [x${wDisp.toFixed(1)}] Day/Swing High-Low Sweep vs Breakout (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: (comboLowFakeSweepLong || comboHighRealBreakoutLong) ? 'BULL' : ((comboHighFakeSweepShort || comboLowRealBreakdownShort) ? 'BEAR' : 'NEU'), val: comboLowFakeSweepLong ? `${activeLowPoolLbl} FakeSweep🟢` : (comboHighFakeSweepShort ? `${activeHighPoolLbl} FakeSweep🔴` : (comboHighRealBreakoutLong ? `${activeHighPoolLbl} RealBreak🚀` : (comboLowRealBreakdownShort ? `${activeLowPoolLbl} RealBreak💥` : `${activeHighPoolLbl}/${activeLowPoolLbl}`))) },
+            { name: `4. [x${wMsDom.toFixed(1)}] Live Millisecond DOM Flow (${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts}pt)`, state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}] | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
+            { name: `5. [x${wAnchor.toFixed(1)}] 6-Candle Anchor & POC Control (${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts}pt)`, state: dynAnchorPts > 4 ? 'BULL' : (dynAnchorPts < -4 ? 'BEAR' : 'NEU'), val: `${execVsAbsLbl} | Px vs POC:${curPoc.toFixed(dec)}` },
+            { name: '6. True Displacement Sweep Levels (⚡)', state: dispVsTrapState, val: `BullSweep:${dispBullLevels} vs BearSweep:${dispBearLevels}` },
+            { name: '7. Effort vs Result (Delta Divergence)', state: deltaState, val: `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}` },
+            { name: '8. Dealing Range & Day High/Low Location', state: rangeLocation <= 0.32 ? 'BULL' : (rangeLocation >= 0.68 ? 'BEAR' : 'NEU'), val: `Loc:${Math.round(rangeLocation * 100)}% | CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)}` },
+            { name: '9. 4-Candle POC Stepping Migration', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
+            { name: `10. Live Open Interest Synergy (${oiPts >= 0 ? '+' : ''}${oiPts}pt)`, state: oiStateBadge, val: oiVerdictTxt },
             { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
             { name: '12. RVOL Participation Filter', state: curRvol >= 0.85 ? execVsAbsState : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
         ];
@@ -4264,14 +4488,14 @@ function drawAll() {
 
         const intraMeterList = [
             { name: '1. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
-            { name: '2. Multi-Swing Cluster Absorption', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidAbs:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskAbs:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
+            { name: '2. Multi-Swing Cluster Absorption (Unbroken)', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidAbs:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskAbs:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
             { name: '3. 4-Candle Structure & POC Drift', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `POC Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
             { name: '4. Session >=10s Wall Pulling Campaign (10sPΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `Sess10sPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
             { name: '5. Displacement vs Absorption Balance', state: anchorBullScore > anchorBearScore ? 'BULL' : (anchorBearScore > anchorBullScore ? 'BEAR' : 'NEU'), val: `Bull:${anchorBullScore} vs Bear:${anchorBearScore}` },
             { name: '6. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
-            { name: '7. Unfinished Business Magnet Draw', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} vs UB-LO:${ubLoCnt}` },
-            { name: '8. Untouched nPOC Gravity', state: nakedPocs.filter(n => n.price > lastC.close).length > nakedPocs.filter(n => n.price < lastC.close).length ? 'BULL' : (nakedPocs.filter(n => n.price < lastC.close).length > nakedPocs.filter(n => n.price > lastC.close).length ? 'BEAR' : 'NEU'), val: `nPOCs:${nakedPocs.length}` },
-            { name: '9. Orderbook Macro Depth Support', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) ? 'BEAR' : 'NEU'), val: `B:${fmt(nearBidRest)} vs A:${fmt(nearAskRest)}` },
+            { name: '7. Day & Previous Day High/Low Magnet', state: lastC.close > (pdh || cdh) ? 'BULL' : (lastC.close < (pdl || cdl) ? 'BEAR' : 'NEU'), val: `CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)} PDH:${pdh ? pdh.toFixed(dec) : '--'} PDL:${pdl ? pdl.toFixed(dec) : '--'}` },
+            { name: '8. Unfinished Business & nPOC Gravity', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} UB-LO:${ubLoCnt} nPOCs:${nakedPocs.length}` },
+            { name: '9. Orderbook Macro Depth + Live OI', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) ? 'BEAR' : oiStateBadge), val: `B:${fmt(nearBidRest)} A:${fmt(nearAskRest)} | ${oiVerdictTxt}` },
             { name: '10. SMT Divergence Alignment', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text }
         ];
 
@@ -4296,7 +4520,7 @@ function drawAll() {
 
             document.getElementById('meterModalBody').innerHTML = `
                 <div class="rule-sec" style="border-color:${scalpFinalCol};">
-                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] SCALP & CLUSTER METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
+                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] DYNAMIC CONTEXT METER (${activeRegime}): ${scalpFinalTxt}</h4>
                     ${renderRows(scalpMeterList)}
                 </div>
                 <div class="rule-sec" style="border-color:${intraFinalCol};">
@@ -4310,8 +4534,34 @@ function drawAll() {
             symbol: symbol,
             timeframe: tf,
             live_price: lastC.close,
-            old_swing_high: prevSwingHigh,
-            old_swing_low: prevSwingLow,
+            active_context_regime: activeRegime,
+            range_location_pct: Math.round(rangeLocation * 100),
+            key_liquidity_levels: {
+                current_day_high: cdh,
+                current_day_low: cdl,
+                prev_day_high: pdh,
+                prev_day_low: pdl,
+                major_30c_swing_high: prevMajorHigh,
+                major_30c_swing_low: prevMajorLow,
+                micro_6c_swing_high: prevSwingHigh,
+                micro_6c_swing_low: prevSwingLow
+            },
+            dynamic_weights_applied: {
+                regime: activeRegime,
+                wall_pts: dynWallPts,
+                pull_10s_pts: dynPull10sPts,
+                sweep_breakout_pts: dynTrigPts,
+                live_ms_dom_pts: dynLiveDomPts,
+                anchor_poc_pts: dynAnchorPts,
+                live_oi_pts: oiPts,
+                total_net_score: scalpPts
+            },
+            open_interest_telemetry: {
+                active: oiActive,
+                open_interest: oiActive ? Math.round(oiState.oi) : null,
+                oi_delta: oiActive ? Math.round(oiDeltaVal * 100) / 100 : null,
+                oi_verdict: oiVerdictTxt
+            },
             current_candle: {
                 open: lastC.open,
                 high: lastC.high,
@@ -4344,6 +4594,7 @@ function drawAll() {
                 ms_flash_bid_pulled: Math.round(totFlashBp),
                 ms_flash_ask_pulled: Math.round(totFlashAp),
                 ms_live_dom_delta: Math.round(msLiveDomDelta),
+                ms_impulse_label: msSrvLabel,
                 near_resting_bid_wall: Math.round(nearBidRest),
                 near_resting_ask_wall: Math.round(nearAskRest)
             },
@@ -4669,6 +4920,11 @@ def api_status():
         })
 
 
+client_oi_cache = {
+    sym: {"oi": 0.0, "oi_delta": 0.0, "updated_ms": 0}
+    for sym in SYMBOLS
+}
+
 @app.route("/api/candles")
 def api_candles():
     symbol = request.args.get("symbol", "BTCUSDT").upper()
@@ -4689,12 +4945,26 @@ def api_candles():
             if not finished or current_final["start"] != finished[-1]["start"]:
                 finished.append(current_final)
 
+        # Piggyback Zero-Load Day High/Low (CDH/CDL) & Previous Day High/Low (PDH/PDL) from existing 1d RAM candles!
+        d_curr = current_candles[symbol].get("1d")
+        d_hist = candles[symbol].get("1d")
+        cdh = float(d_curr["high"]) if d_curr else (max(float(x["high"]) for x in finished) if finished else None)
+        cdl = float(d_curr["low"]) if d_curr else (min(float(x["low"]) for x in finished) if finished else None)
+        pdh = float(d_hist[-1]["high"]) if d_hist and len(d_hist) > 0 else None
+        pdl = float(d_hist[-1]["low"]) if d_hist and len(d_hist) > 0 else None
+
         return jsonify({
             "status": "ok",
             "symbol": symbol,
             "timeframe": timeframe,
             "count": len(finished),
             "candles": finished,
+            "day_levels": {
+                "cdh": cdh,
+                "cdl": cdl,
+                "pdh": pdh,
+                "pdl": pdl,
+            },
         })
 
 
@@ -4752,6 +5022,18 @@ def api_orderbook():
     except ValueError:
         limit = 500
 
+    c_oi = request.args.get("c_oi")
+    c_oid = request.args.get("c_oid")
+    if c_oi is not None:
+        try:
+            client_oi_cache[symbol] = {
+                "oi": float(c_oi),
+                "oi_delta": float(c_oid or 0.0),
+                "updated_ms": now_ms(),
+            }
+        except Exception:
+            pass
+
     with lock:
         state = orderbook[symbol]
         live_px = last_trade.get(symbol, {}).get("price")
@@ -4783,6 +5065,7 @@ def api_orderbook():
             "asks": [{"price": float(p), "quantity": q} for p, q in asks],
             "dom_raw": raw_list,
             "ms_telemetry": ms_snap,
+            "client_oi": client_oi_cache.get(symbol),
         })
 
 
@@ -4966,50 +5249,116 @@ def api_ai_mentor():
     live_news = fetch_live_crypto_news(symbol)
     news_block = "\n".join(live_news) if live_news else "No major breaking news in the last few minutes."
 
+    scalp_obj = engine_data.get("scalp_10factor_verdict", {})
+    intra_obj = engine_data.get("intraday_10factor_verdict", {})
+    dyn_obj = engine_data.get("dynamic_weights_applied", {})
+    key_lvls = engine_data.get("key_liquidity_levels", {})
+    oi_obj = engine_data.get("open_interest_telemetry", {})
+
+    scalp_bias = scalp_obj.get("final_bias", "WAIT")
+    scalp_score = scalp_obj.get("quant_score", 0)
+    intra_bias = intra_obj.get("final_bias", "WAIT")
+    intra_score = intra_obj.get("quant_score", 0)
+    active_regime = engine_data.get("active_context_regime", "MID_RANGE_AUCTION")
+
+    params = scalp_obj.get("parameters", [])
+    bull_list = [f"{p.get('name')} -> {p.get('val')}" for p in params if p.get("state") == "BULL"]
+    bear_list = [f"{p.get('name')} -> {p.get('val')}" for p in params if p.get("state") == "BEAR"]
+    neu_list = [f"{p.get('name')} -> {p.get('val')}" for p in params if p.get("state") == "NEU"]
+
+    context_truth = f"""
+DYNAMIC CONTEXT-DRIVEN ENGINE STATE (GROUND TRUTH):
+- Active Market Regime: {active_regime}
+- Master Scalp Verdict: {scalp_bias} (Dynamic Net Score: {scalp_score} | Decisive Threshold: ±32)
+- Master Intraday Campaign: {intra_bias} (Macro Score: {intra_score})
+- Dynamic Component Weights: {json.dumps(dyn_obj)}
+- Key Liquidity Pools (CDH/CDL, PDH/PDL, 30c Major Swing, 6c Micro Swing): {json.dumps(key_lvls)}
+- Live Open Interest Telemetry: {json.dumps(oi_obj)}
+- ALL BULLISH PARAMETERS ({len(bull_list)}): {"; ".join(bull_list) if bull_list else "None"}
+- ALL BEARISH PARAMETERS ({len(bear_list)}): {"; ".join(bear_list) if bear_list else "None"}
+- NEUTRAL PARAMETERS ({len(neu_list)}): {"; ".join(neu_list) if neu_list else "None"}
+
+DYNAMIC WEIGHTING RULES YOU MUST ENFORCE:
+1. At Key High/Low Pools (CDH/CDL, PDH/PDL, 30c/6c Swing): Passive Absorption + >=10s Wall Pulls (10sPΔ) + Millisecond Flow (msΔ) + Open Interest (OIΔ) hold the HIGHEST dynamic multiplier (overriding lagging 6-candle momentum).
+2. In Trend Pullbacks: Surviving Absorption Walls + 6c Anchor + POC Stepping hold the highest weight (ignoring minor 1-candle pullback noise).
+3. NEVER be diplomatic ("dono side ki baat mat kar"). Take ONE clear directional stand based on the Dynamic Net Score ({scalp_score}), and never sycophantically flip your verdict just because the trader clicked Long or Short!"""
+
     q_low = (question or "").strip().lower()
-    is_button_click = (not q_low) or (
-        "abhi live sa engine data ke hisab se" in q_low
-        or "main long trade dekh raha hu" in q_low
-        or "main short trade dekh raha hu" in q_low
-    )
 
-    if is_button_click:
-        prompt = f"""You are an Institutional Crypto Quant & Orderflow Mentor speaking in sharp, practical Hinglish.
-STRICT RULE: DO NOT hallucinate any numbers. Base 100% of your analysis strictly on the JSON telemetry and Live News Headlines below.
+    if "main long trade dekh raha hu" in q_low:
+        prompt = f"""You are a ruthless Institutional Risk Auditor & Orderflow Mentor speaking in sharp, practical Hinglish.
+{context_truth}
 
-Asset: {symbol} ({timeframe})
-Trader's Question / TradingView Observation: "{question}"
+TRADER'S INTENT: The trader wants to take a **LONG (BUY)** trade on {symbol} ({timeframe}) right now.
 
-LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT (MUST ANALYZE):
+LIVE BREAKING CRYPTO NEWS:
 {news_block}
 
-COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
+FULL TELEMETRY:
 {json.dumps(engine_data, separators=(",", ":"))}
 
-Analyze ALL parameters (including Live News) and reply in 5 short Hinglish points:
-1. ⚖️ FINAL VERDICT & ALIGNMENT: State Scalp Bias ({engine_data.get('scalp_10factor_verdict', {}).get('final_bias')}) & Intraday Bias ({engine_data.get('intraday_10factor_verdict', {}).get('final_bias')}) with Quant Scores. Is the trader's view 🟢 100% ALIGNED, 🔴 TRAP, or ⏳ WAIT FOR TRIGGER?
-2. 📰 LIVE NEWS & SENTIMENT IMPACT: Explicitly analyze the headlines from LIVE BREAKING CRYPTO NEWS above—tell if there is any breaking news risk/tailwind affecting {symbol} or if orderflow is purely technical right now.
-3. ⚔️ DOM & ABSORPTION X-RAY: Exact numbers from 6-Candle Anchor Score, Buy/Sell Executions, 10s Pull Delta (PΔ), Millisecond Delta (msΔ), Resting Walls, Absorptions, and Sweeps.
-4. 🎯 EXACT SCALP PLAN: Entry Zone, Invalidation/SL level, and Target (using active UB-HIGH/LOW or nPOC magnets).
-5. 🌊 INTRADAY ROADMAP: Session CVD & Big Player campaign direction."""
+Audit this LONG idea ruthlessly in 5 sharp Hinglish points:
+1. 🚨 LONG RISK VERDICT (CLEAR STAND): Based on Dynamic Net Score ({scalp_score} | {scalp_bias}) in regime [{active_regime}], is taking a LONG right now **🟢 LOW-RISK & ALIGNED**, **🟡 MODERATE-RISK (WAIT FOR POC/PULLBACK)**, or **🔴 HIGH-RISK TRAP (DO NOT LONG)**?
+2. ⚠️ PARAMETERS STANDING AGAINST YOUR LONG (SL-HUNT / TRAP RISKS): Explicitly list EVERY Bearish parameter from ALL BEARISH PARAMETERS above (including Key High resistance like CDH/PDH/Swing High, Ask-Caps, 10s Bid Pulls, negative msΔ, or OI traps) and explain how much dynamic weight they carry against this Long right now.
+3. ✅ SUPPORTING PARAMETERS vs OPPOSING WEIGHT: List the Bullish parameters supporting Long and state clearly whether their dynamic weight in [{active_regime}] is strong enough to beat the opposing Bearish risks.
+4. 📰 LIVE NEWS & OI CHECK: What do Live News, Fear & Greed, and Open Interest ({oi_obj.get('oi_verdict')}) say about this Long?
+5. 🎯 TACTICAL ACTION FOR LONG TRADER: If Long is aligned, give exact Entry, SL (below active Bid-Hold/Swing), and TP (CDH/PDH/UB/nPOC). If Long is risky/trap right now, tell the trader strictly NOT to buy here and give the exact price level where Long becomes valid."""
+
+    elif "main short trade dekh raha hu" in q_low:
+        prompt = f"""You are a ruthless Institutional Risk Auditor & Orderflow Mentor speaking in sharp, practical Hinglish.
+{context_truth}
+
+TRADER'S INTENT: The trader wants to take a **SHORT (SELL)** trade on {symbol} ({timeframe}) right now.
+
+LIVE BREAKING CRYPTO NEWS:
+{news_block}
+
+FULL TELEMETRY:
+{json.dumps(engine_data, separators=(",", ":"))}
+
+Audit this SHORT idea ruthlessly in 5 sharp Hinglish points:
+1. 🚨 SHORT RISK VERDICT (CLEAR STAND): Based on Dynamic Net Score ({scalp_score} | {scalp_bias}) in regime [{active_regime}], is taking a SHORT right now **🔴 LOW-RISK & ALIGNED**, **🟠 MODERATE-RISK (WAIT FOR BOUNCE/POC BREAK)**, or **🚫 HIGH-RISK SQUEEZE TRAP (DO NOT SHORT)**?
+2. ⚠️ PARAMETERS STANDING AGAINST YOUR SHORT (SQUEEZE / SL-HUNT RISKS): Explicitly list EVERY Bullish parameter from ALL BULLISH PARAMETERS above (including Key Low support like CDL/PDL/Swing Low, surviving Bid-Holds, Iceberg Bids, 10s Ask Pulls, positive msΔ, or OI buildup) and explain how much dynamic weight they carry against this Short right now.
+3. ✅ SUPPORTING PARAMETERS vs OPPOSING WEIGHT: List the Bearish parameters supporting Short and state clearly whether their dynamic weight in [{active_regime}] is strong enough to beat the opposing Bullish squeeze risks.
+4. 📰 LIVE NEWS & OI CHECK: What do Live News, Fear & Greed, and Open Interest ({oi_obj.get('oi_verdict')}) say about this Short?
+5. 🎯 TACTICAL ACTION FOR SHORT TRADER: If Short is aligned, give exact Entry, SL (above active Ask-Cap/Swing), and TP (CDL/PDL/UB/nPOC). If Short is risky/trap right now, tell the trader strictly NOT to short here and give the exact price level where Short becomes valid."""
+
+    elif (not q_low) or ("abhi live sa engine data ke hisab se" in q_low):
+        prompt = f"""You are a decisive Institutional Crypto Quant & Orderflow Mentor speaking in sharp, practical Hinglish.
+{context_truth}
+
+Asset: {symbol} ({timeframe})
+
+LIVE BREAKING CRYPTO NEWS:
+{news_block}
+
+FULL TELEMETRY:
+{json.dumps(engine_data, separators=(",", ":"))}
+
+Give a decisive, one-way institutional market assessment in 5 short Hinglish points:
+1. ⚖️ DECISIVE STAND & REGIME: State the active regime [{active_regime}], Scalp Verdict ({scalp_bias} | Score: {scalp_score}), and Intraday Campaign ({intra_bias} | Score: {intra_score}). Take ONE clear stand (Bulls or Bears or exact Wait trigger)—zero diplomacy!
+2. 🔥 DYNAMIC WEIGHT X-RAY (WHY THIS SIDE WINS): Explain which tools got the highest dynamic multiplier at the current location (e.g., Absorption + >=10s Wall Pull + msΔ + OI at CDH/CDL/Swing High-Low vs Surviving Walls at POC) and why they defeated the opposing signals.
+3. 🏛️ KEY LIQUIDITY POOLS (DAY HIGH/LOW & SWING X-RAY): Analyze current price relative to CDH ({key_lvls.get('current_day_high')}), CDL ({key_lvls.get('current_day_low')}), PDH ({key_lvls.get('prev_day_high')}), PDL ({key_lvls.get('prev_day_low')}), and 30c/6c Swings—is it a fake sweep reversal or real vacuum breakout?
+4. 📰 LIVE NEWS & OPEN INTEREST: Impact of breaking news, Fear & Greed, and Live OI ({oi_obj.get('oi_verdict')}).
+5. 🎯 ONE-WAY EXECUTION PLAN: Exact Entry, SL (behind defending wall), and TP (nearest UB/nPOC/Day level) for ONLY the winning direction."""
+
     else:
-        prompt = f"""You are an Institutional Crypto Quant & Orderflow Mentor speaking in sharp, practical Hinglish.
-STRICT RULE: DO NOT hallucinate any numbers. Base 100% of your answer strictly on the JSON telemetry and Live News Headlines below.
+        prompt = f"""You are a ruthless, practical Institutional Crypto Orderflow Mentor speaking in sharp Hinglish.
+{context_truth}
 
 Asset: {symbol} ({timeframe})
 TRADER'S CUSTOM MESSAGE / CHART OBSERVATION: "{question}"
 
-LIVE BREAKING CRYPTO NEWS & MACRO SENTIMENT (MUST CHECK & INCLUDE):
+LIVE BREAKING CRYPTO NEWS:
 {news_block}
 
-COMPLETE SA ENGINE, FOOTPRINT ANCHOR & DOM TELEMETRY:
+FULL TELEMETRY:
 {json.dumps(engine_data, separators=(",", ":"))}
 
-IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
-- The trader manually typed: "{question}". DO NOT output the generic 5-point button template!
-- Directly answer their specific question or evaluate the chart setup they described by cross-checking it against BOTH our live engine data (DOM 10s Walls, 10sPΔ, msΔ impulse, Bid/Ask Absorptions, Sweeps, POC/CVD, Scalp/Intraday scores) AND the LIVE BREAKING CRYPTO NEWS above.
-- MANDATORY NEWS CHECK: Always include a specific line in your reply telling the trader what the current Live News / Macro Sentiment says and whether any headline supports or threatens their setup.
-- Tell them clearly in raw, practical Hinglish whether our live institutional orderflow + news supports what they are seeing on their chart or if it is a trap, citing exact numbers and price levels."""
+INSTRUCTIONS FOR YOUR REPLY:
+- Directly answer the exact words and chart setup the trader typed: "{question}".
+- Cross-check their view against the Active Regime [{active_regime}], Key Liquidity Levels (CDH/CDL, PDH/PDL, 30c/6c Swings), Dynamic Component Weights, >=10s Wall Pulls vs Millisecond msΔ, Live OI ({oi_obj.get('oi_verdict')}), and Live News.
+- Highlight both what supports their view AND what stands against them as a trap, then take a 100% clear, non-diplomatic stand with exact price levels."""
 
     try:
         g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
@@ -5031,11 +5380,11 @@ IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
 
                 def orig_priority(x):
                     xl = x.lower()
-                    if "gemini-2.0-flash" in xl and "lite" not in xl and "exp" not in xl:
+                    if "gemini-2.0-flash" in xl and "lite" not in xl and "exp" not in xl and "preview" not in xl:
                         return 0
-                    if "gemini-flash-lite-latest" in xl or "flash-lite" in xl:
+                    if "gemini-flash-lite-latest" in xl:
                         return 1
-                    if "flash" in xl:
+                    if "flash" in xl and "preview" not in xl:
                         return 2
                     return 3
 
@@ -5056,7 +5405,7 @@ IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
                     headers=g_headers,
                     json={
                         "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {"temperature": 0.1}
+                        "generationConfig": {"temperature": 0.0}
                     },
                     timeout=(3.5, 9.5)
                 )
@@ -5075,7 +5424,7 @@ IMPORTANT INSTRUCTIONS FOR YOUR REPLY:
             return jsonify({"status": "error", "message": "Gemini server busy tha, ek baar phir ASK AI dabayein."}), 500
 
         news_header = "📰 === LIVE CRYPTO NEWS & SENTIMENT DESK ===\n" + "\n".join(f"• {h}" for h in live_news[:4])
-        final_output = f"{news_header}\n\n" + "="*55 + f"\n\n🧠 === GEMINI MENTOR AI ({used_model} | T=0.1) ===\n{reply_text}"
+        final_output = f"{news_header}\n\n" + "="*55 + f"\n\n🧠 === GEMINI MENTOR AI ({used_model} | DYNAMIC AUDIT) ===\n{reply_text}"
         return jsonify({"status": "ok", "reply": final_output})
 
     except Exception as e:
