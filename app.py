@@ -3180,14 +3180,6 @@ function drawLoop() {
 }
 
 function drawAll() {
-    // AUTO-SYNC CANVAS HEIGHT TO #wrap SO TOP BAR EXPANSION NEVER CUTS OFF BOTTOM TIME SCALE!
-    const actualW = Math.floor(wrap.clientWidth);
-    const actualH = Math.floor(wrap.clientHeight);
-    if (actualW > 60 && actualH > 60 && (cv.width !== actualW || cv.height !== actualH)) {
-        cv.width = actualW;
-        cv.height = actualH;
-        updateSlideTabUI();
-    }
     const W = cv.width;
     const H = cv.height;
     const { yAxisW, domW, chartW, chartH } = getLayout();
@@ -4211,15 +4203,9 @@ function drawAll() {
         if (pdl && Math.abs(lastC.low - pdl) <= domStep * 4.0) activeLowPoolLbl = `PDL(${pdl.toFixed(dec)})`;
         else if (Math.abs(lastC.low - cdl) <= domStep * 3.5) activeLowPoolLbl = `DAY-LO(${cdl.toFixed(dec)})`;
 
-        // Update Top Benchmark Bar with Live OI if browser OI is active
+        // Keep Top Benchmark Bar 100% compact (OI moved to METER & AI Mentor so top bar never wraps/lags!)
         const oiActive = oiState.active && (Date.now() - oiState.updatedAt < 30000);
         const oiDeltaVal = oiActive ? oiState.oiDelta : 0;
-        if (oiActive) {
-            const curEl = document.getElementById('bmCur');
-            if (curEl) {
-                curEl.innerText = `Cur:${fmt(lastC.volume)}(${curRvol.toFixed(1)}x) | OIΔ:${oiDeltaVal >= 0 ? '+' : ''}${fmt(oiDeltaVal)}`;
-            }
-        }
 
         const isBullExhaustionTrap = (
             bearSweepReject
@@ -4279,8 +4265,7 @@ function drawAll() {
             liveDomFlowState = 'BEAR';
         }
 
-        // 4 GOLDEN INSTITUTIONAL COMBOS AT KEY HIGH / LOW POOLS:
-        // 1. High Sweep + Ask Absorption + 10s Bid Support Pulled / Negative msΔ -> FAKE BREAKOUT / SHORT REVERSAL!
+        // 4 GOLDEN INSTITUTIONAL COMBOS AT KEY HIGH / LOW POOLS (100% Symmetrical Bull & Bear):
         const comboHighFakeSweepShort = atKeyHighZone && !bullBreakoutDrive && (
             bearSweepReject || (
                 hasAskDefense
@@ -4289,7 +4274,6 @@ function drawAll() {
             )
         );
 
-        // 2. Low Sweep + Bid Absorption + 10s Ask Resistance Pulled / Positive msΔ -> FAKE BREAKDOWN / LONG REVERSAL!
         const comboLowFakeSweepLong = atKeyLowZone && !bearBreakdownDrive && (
             bullSweepReject || (
                 hasBidDefense
@@ -4298,7 +4282,6 @@ function drawAll() {
             )
         );
 
-        // 3. Key High Breakout + ZERO Ask-Cap + 10s Ask Wall Pulled (Vacuum) + Displacement + msΔ -> REAL BREAKOUT LONG!
         const comboHighRealBreakoutLong = (
             bullBreakoutDrive || (
                 atKeyHighZone && rAskAbs === 0 && lastC.close > prevSwingHigh
@@ -4307,7 +4290,6 @@ function drawAll() {
             )
         );
 
-        // 4. Key Low Breakdown + ZERO Bid-Hold + 10s Bid Wall Pulled (Vacuum) + Displacement + msΔ -> REAL BREAKDOWN SHORT!
         const comboLowRealBreakdownShort = (
             bearBreakdownDrive || (
                 atKeyLowZone && rBidAbs === 0 && lastC.close < prevSwingLow
@@ -4322,18 +4304,15 @@ function drawAll() {
 
         if (comboHighFakeSweepShort || comboLowFakeSweepLong) {
             activeRegime = comboHighFakeSweepShort ? `KEY_HIGH_FAKE_SWEEP_REVERSAL (${activeHighPoolLbl})` : `KEY_LOW_FAKE_SWEEP_REVERSAL (${activeLowPoolLbl})`;
-            // At Liquidity Sweep Reversal: Absorption + 10s Pulling + msΔ get 2.2x weight; lagging 6c anchor gets 0.45x!
             wWall = 2.1; wPull10s = 2.4; wMsDom = 1.8; wDisp = 1.4; wAnchor = 0.45;
         } else if (comboHighRealBreakoutLong || comboLowRealBreakdownShort) {
             activeRegime = comboHighRealBreakoutLong ? `KEY_HIGH_REAL_VACUUM_BREAKOUT (${activeHighPoolLbl})` : `KEY_LOW_REAL_VACUUM_BREAKDOWN (${activeLowPoolLbl})`;
-            // At Real Breakout: 10s Vacuum Pull + Displacement + msΔ get 2.3x weight!
             wPull10s = 2.3; wDisp = 2.2; wMsDom = 1.8; wWall = 1.5; wAnchor = 1.0;
         } else if (atKeyHighZone || atKeyLowZone) {
             activeRegime = atKeyHighZone ? `TESTING_KEY_HIGH_ZONE (${activeHighPoolLbl})` : `TESTING_KEY_LOW_ZONE (${activeLowPoolLbl})`;
             wWall = 1.7; wPull10s = 1.8; wMsDom = 1.4; wAnchor = 0.65;
         } else if (Math.abs(anchorBullScore - anchorBearScore) >= 18 && (sPocUp !== sPocDn)) {
             activeRegime = anchorBullScore > anchorBearScore ? 'BULL_TREND_PULLBACK_DEFENSE' : 'BEAR_TREND_PULLBACK_DEFENSE';
-            // In Trend Pullback: Surviving Walls + 6c Anchor + POC Migration get 1.6x weight; single pullback ticks get 0.6x!
             wWall = 1.65; wAnchor = 1.55; wPull10s = 1.1; wMsDom = 0.65;
         }
 
@@ -4358,7 +4337,6 @@ function drawAll() {
         const rawAnchorDiff = Math.max(-20, Math.min(20, Math.round((anchorBullScore - anchorBearScore) * 0.45)));
         let dynAnchorPts = Math.round((rawAnchorDiff + pocStructPts) * wAnchor);
 
-        // If Key High/Low Reversal Combo fires, flip stale anchor drag into reversal synergy!
         if (comboHighFakeSweepShort) dynAnchorPts = Math.min(-18, -Math.abs(dynAnchorPts));
         else if (comboLowFakeSweepLong) dynAnchorPts = Math.max(18, Math.abs(dynAnchorPts));
 
@@ -4403,26 +4381,19 @@ function drawAll() {
 
             if (cMode === 'CONSISTENT_UP' || cMode === 'MILD_UP') {
                 const mult = isStrongConsistent ? 1.0 : (isMildConsistent ? 0.6 : 0.3);
-                // 1. At Key High + Ask-Cap + Rejecting -> Trapped Breakout Buyers + Fresh Limit Shorts (BEARISH)
                 if (comboHighFakeSweepShort || (atKeyHighZone && hasAskDefense && (lastC.close < lastC.open || lastC.close < curPoc))) {
                     oiPts = -Math.round(16 * mult);
                     oiStateBadge = 'BEAR';
                     oiVerdictTxt = `📈OIΔ:${dStr}(BuyersTrapped/NewShorts🔴)`;
-                }
-                // 2. At Key Low + Bid-Hold + Bouncing -> Trapped Breakdown Sellers + Fresh Limit Bids (BULLISH)
-                else if (comboLowFakeSweepLong || (atKeyLowZone && hasBidDefense && (lastC.close > lastC.open || lastC.close > curPoc))) {
+                } else if (comboLowFakeSweepLong || (atKeyLowZone && hasBidDefense && (lastC.close > lastC.open || lastC.close > curPoc))) {
                     oiPts = Math.round(16 * mult);
                     oiStateBadge = 'BULL';
                     oiVerdictTxt = `📈OIΔ:${dStr}(SellersTrapped/LimitBids🟢)`;
-                }
-                // 3. Bullish Price Action + Consistent OI Rising -> Fresh Long Buildup (BULLISH)
-                else if (lastC.close > lastC.open || (lastC.close >= curPoc && liveDomFlowState === 'BULL')) {
+                } else if (lastC.close > lastC.open || (lastC.close >= curPoc && liveDomFlowState === 'BULL')) {
                     oiPts = Math.round(12 * mult);
                     oiStateBadge = 'BULL';
                     oiVerdictTxt = `📈OIΔ:${dStr}(ConsistentLongAdd🟢)`;
-                }
-                // 4. Bearish Price Action + Consistent OI Rising -> Fresh Short Buildup (BEARISH)
-                else if (lastC.close < lastC.open || (lastC.close <= curPoc && liveDomFlowState === 'BEAR')) {
+                } else if (lastC.close < lastC.open || (lastC.close <= curPoc && liveDomFlowState === 'BEAR')) {
                     oiPts = -Math.round(12 * mult);
                     oiStateBadge = 'BEAR';
                     oiVerdictTxt = `📈OIΔ:${dStr}(ConsistentShortAdd🔴)`;
@@ -4431,20 +4402,15 @@ function drawAll() {
                 }
             } else if (cMode === 'CONSISTENT_DOWN' || cMode === 'MILD_DOWN') {
                 const mult = isStrongConsistent ? 1.0 : (isMildConsistent ? 0.6 : 0.3);
-                // 1. Price pumping into Key High while OI consistently drops -> Short-Covering Exhaustion (BEARISH REJECT)
                 if (lastC.close > lastC.open && atKeyHighZone && !comboHighRealBreakoutLong && hasAskDefense) {
                     oiPts = -Math.round(10 * mult);
                     oiStateBadge = 'BEAR';
                     oiVerdictTxt = `📉OIΔ:${dStr}(ShortCoverExhaustion🔴)`;
-                }
-                // 2. Price dumping into Key Low while OI consistently drops -> Long-Liquidation Flush (BULLISH BOUNCE)
-                else if (lastC.close < lastC.open && atKeyLowZone && !comboLowRealBreakdownShort && hasBidDefense) {
+                } else if (lastC.close < lastC.open && atKeyLowZone && !comboLowRealBreakdownShort && hasBidDefense) {
                     oiPts = Math.round(10 * mult);
                     oiStateBadge = 'BULL';
                     oiVerdictTxt = `📉OIΔ:${dStr}(LongLiqFlushBounce🟢)`;
-                }
-                // 3. Normal Profit Booking / Unwinding
-                else if (lastC.close > lastC.open) {
+                } else if (lastC.close > lastC.open) {
                     oiPts = -Math.round(4 * mult);
                     oiVerdictTxt = `📉OIΔ:${dStr}(ShortsCovering/Unwind🟠)`;
                 } else {
@@ -4458,7 +4424,7 @@ function drawAll() {
 
         let scalpPts = Math.max(-99, Math.min(99, dynWallPts + dynAnchorPts + dynPull10sPts + dynTrigPts + dynLiveDomPts + oiPts));
 
-        // Battle Winner Banner (Synced with Key Levels + 10s Walls + msΔ)
+        // Battle Winner Banner (Displayed inside Battle DOM & METER Modal)
         let battleWinner = `⚖️ [${tf.toUpperCase()}] MID-RANGE AUCTION — ${activeHighPoolLbl} vs ${activeLowPoolLbl}`;
         let bwCol = '#ffd700';
 
@@ -4510,78 +4476,81 @@ function drawAll() {
             intraPts = Math.min(-24, Math.round((dynWallPts + dynAnchorPts) * 0.8));
         }
 
-        // Smart Location Handling (Never blocks a valid Trend Continuation or Real Breakout!)
         const bullContinuationValid = (scalpPts >= 32 && rAskAbs === 0 && lastC.close >= curPoc && !comboHighFakeSweepShort);
         const bearContinuationValid = (scalpPts <= -32 && rBidAbs === 0 && lastC.close <= curPoc && !comboLowFakeSweepLong);
 
         let chasingWarning = null;
         if (scalpPts > 0 && rangeLocation >= 0.84 && !comboLowFakeSweepLong && !comboHighRealBreakoutLong && !bullContinuationValid) {
             scalpPts = Math.min(scalpPts, 22);
-            chasingWarning = `⚠️ AT ${activeHighPoolLbl} RESISTANCE (+${scalpPts} | WAIT POC ${curPoc.toFixed(dec)} DIP)`;
+            chasingWarning = `⚠️ WAIT PULLBACK (+${scalpPts})`;
         } else if (scalpPts < 0 && rangeLocation <= 0.16 && !comboHighFakeSweepShort && !comboLowRealBreakdownShort && !bearContinuationValid) {
             scalpPts = Math.max(scalpPts, -22);
-            chasingWarning = `⚠️ AT ${activeLowPoolLbl} SUPPORT (${scalpPts} | WAIT POC ${curPoc.toFixed(dec)} BOUNCE)`;
+            chasingWarning = `⚠️ WAIT BOUNCE (${scalpPts})`;
         }
 
         const scalpScoreVal = Math.abs(scalpPts);
-        let scalpFinalTxt = `⏳ MID-RANGE EQUILIBRIUM (${scalpPts >= 0 ? '+' : ''}${scalpPts})`;
+        let scalpFinalTxt = `⏳ NEUTRAL (${scalpPts >= 0 ? '+' : ''}${scalpPts})`;
         let scalpFinalCol = '#ffca28';
 
         if (chasingWarning) {
             scalpFinalTxt = chasingWarning;
             scalpFinalCol = '#ffab00';
         } else if (comboLowFakeSweepLong && scalpPts >= 28) {
-            scalpFinalTxt = `🎯 ${activeLowPoolLbl} SWEEP REVERSAL LONG (+${scalpScoreVal})`;
+            scalpFinalTxt = `🎯 SWEEP REVERSAL LONG (+${scalpScoreVal})`;
             scalpFinalCol = '#00e676';
         } else if (comboHighFakeSweepShort && scalpPts <= -28) {
-            scalpFinalTxt = `🎯 ${activeHighPoolLbl} SWEEP REVERSAL SHORT (-${scalpScoreVal})`;
+            scalpFinalTxt = `🎯 SWEEP REVERSAL SHORT (-${scalpScoreVal})`;
             scalpFinalCol = '#ff1744';
         } else if (comboHighRealBreakoutLong && scalpPts >= 28) {
-            scalpFinalTxt = `🚀 ${activeHighPoolLbl} REAL BREAKOUT LONG (+${scalpScoreVal})`;
+            scalpFinalTxt = `🚀 BREAKOUT LONG (+${scalpScoreVal})`;
             scalpFinalCol = '#00e676';
         } else if (comboLowRealBreakdownShort && scalpPts <= -28) {
-            scalpFinalTxt = `💥 ${activeLowPoolLbl} REAL BREAKDOWN SHORT (-${scalpScoreVal})`;
+            scalpFinalTxt = `💥 BREAKDOWN SHORT (-${scalpScoreVal})`;
             scalpFinalCol = '#ff1744';
         } else if (scalpPts >= 32) {
-            scalpFinalTxt = rangeLocation >= 0.76
-                ? `🟢 TREND LONG CONTINUATION (+${scalpScoreVal} | HOLD > ${curPoc.toFixed(dec)})`
-                : `🟢 CONFIRMED LONG (+${scalpScoreVal})`;
+            scalpFinalTxt = `🟢 CONFIRMED LONG (+${scalpScoreVal})`;
             scalpFinalCol = '#00e676';
         } else if (scalpPts <= -32) {
-            scalpFinalTxt = rangeLocation <= 0.24
-                ? `🔴 TREND SHORT CONTINUATION (-${scalpScoreVal} | HOLD < ${curPoc.toFixed(dec)})`
-                : `🔴 CONFIRMED SHORT (-${scalpScoreVal})`;
+            scalpFinalTxt = `🔴 CONFIRMED SHORT (-${scalpScoreVal})`;
             scalpFinalCol = '#ff1744';
         } else if (scalpPts >= 16) {
             scalpFinalTxt = lastC.close < lastC.open
-                ? `🛡️ BID WALL HOLDING (+${scalpScoreVal} | TREND PULLBACK)`
-                : `🟡 BULLISH EDGE (+${scalpScoreVal} | NEED CLOSE > ${curPoc.toFixed(dec)})`;
+                ? `🛡️ BID HOLDING (+${scalpScoreVal})`
+                : `🟡 BULL BIAS (+${scalpScoreVal})`;
             scalpFinalCol = '#00e5ff';
         } else if (scalpPts <= -16) {
             scalpFinalTxt = lastC.close > lastC.open
-                ? `🛡️ ASK CAP HOLDING (-${scalpScoreVal} | TREND BOUNCE)`
-                : `🟠 BEARISH EDGE (-${scalpScoreVal} | NEED CLOSE < ${curPoc.toFixed(dec)})`;
+                ? `🛡️ ASK CAPPING (-${scalpScoreVal})`
+                : `🟠 BEAR BIAS (-${scalpScoreVal})`;
             scalpFinalCol = '#ff9100';
         }
 
         const intraScoreVal = Math.abs(intraPts);
-        let intraFinalTxt = `⏳ ${tf.toUpperCase()} ROTATIONAL RANGE`;
+        let intraFinalTxt = `⏳ RANGE (${intraPts >= 0 ? '+' : ''}${intraPts})`;
         let intraFinalCol = '#ffca28';
-        if (intraPts >= 40) { intraFinalTxt = `🟢 MACRO LONG CAMPAIGN (Score:+${intraScoreVal})`; intraFinalCol = '#00e676'; }
-        else if (intraPts >= 18) { intraFinalTxt = `🏦 ACCUMULATING LONG (Score:+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
-        else if (intraPts <= -40) { intraFinalTxt = `🔴 MACRO SHORT CAMPAIGN (Score:-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
-        else if (intraPts <= -18) { intraFinalTxt = `🏦 DISTRIBUTING SHORT (Score:-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
+        if (intraPts >= 40) { intraFinalTxt = `🟢 MACRO LONG (+${intraScoreVal})`; intraFinalCol = '#00e676'; }
+        else if (intraPts >= 18) { intraFinalTxt = `🏦 ACCUMULATING LONG (+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
+        else if (intraPts <= -40) { intraFinalTxt = `🔴 MACRO SHORT (-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
+        else if (intraPts <= -18) { intraFinalTxt = `🏦 DISTRIBUTING SHORT (-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
 
-        // UNIFY TOP DECISION BAR (#masterVerdictBox) WITH DYNAMIC ENGINE SO ALL WINDOWS MATCH 100%!
+        // =========================================================================
+        // ULTRA-CLEAN SINGLE-LINE FRONT VERDICT BAR (ZERO WRAPPING = ZERO CHART LAG!)
+        // =========================================================================
         const vBox = document.getElementById('masterVerdictBox');
         const vTitle = document.getElementById('masterVerdictTitle');
         const vReasons = document.getElementById('masterVerdictReasons');
-        if (vBox && vTitle && vReasons) {
+        if (vBox && vTitle) {
             vTitle.style.color = scalpFinalCol;
+            vTitle.style.whiteSpace = 'nowrap';
+            vTitle.style.overflow = 'hidden';
+            vTitle.style.textOverflow = 'ellipsis';
             vBox.style.borderColor = scalpFinalCol;
             vBox.style.background = scalpPts >= 28 ? 'rgba(0, 200, 83, 0.16)' : (scalpPts <= -28 ? 'rgba(255, 23, 68, 0.16)' : 'rgba(20, 25, 38, 0.92)');
-            vTitle.innerText = `⚡ [${tf.toUpperCase()}] ${scalpFinalTxt}  |  🌊 ${intraFinalTxt}`;
-            vReasons.innerText = `${battleWinner} | CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)}${pdh ? ' PDH:' + pdh.toFixed(dec) : ''} | ${oiVerdictTxt}`;
+            vTitle.innerText = `⚡ SCALP [${tf.toUpperCase()}]: ${scalpFinalTxt}   |   🌊 MACRO: ${intraFinalTxt}`;
+            if (vReasons) {
+                vReasons.style.display = 'none';
+                vReasons.innerText = '';
+            }
         }
 
         const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : (clusterLongBuildup ? 'BULL' : (clusterShortBuildup ? 'BEAR' : 'NEU')));
@@ -4590,7 +4559,7 @@ function drawAll() {
         const scalpMeterList = [
             { name: `1. [x${wWall.toFixed(1)}] Passive Iceberg & Cluster Hold (${dynWallPts >= 0 ? '+' : ''}${dynWallPts}pt)`, state: (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.25) ? 'BULL' : ((rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.25) ? 'BEAR' : 'NEU'), val: `BidAbs:${rBidAbs}(🧊${fmt(totIceBid)}) vs AskAbs:${rAskAbs}(🧊${fmt(totIceAsk)})` },
             { name: `2. [x${wPull10s.toFixed(1)}] >=10s Heavy Wall Pull/Abs (${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts}pt)`, state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | 10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
-            { name: `3. [x${wDisp.toFixed(1)}] Day/Swing High-Low Sweep vs Breakout (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: (comboLowFakeSweepLong || comboHighRealBreakoutLong) ? 'BULL' : ((comboHighFakeSweepShort || comboLowRealBreakdownShort) ? 'BEAR' : 'NEU'), val: comboLowFakeSweepLong ? `${activeLowPoolLbl} FakeSweep🟢` : (comboHighFakeSweepShort ? `${activeHighPoolLbl} FakeSweep🔴` : (comboHighRealBreakoutLong ? `${activeHighPoolLbl} RealBreak🚀` : (comboLowRealBreakdownShort ? `${activeLowPoolLbl} RealBreak💥` : `${activeHighPoolLbl}/${activeLowPoolLbl}`))) },
+            { name: `3. [x${wDisp.toFixed(1)}] Day/Swing High-Low Sweep vs Breakout (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: (comboLowFakeSweepLong || comboHighRealBreakoutLong) ? 'BULL' : ((comboHighFakeSweepShort || comboLowRealBreakdownShort) ? 'BEAR' : 'NEU'), val: comboLowFakeSweepLong ? `${activeLowPoolLbl} FakeSweep🟢` : (comboHighFakeSweepShort ? `${activeHighPoolLbl} FakeSweep🔴` : (comboHighRealBreakoutLong ? `${activeHighPoolLbl} RealBreak🚀` : (comboLowRealBreakdownShort ? `${activeLowPoolLbl} RealBreak💥` : `${activeHighPoolLbl} / ${activeLowPoolLbl}`))) },
             { name: `4. [x${wMsDom.toFixed(1)}] Live Millisecond DOM Flow (${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts}pt)`, state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}] | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
             { name: `5. [x${wAnchor.toFixed(1)}] 6-Candle Anchor & POC Control (${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts}pt)`, state: dynAnchorPts > 4 ? 'BULL' : (dynAnchorPts < -4 ? 'BEAR' : 'NEU'), val: `${execVsAbsLbl} | Px vs POC:${curPoc.toFixed(dec)}` },
             { name: '6. True Displacement Sweep Levels (⚡)', state: dispVsTrapState, val: `BullSweep:${dispBullLevels} vs BearSweep:${dispBearLevels}` },
@@ -4640,8 +4609,19 @@ function drawAll() {
             }).join('');
 
             document.getElementById('meterModalBody').innerHTML = `
+                <div class="rule-sec" style="grid-column: 1 / -1; border-color:#00e5ff; background:#0e1422;">
+                    <h4 style="color:#00e5ff;">🏛️ LIVE INSTITUTIONAL CONTEXT, KEY HIGH/LOW POOLS & OPEN INTEREST TELEMETRY</h4>
+                    <div style="display:flex; flex-wrap:wrap; gap:12px; font-size:11.5px; line-height:1.6;">
+                        <span><b>Regime:</b> <code style="color:#ffeb3b;">${activeRegime}</code></span>
+                        <span><b>DOM Battle:</b> <span style="color:${bwCol};font-weight:bold;">${battleWinner}</span></span>
+                        <span><b>Day High/Low:</b> <code style="color:#00e5ff;">CDH:${cdh.toFixed(dec)} | CDL:${cdl.toFixed(dec)} | PDH:${pdh ? pdh.toFixed(dec) : '--'} | PDL:${pdl ? pdl.toFixed(dec) : '--'}</code></span>
+                        <span><b>Swings:</b> <code style="color:#b388ff;">30c:[${prevMajorHigh.toFixed(dec)} / ${prevMajorLow.toFixed(dec)}] | 6c:[${prevSwingHigh.toFixed(dec)} / ${prevSwingLow.toFixed(dec)}]</code></span>
+                        <span><b>Live OI:</b> <code style="color:#69f0ae;">${oiVerdictTxt}</code></span>
+                        <span><b>Dynamic Score Split:</b> <code style="color:#cfd8dc;">Walls:${dynWallPts >= 0 ? '+' : ''}${dynWallPts} | 10sPull:${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts} | Sweep/Brk:${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts} | msΔ:${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts} | Anchor/POC:${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts} | OI:${oiPts >= 0 ? '+' : ''}${oiPts} ➔ NET:${scalpPts >= 0 ? '+' : ''}${scalpPts}</code></span>
+                    </div>
+                </div>
                 <div class="rule-sec" style="border-color:${scalpFinalCol};">
-                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] DYNAMIC CONTEXT METER (${activeRegime}): ${scalpFinalTxt}</h4>
+                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] DYNAMIC SCALP METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
                     ${renderRows(scalpMeterList)}
                 </div>
                 <div class="rule-sec" style="border-color:${intraFinalCol};">
@@ -4681,6 +4661,9 @@ function drawAll() {
                 active: oiActive,
                 open_interest: oiActive ? Math.round(oiState.oi) : null,
                 oi_delta: oiActive ? Math.round(oiDeltaVal * 100) / 100 : null,
+                consistency: oiActive ? oiState.consistency : 'STANDBY',
+                up_steps: oiActive ? oiState.upSteps : 0,
+                down_steps: oiActive ? oiState.downSteps : 0,
                 oi_verdict: oiVerdictTxt
             },
             current_candle: {
