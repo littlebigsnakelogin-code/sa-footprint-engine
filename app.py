@@ -2681,7 +2681,7 @@ cv.addEventListener('touchmove', e => {
 
 cv.addEventListener('touchend', () => { dragMode = null; pinchDist = null; });
 
-// STEALTH CLIENT-SIDE BINANCE OPEN INTEREST FETCHER (Uses Local PC/Mobile IP — Zero Render Load!)
+// STEALTH CLIENT-SIDE BINANCE OI FETCHER (Multi-Sample Rolling Consistency + 3-Candle Baseline!)
 async function fetchClientOI() {
     if (document.hidden) return;
     const reqSym = symbol;
@@ -2694,19 +2694,93 @@ async function fetchClientOI() {
         if (curOi <= 0) return;
 
         const curCandleStart = candles.length > 0 ? candles[candles.length - 1].start : 0;
-        if (!oiState.active || oiState.baseOi <= 0) {
-            oiState.baseOi = curOi;
-            oiState.candleStartTs = curCandleStart;
-        } else if (curCandleStart > 0 && curCandleStart !== oiState.candleStartTs) {
-            // Smoothly anchor OI baseline to current candle transition
-            oiState.baseOi = (oiState.baseOi * 0.35) + (oiState.oi * 0.65);
+        const storeKey = `sa_oi_ring_${reqSym}`;
+        if (!Array.isArray(oiState.history)) oiState.history = [];
+
+        // 1. On first load, seed history from sessionStorage or Binance 5m OI History (last 3 bars)
+        if (!oiState.active || oiState.baseOi <= 0 || oiState.history.length === 0) {
+            let saved = null;
+            try { saved = JSON.parse(sessionStorage.getItem(storeKey) || 'null'); } catch (e) {}
+            if (saved && Array.isArray(saved.history) && saved.history.length > 0 && (Date.now() - saved.ts < 1800000)) {
+                oiState.history = saved.history.slice(-10);
+                oiState.baseOi = saved.baseOi || oiState.history[0];
+                oiState.candleStartTs = saved.candleStartTs || curCandleStart;
+            } else {
+                oiState.baseOi = curOi;
+                oiState.candleStartTs = curCandleStart;
+                try {
+                    const hRes = await fetch(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${reqSym}&period=5m&limit=3`);
+                    if (hRes.ok) {
+                        const hArr = await hRes.json();
+                        if (Array.isArray(hArr) && hArr.length > 0) {
+                            const histVals = hArr.map(x => parseFloat(x.sumOpenInterest) || 0).filter(v => v > 0);
+                            if (histVals.length > 0) {
+                                oiState.history = histVals;
+                                oiState.baseOi = histVals[0];
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+        } else if (curCandleStart > 0 && oiState.candleStartTs > 0 && curCandleStart !== oiState.candleStartTs) {
+            // Smooth 3-candle rolling anchor so OI baseline tracks multi-candle flow without sudden zero-reset
+            oiState.baseOi = (oiState.baseOi * 0.45) + (oiState.oi * 0.55);
             oiState.candleStartTs = curCandleStart;
         }
+
+        // 2. Push current OI to rolling 10-sample window (only if changed or window < 4)
+        const lastSample = oiState.history.length > 0 ? oiState.history[oiState.history.length - 1] : 0;
+        if (Math.abs(curOi - lastSample) > 1e-6 || oiState.history.length < 4) {
+            oiState.history.push(curOi);
+            if (oiState.history.length > 10) oiState.history.shift();
+        }
+
+        // 3. Calculate Multi-Step Consistency (How many steps rose vs fell across the window)
+        let upSteps = 0, downSteps = 0;
+        for (let i = 1; i < oiState.history.length; i++) {
+            const diff = oiState.history[i] - oiState.history[i - 1];
+            if (diff > 0) upSteps++;
+            else if (diff < 0) downSteps++;
+        }
+        const totSteps = upSteps + downSteps;
+        const winStartOi = oiState.history.length > 0 ? oiState.history[0] : curOi;
+        const winDelta = curOi - winStartOi;
+        const baseDelta = curOi - oiState.baseOi;
+
+        // Weighted Real OI Delta (60% Rolling Window Delta + 40% Multi-Candle Baseline Delta)
+        const realOiDelta = (winDelta * 0.60) + (baseDelta * 0.40);
+        let consistency = 'FLAT';
+        if (totSteps >= 2) {
+            if (upSteps > downSteps && winDelta > 0 && baseDelta >= 0) {
+                consistency = (upSteps / totSteps >= 0.65) ? 'CONSISTENT_UP' : 'MILD_UP';
+            } else if (downSteps > upSteps && winDelta < 0 && baseDelta <= 0) {
+                consistency = (downSteps / totSteps >= 0.65) ? 'CONSISTENT_DOWN' : 'MILD_DOWN';
+            } else {
+                consistency = 'CHOPPY';
+            }
+        } else if (Math.abs(realOiDelta) > 0) {
+            consistency = realOiDelta > 0 ? 'MILD_UP' : 'MILD_DOWN';
+        }
+
         oiState.oi = curOi;
-        oiState.oiDelta = curOi - oiState.baseOi;
-        oiState.oiPct = oiState.baseOi > 0 ? ((oiState.oiDelta / oiState.baseOi) * 100) : 0;
+        oiState.oiDelta = realOiDelta;
+        oiState.winDelta = winDelta;
+        oiState.upSteps = upSteps;
+        oiState.downSteps = downSteps;
+        oiState.consistency = consistency;
+        oiState.oiPct = oiState.baseOi > 0 ? ((realOiDelta / oiState.baseOi) * 100) : 0;
         oiState.active = true;
         oiState.updatedAt = Date.now();
+
+        try {
+            sessionStorage.setItem(storeKey, JSON.stringify({
+                baseOi: oiState.baseOi,
+                candleStartTs: oiState.candleStartTs,
+                history: oiState.history,
+                ts: Date.now()
+            }));
+        } catch (e) {}
+
         needsRender = true;
     } catch (e) {
         if (Date.now() - oiState.updatedAt > 30000) oiState.active = false;
@@ -2714,8 +2788,8 @@ async function fetchClientOI() {
 }
 setInterval(() => {
     if (!document.hidden) fetchClientOI();
-}, 6400);
-setTimeout(fetchClientOI, 800);
+}, 6000);
+setTimeout(fetchClientOI, 600);
 
 let fetching = false;
 let fetchSeq = 0;
@@ -3106,6 +3180,14 @@ function drawLoop() {
 }
 
 function drawAll() {
+    // AUTO-SYNC CANVAS HEIGHT TO #wrap SO TOP BAR EXPANSION NEVER CUTS OFF BOTTOM TIME SCALE!
+    const actualW = Math.floor(wrap.clientWidth);
+    const actualH = Math.floor(wrap.clientHeight);
+    if (actualW > 60 && actualH > 60 && (cv.width !== actualW || cv.height !== actualH)) {
+        cv.width = actualW;
+        cv.height = actualH;
+        updateSlideTabUI();
+    }
     const W = cv.width;
     const H = cv.height;
     const { yAxisW, domW, chartW, chartH } = getLayout();
@@ -4306,32 +4388,71 @@ function drawAll() {
         else if (smtState.bias === -1) baseLiveDomPts -= 4;
         let dynLiveDomPts = Math.round(baseLiveDomPts * wMsDom);
 
-        // LIVE OPEN INTEREST (OIΔ) SYNERGY BOOSTER (Only active when PC/Mobile fetches OI; 0 when standby!)
+        // LIVE OPEN INTEREST (OIΔ) CONSISTENCY & SYNERGY BOOSTER (100% Symmetrical Bull & Bear!)
         let oiPts = 0;
         let oiVerdictTxt = 'OI:STANDBY';
         let oiStateBadge = 'NEU';
         if (oiActive) {
-            const sigOiCut = Math.max(oiState.oi * 0.00015, 0.5);
-            if (oiDeltaVal >= sigOiCut) {
-                if (comboHighFakeSweepShort || (atKeyHighZone && hasAskDefense && lastC.close <= lastC.open)) {
-                    oiPts = -14; oiStateBadge = 'BEAR'; oiVerdictTxt = `OIΔ+${fmt(oiDeltaVal)}(TrappedLongs/NewShorts🔴)`;
-                } else if (comboLowFakeSweepLong || (atKeyLowZone && hasBidDefense && lastC.close >= lastC.open)) {
-                    oiPts = 14; oiStateBadge = 'BULL'; oiVerdictTxt = `OIΔ+${fmt(oiDeltaVal)}(TrappedShorts/LimitBids🟢)`;
-                } else if (lastC.close > lastC.open) {
-                    oiPts = 10; oiStateBadge = 'BULL'; oiVerdictTxt = `OIΔ+${fmt(oiDeltaVal)}(FreshLongBuildup🟢)`;
-                } else {
-                    oiPts = -10; oiStateBadge = 'BEAR'; oiVerdictTxt = `OIΔ+${fmt(oiDeltaVal)}(FreshShortBuildup🔴)`;
+            const cMode = oiState.consistency || 'FLAT';
+            const upS = oiState.upSteps || 0;
+            const dnS = oiState.downSteps || 0;
+            const sigOiCut = Math.max(oiState.oi * 0.000015, rawStep * 0.30);
+            const isStrongConsistent = (cMode === 'CONSISTENT_UP' || cMode === 'CONSISTENT_DOWN') && Math.abs(oiDeltaVal) >= sigOiCut;
+            const isMildConsistent = (cMode === 'MILD_UP' || cMode === 'MILD_DOWN') && Math.abs(oiDeltaVal) >= sigOiCut * 0.5;
+            const dStr = `${oiDeltaVal >= 0 ? '+' : ''}${fmt(oiDeltaVal)}[${upS}↑/${dnS}↓]`;
+
+            if (cMode === 'CONSISTENT_UP' || cMode === 'MILD_UP') {
+                const mult = isStrongConsistent ? 1.0 : (isMildConsistent ? 0.6 : 0.3);
+                // 1. At Key High + Ask-Cap + Rejecting -> Trapped Breakout Buyers + Fresh Limit Shorts (BEARISH)
+                if (comboHighFakeSweepShort || (atKeyHighZone && hasAskDefense && (lastC.close < lastC.open || lastC.close < curPoc))) {
+                    oiPts = -Math.round(16 * mult);
+                    oiStateBadge = 'BEAR';
+                    oiVerdictTxt = `📈OIΔ:${dStr}(BuyersTrapped/NewShorts🔴)`;
                 }
-            } else if (oiDeltaVal <= -sigOiCut) {
-                if (lastC.close > lastC.open && atKeyHighZone && !comboHighRealBreakoutLong) {
-                    oiPts = -8; oiStateBadge = 'BEAR'; oiVerdictTxt = `OIΔ${fmt(oiDeltaVal)}(ShortCoverExhaustion⚠️)`;
-                } else if (lastC.close < lastC.open && atKeyLowZone && !comboLowRealBreakdownShort) {
-                    oiPts = 8; oiStateBadge = 'BULL'; oiVerdictTxt = `OIΔ${fmt(oiDeltaVal)}(LongLiqExhaustion⚠️)`;
+                // 2. At Key Low + Bid-Hold + Bouncing -> Trapped Breakdown Sellers + Fresh Limit Bids (BULLISH)
+                else if (comboLowFakeSweepLong || (atKeyLowZone && hasBidDefense && (lastC.close > lastC.open || lastC.close > curPoc))) {
+                    oiPts = Math.round(16 * mult);
+                    oiStateBadge = 'BULL';
+                    oiVerdictTxt = `📈OIΔ:${dStr}(SellersTrapped/LimitBids🟢)`;
+                }
+                // 3. Bullish Price Action + Consistent OI Rising -> Fresh Long Buildup (BULLISH)
+                else if (lastC.close > lastC.open || (lastC.close >= curPoc && liveDomFlowState === 'BULL')) {
+                    oiPts = Math.round(12 * mult);
+                    oiStateBadge = 'BULL';
+                    oiVerdictTxt = `📈OIΔ:${dStr}(ConsistentLongAdd🟢)`;
+                }
+                // 4. Bearish Price Action + Consistent OI Rising -> Fresh Short Buildup (BEARISH)
+                else if (lastC.close < lastC.open || (lastC.close <= curPoc && liveDomFlowState === 'BEAR')) {
+                    oiPts = -Math.round(12 * mult);
+                    oiStateBadge = 'BEAR';
+                    oiVerdictTxt = `📈OIΔ:${dStr}(ConsistentShortAdd🔴)`;
                 } else {
-                    oiVerdictTxt = `OIΔ${fmt(oiDeltaVal)}(PositionUnwind⚪)`;
+                    oiVerdictTxt = `📈OIΔ:${dStr}(PositionsBuilding⚪)`;
+                }
+            } else if (cMode === 'CONSISTENT_DOWN' || cMode === 'MILD_DOWN') {
+                const mult = isStrongConsistent ? 1.0 : (isMildConsistent ? 0.6 : 0.3);
+                // 1. Price pumping into Key High while OI consistently drops -> Short-Covering Exhaustion (BEARISH REJECT)
+                if (lastC.close > lastC.open && atKeyHighZone && !comboHighRealBreakoutLong && hasAskDefense) {
+                    oiPts = -Math.round(10 * mult);
+                    oiStateBadge = 'BEAR';
+                    oiVerdictTxt = `📉OIΔ:${dStr}(ShortCoverExhaustion🔴)`;
+                }
+                // 2. Price dumping into Key Low while OI consistently drops -> Long-Liquidation Flush (BULLISH BOUNCE)
+                else if (lastC.close < lastC.open && atKeyLowZone && !comboLowRealBreakdownShort && hasBidDefense) {
+                    oiPts = Math.round(10 * mult);
+                    oiStateBadge = 'BULL';
+                    oiVerdictTxt = `📉OIΔ:${dStr}(LongLiqFlushBounce🟢)`;
+                }
+                // 3. Normal Profit Booking / Unwinding
+                else if (lastC.close > lastC.open) {
+                    oiPts = -Math.round(4 * mult);
+                    oiVerdictTxt = `📉OIΔ:${dStr}(ShortsCovering/Unwind🟠)`;
+                } else {
+                    oiPts = Math.round(4 * mult);
+                    oiVerdictTxt = `📉OIΔ:${dStr}(LongsClosing/Unwind🟡)`;
                 }
             } else {
-                oiVerdictTxt = `OI:${fmt(oiState.oi)}(Flat⚪)`;
+                oiVerdictTxt = `⚖️OIΔ:${dStr}(Choppy/MixedOI⚪)`;
             }
         }
 
@@ -5267,98 +5388,101 @@ def api_ai_mentor():
     neu_list = [f"{p.get('name')} -> {p.get('val')}" for p in params if p.get("state") == "NEU"]
 
     context_truth = f"""
-DYNAMIC CONTEXT-DRIVEN ENGINE STATE (GROUND TRUTH):
-- Active Market Regime: {active_regime}
-- Master Scalp Verdict: {scalp_bias} (Dynamic Net Score: {scalp_score} | Decisive Threshold: ±32)
-- Master Intraday Campaign: {intra_bias} (Macro Score: {intra_score})
-- Dynamic Component Weights: {json.dumps(dyn_obj)}
-- Key Liquidity Pools (CDH/CDL, PDH/PDL, 30c Major Swing, 6c Micro Swing): {json.dumps(key_lvls)}
-- Live Open Interest Telemetry: {json.dumps(oi_obj)}
-- ALL BULLISH PARAMETERS ({len(bull_list)}): {"; ".join(bull_list) if bull_list else "None"}
-- ALL BEARISH PARAMETERS ({len(bear_list)}): {"; ".join(bear_list) if bear_list else "None"}
-- NEUTRAL PARAMETERS ({len(neu_list)}): {"; ".join(neu_list) if neu_list else "None"}
+BHASHA KA KADA NIYAM (STRICT HINGLISH RULE):
+- Tujhe apna 100% jawab ठेठ देसी HINGLISH (Roman Hindi, jaise: "Bhai abhi price Day High ke paas hai aur upar Ask-Cap baitha hai, isliye yahan Long lena khatarnak hai...") me hi likhna hai!
+- Pure English me sentences bilkul MAT likhna! Technical terms (POC, msΔ, 10sPΔ, Ask-Cap, Bid-Hold, OIΔ, SL, TP) use kar, par samjhane wali bhasha 100% Hinglish honi chahiye.
 
-DYNAMIC WEIGHTING RULES YOU MUST ENFORCE:
-1. At Key High/Low Pools (CDH/CDL, PDH/PDL, 30c/6c Swing): Passive Absorption + >=10s Wall Pulls (10sPΔ) + Millisecond Flow (msΔ) + Open Interest (OIΔ) hold the HIGHEST dynamic multiplier (overriding lagging 6-candle momentum).
-2. In Trend Pullbacks: Surviving Absorption Walls + 6c Anchor + POC Stepping hold the highest weight (ignoring minor 1-candle pullback noise).
-3. NEVER be diplomatic ("dono side ki baat mat kar"). Take ONE clear directional stand based on the Dynamic Net Score ({scalp_score}), and never sycophantically flip your verdict just because the trader clicked Long or Short!"""
+DYNAMIC ENGINE DATA (GROUND TRUTH):
+- Active Market Regime: {active_regime}
+- Master Scalp Verdict: {scalp_bias} (Dynamic Net Score: {scalp_score} | Decisive Cut: ±32)
+- Master Intraday Campaign: {intra_bias} (Macro Score: {intra_score})
+- Dynamic Weights: {json.dumps(dyn_obj)}
+- Key High/Low Pools (CDH/CDL, PDH/PDL, 30c/6c Swings): {json.dumps(key_lvls)}
+- Live Open Interest (OI): {json.dumps(oi_obj)}
+- BULLISH PARAMETERS ({len(bull_list)}): {"; ".join(bull_list) if bull_list else "Koi nahi"}
+- BEARISH PARAMETERS ({len(bear_list)}): {"; ".join(bear_list) if bear_list else "Koi nahi"}
+- NEUTRAL PARAMETERS ({len(neu_list)}): {"; ".join(neu_list) if neu_list else "Koi nahi"}
+
+NIYAM:
+1. Key High/Low (CDH/CDL, PDH/PDL, Swing High/Low) par Absorption + >=10s Wall Pull (10sPΔ) + msΔ + OIΔ ka weight sabse zyada hota hai.
+2. Diplomatic ("dono side ki baat") bilkul mat karna. Dynamic Score ({scalp_score}) ke hisab se ek-tarfa saaf stand lena!"""
 
     q_low = (question or "").strip().lower()
 
     if "main long trade dekh raha hu" in q_low:
-        prompt = f"""You are a ruthless Institutional Risk Auditor & Orderflow Mentor speaking in sharp, practical Hinglish.
+        prompt = f"""Tu ek pakka Desi Institutional Risk Auditor aur Orderflow Mentor hai. Jawab 100% HINGLISH me de.
 {context_truth}
 
-TRADER'S INTENT: The trader wants to take a **LONG (BUY)** trade on {symbol} ({timeframe}) right now.
+TRADER KA SAWAL: Trader abhi {symbol} ({timeframe}) me **LONG (BUY)** trade lena chahta hai.
 
-LIVE BREAKING CRYPTO NEWS:
+LIVE NEWS:
 {news_block}
 
-FULL TELEMETRY:
+TELEMETRY:
 {json.dumps(engine_data, separators=(",", ":"))}
 
-Audit this LONG idea ruthlessly in 5 sharp Hinglish points:
-1. 🚨 LONG RISK VERDICT (CLEAR STAND): Based on Dynamic Net Score ({scalp_score} | {scalp_bias}) in regime [{active_regime}], is taking a LONG right now **🟢 LOW-RISK & ALIGNED**, **🟡 MODERATE-RISK (WAIT FOR POC/PULLBACK)**, or **🔴 HIGH-RISK TRAP (DO NOT LONG)**?
-2. ⚠️ PARAMETERS STANDING AGAINST YOUR LONG (SL-HUNT / TRAP RISKS): Explicitly list EVERY Bearish parameter from ALL BEARISH PARAMETERS above (including Key High resistance like CDH/PDH/Swing High, Ask-Caps, 10s Bid Pulls, negative msΔ, or OI traps) and explain how much dynamic weight they carry against this Long right now.
-3. ✅ SUPPORTING PARAMETERS vs OPPOSING WEIGHT: List the Bullish parameters supporting Long and state clearly whether their dynamic weight in [{active_regime}] is strong enough to beat the opposing Bearish risks.
-4. 📰 LIVE NEWS & OI CHECK: What do Live News, Fear & Greed, and Open Interest ({oi_obj.get('oi_verdict')}) say about this Long?
-5. 🎯 TACTICAL ACTION FOR LONG TRADER: If Long is aligned, give exact Entry, SL (below active Bid-Hold/Swing), and TP (CDH/PDH/UB/nPOC). If Long is risky/trap right now, tell the trader strictly NOT to buy here and give the exact price level where Long becomes valid."""
+Sirf HINGLISH me in 5 points me Long trade ka kachcha-chittha khol:
+1. 🚨 LONG RISK VERDICT (SAAF FAISLA): Dynamic Score ({scalp_score} | {scalp_bias}) aur [{active_regime}] dekh kar seedha Hinglish me bata ki abhi Long lena **🟢 SAFE & ALIGNED** hai, **🟡 RUK KAR PULLBACK PAR LENA HAI**, ya **🔴 KHATARNAK TRAP HAI (MAT LE)**?
+2. ⚠️ TERE LONG KE KHILAF KHADE KHATRE (AGAINST PARAMETERS): Upar ke BEARISH PARAMETERS me se ek-ek karke bata ki kaun-kaun se factors (jaise CDH/PDH/Swing High resistance, Ask-Cap, 10s Bid Pull, negative msΔ, ya OIΔ) tere Long ka SL kha sakte hain aur unka dynamic weight kitna bhari hai.
+3. ✅ TERE LONG KE SUPPORT WALE FACTORS: Kaunse Bullish parameters tere sath hain, aur kya unka weight virodhi (Bearish) khatro ko harane ke liye kaafi hai ya nahi?
+4. 📰 LIVE NEWS AUR OPEN INTEREST (OIΔ) KA ASAR: News, Fear & Greed, aur Live OI ({oi_obj.get('oi_verdict')}) Long ke bare me kya bol rahe hain?
+5. 🎯 AB KYA KARNA HAI (EXACT PLAN): Agar Long sahi hai toh exact Entry, SL (active Bid-Hold/Swing ke niche), aur TP (UB/nPOC/CDH) bata. Agar abhi Long galat/risky hai toh saaf mana kar aur bata ki kis exact price level par aane ke baad Long dekhna chahiye."""
 
     elif "main short trade dekh raha hu" in q_low:
-        prompt = f"""You are a ruthless Institutional Risk Auditor & Orderflow Mentor speaking in sharp, practical Hinglish.
+        prompt = f"""Tu ek pakka Desi Institutional Risk Auditor aur Orderflow Mentor hai. Jawab 100% HINGLISH me de.
 {context_truth}
 
-TRADER'S INTENT: The trader wants to take a **SHORT (SELL)** trade on {symbol} ({timeframe}) right now.
+TRADER KA SAWAL: Trader abhi {symbol} ({timeframe}) me **SHORT (SELL)** trade lena chahta hai.
 
-LIVE BREAKING CRYPTO NEWS:
+LIVE NEWS:
 {news_block}
 
-FULL TELEMETRY:
+TELEMETRY:
 {json.dumps(engine_data, separators=(",", ":"))}
 
-Audit this SHORT idea ruthlessly in 5 sharp Hinglish points:
-1. 🚨 SHORT RISK VERDICT (CLEAR STAND): Based on Dynamic Net Score ({scalp_score} | {scalp_bias}) in regime [{active_regime}], is taking a SHORT right now **🔴 LOW-RISK & ALIGNED**, **🟠 MODERATE-RISK (WAIT FOR BOUNCE/POC BREAK)**, or **🚫 HIGH-RISK SQUEEZE TRAP (DO NOT SHORT)**?
-2. ⚠️ PARAMETERS STANDING AGAINST YOUR SHORT (SQUEEZE / SL-HUNT RISKS): Explicitly list EVERY Bullish parameter from ALL BULLISH PARAMETERS above (including Key Low support like CDL/PDL/Swing Low, surviving Bid-Holds, Iceberg Bids, 10s Ask Pulls, positive msΔ, or OI buildup) and explain how much dynamic weight they carry against this Short right now.
-3. ✅ SUPPORTING PARAMETERS vs OPPOSING WEIGHT: List the Bearish parameters supporting Short and state clearly whether their dynamic weight in [{active_regime}] is strong enough to beat the opposing Bullish squeeze risks.
-4. 📰 LIVE NEWS & OI CHECK: What do Live News, Fear & Greed, and Open Interest ({oi_obj.get('oi_verdict')}) say about this Short?
-5. 🎯 TACTICAL ACTION FOR SHORT TRADER: If Short is aligned, give exact Entry, SL (above active Ask-Cap/Swing), and TP (CDL/PDL/UB/nPOC). If Short is risky/trap right now, tell the trader strictly NOT to short here and give the exact price level where Short becomes valid."""
+Sirf HINGLISH me in 5 points me Short trade ka kachcha-chittha khol:
+1. 🚨 SHORT RISK VERDICT (SAAF FAISLA): Dynamic Score ({scalp_score} | {scalp_bias}) aur [{active_regime}] dekh kar seedha Hinglish me bata ki abhi Short lena **🔴 SAFE & ALIGNED** hai, **🟠 RUK KAR BOUNCE/BREAK PAR LENA HAI**, ya **🚫 SQUEEZE TRAP HAI (SHORT MAT KAR)**?
+2. ⚠️ TERE SHORT KE KHILAF KHADE KHATRE (AGAINST PARAMETERS): Upar ke BULLISH PARAMETERS me se ek-ek karke bata ki kaun-kaun se factors (jaise CDL/PDL/Swing Low support, zinda Bid-Hold, Iceberg Bids, 10s Ask Pull, positive msΔ, ya OIΔ) tujhe squeeze karke tera SL uda sakte hain aur unka weight kitna hai.
+3. ✅ TERE SHORT KE SUPPORT WALE FACTORS: Kaunse Bearish parameters tere sath hain, aur kya unka dynamic weight Bullish factors ko daba pa raha hai ya nahi?
+4. 📰 LIVE NEWS AUR OPEN INTEREST (OIΔ) KA ASAR: News, Fear & Greed, aur Live OI ({oi_obj.get('oi_verdict')}) Short ke bare me kya bol rahe hain?
+5. 🎯 AB KYA KARNA HAI (EXACT PLAN): Agar Short sahi hai toh exact Entry, SL (active Ask-Cap/Swing ke upar), aur TP (UB/nPOC/CDL) bata. Agar abhi Short trap hai toh saaf mana kar aur bata ki kis exact level ke tutne ya reject hone par Short banta hai."""
 
     elif (not q_low) or ("abhi live sa engine data ke hisab se" in q_low):
-        prompt = f"""You are a decisive Institutional Crypto Quant & Orderflow Mentor speaking in sharp, practical Hinglish.
+        prompt = f"""Tu ek decisive Desi Institutional Crypto Quant Mentor hai. Jawab 100% HINGLISH me de (pure English sentences mat likhna!).
 {context_truth}
 
 Asset: {symbol} ({timeframe})
 
-LIVE BREAKING CRYPTO NEWS:
+LIVE NEWS:
 {news_block}
 
-FULL TELEMETRY:
+TELEMETRY:
 {json.dumps(engine_data, separators=(",", ":"))}
 
-Give a decisive, one-way institutional market assessment in 5 short Hinglish points:
-1. ⚖️ DECISIVE STAND & REGIME: State the active regime [{active_regime}], Scalp Verdict ({scalp_bias} | Score: {scalp_score}), and Intraday Campaign ({intra_bias} | Score: {intra_score}). Take ONE clear stand (Bulls or Bears or exact Wait trigger)—zero diplomacy!
-2. 🔥 DYNAMIC WEIGHT X-RAY (WHY THIS SIDE WINS): Explain which tools got the highest dynamic multiplier at the current location (e.g., Absorption + >=10s Wall Pull + msΔ + OI at CDH/CDL/Swing High-Low vs Surviving Walls at POC) and why they defeated the opposing signals.
-3. 🏛️ KEY LIQUIDITY POOLS (DAY HIGH/LOW & SWING X-RAY): Analyze current price relative to CDH ({key_lvls.get('current_day_high')}), CDL ({key_lvls.get('current_day_low')}), PDH ({key_lvls.get('prev_day_high')}), PDL ({key_lvls.get('prev_day_low')}), and 30c/6c Swings—is it a fake sweep reversal or real vacuum breakout?
-4. 📰 LIVE NEWS & OPEN INTEREST: Impact of breaking news, Fear & Greed, and Live OI ({oi_obj.get('oi_verdict')}).
-5. 🎯 ONE-WAY EXECUTION PLAN: Exact Entry, SL (behind defending wall), and TP (nearest UB/nPOC/Day level) for ONLY the winning direction."""
+Sirf HINGLISH me 5 sharp points me apna ek-tarfa faisla suna:
+1. ⚖️ SAAF FAISLA (NO DIPLOMACY): Active regime [{active_regime}], Scalp Verdict ({scalp_bias} | Score: {scalp_score}), aur Intraday Campaign ({intra_bias} | Score: {intra_score}) bata. Bina gol-mol baat kiye saaf bol ki abhi kis side (BULLS ya BEARS) ka palda bhari hai!
+2. 🔥 DYNAMIC WEIGHT KI TAKKAR (KAUN KYU JEETA): Hinglish me samjha ki abhi ke level par kin parameters ko sabse bada multiplier mila (jaise High/Low par Absorption + 10sPΔ + msΔ + OIΔ ya POC par Surviving Walls) aur unhone dusri side ke signals ko kaise hara diya.
+3. 🏛️ DAY HIGH/LOW AUR SWING LIQUIDITY X-RAY: CDH ({key_lvls.get('current_day_high')}), CDL ({key_lvls.get('current_day_low')}), PDH ({key_lvls.get('prev_day_high')}), PDL ({key_lvls.get('prev_day_low')}), aur 30c/6c Swing ke hisab se bata ki market fake sweep reversal bana raha hai ya real vacuum breakout.
+4. 📰 LIVE NEWS AUR OPEN INTEREST (OIΔ): Breaking news, Fear & Greed, aur Live OI ({oi_obj.get('oi_verdict')}) kya ishara kar rahe hain?
+5. 🎯 EK-TARFA TRADE PLAN: Jeetne wali disha ke liye exact Entry, SL (defending wall ke piche), aur TP (nearest UB/nPOC/Day level) bata."""
 
     else:
-        prompt = f"""You are a ruthless, practical Institutional Crypto Orderflow Mentor speaking in sharp Hinglish.
+        prompt = f"""Tu ek pakka Desi Institutional Crypto Orderflow Mentor hai. Jawab 100% HINGLISH (Roman Hindi) me hi dena, English me mat likhna!
 {context_truth}
 
 Asset: {symbol} ({timeframe})
-TRADER'S CUSTOM MESSAGE / CHART OBSERVATION: "{question}"
+TRADER KA KHUD KA LIKHA SAWAL / OBSERVATION: "{question}"
 
-LIVE BREAKING CRYPTO NEWS:
+LIVE NEWS:
 {news_block}
 
-FULL TELEMETRY:
+TELEMETRY:
 {json.dumps(engine_data, separators=(",", ":"))}
 
-INSTRUCTIONS FOR YOUR REPLY:
-- Directly answer the exact words and chart setup the trader typed: "{question}".
-- Cross-check their view against the Active Regime [{active_regime}], Key Liquidity Levels (CDH/CDL, PDH/PDL, 30c/6c Swings), Dynamic Component Weights, >=10s Wall Pulls vs Millisecond msΔ, Live OI ({oi_obj.get('oi_verdict')}), and Live News.
-- Highlight both what supports their view AND what stands against them as a trap, then take a 100% clear, non-diplomatic stand with exact price levels."""
+JAWAB DENE KE NIYAM (100% HINGLISH ME):
+- Trader ne jo likha hai ("{question}"), seedha uski baat ka jawab de.
+- Uske view ko Active Regime [{active_regime}], Day/Swing High-Low (CDH/CDL, PDH/PDL), Dynamic Weights, >=10s Wall Pulls vs Millisecond msΔ, Live OI ({oi_obj.get('oi_verdict')}), aur Live News se mila kar bata ki kaunse parameters uske sath hain aur kaunse uske khilaf khatra ban kar khade hain.
+- Bina diplomatic huye ek-tarfa saaf faisla aur exact price levels (Entry, SL, TP) Hinglish me bata."""
 
     try:
         g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
@@ -5424,7 +5548,7 @@ INSTRUCTIONS FOR YOUR REPLY:
             return jsonify({"status": "error", "message": "Gemini server busy tha, ek baar phir ASK AI dabayein."}), 500
 
         news_header = "📰 === LIVE CRYPTO NEWS & SENTIMENT DESK ===\n" + "\n".join(f"• {h}" for h in live_news[:4])
-        final_output = f"{news_header}\n\n" + "="*55 + f"\n\n🧠 === GEMINI MENTOR AI ({used_model} | DYNAMIC AUDIT) ===\n{reply_text}"
+        final_output = f"{news_header}\n\n" + "="*55 + f"\n\n🧠 === GEMINI MENTOR AI ({used_model} | DESI HINGLISH AUDIT) ===\n{reply_text}"
         return jsonify({"status": "ok", "reply": final_output})
 
     except Exception as e:
