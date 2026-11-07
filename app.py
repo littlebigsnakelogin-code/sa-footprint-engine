@@ -3913,20 +3913,22 @@ function drawAll() {
         // A Bid Wall is VALID while live candle is testing/wicking it (up to 3.5 steps),
         // but IMMEDIATELY INVALID if a subsequent closed candle closed below it (or live runaway > 3.5 steps)!
         // =========================================================================
+        // =========================================================================
         // UPGRADED WALL VALIDITY & BROKEN/RECLAIMED INSTITUTIONAL WALL TRACKER
+        // (Anchored to Level Price — NEVER flips on 1-second green/red candle color!)
         // =========================================================================
         const isBidWallValidOnTf = (wallPx, formedIdx) => {
             for (let m = formedIdx + 1; m < candles.length - 1; m++) {
-                if (candles[m].close < wallPx - domStep * 0.20) return false;
+                if (candles[m].close < wallPx - domStep * 0.25) return false;
             }
-            if (lastC.close < wallPx - domStep * 0.35) return false;
+            if (lastC.close < wallPx - domStep * 0.40) return false;
             return true;
         };
         const isAskWallValidOnTf = (wallPx, formedIdx) => {
             for (let m = formedIdx + 1; m < candles.length - 1; m++) {
-                if (candles[m].close > wallPx + domStep * 0.20) return false;
+                if (candles[m].close > wallPx + domStep * 0.25) return false;
             }
-            if (lastC.close > wallPx + domStep * 0.35) return false;
+            if (lastC.close > wallPx + domStep * 0.40) return false;
             return true;
         };
 
@@ -4007,8 +4009,8 @@ function drawAll() {
                     const volRatio = clusSell / Math.max(effCellBench, 0.001);
                     const wMult = Math.min(3.2, Math.max(1.0, volRatio / 1.55));
                     let hadDeeperBreak = false;
-                    for (let m = globalCandleIdx + 1; m < candles.length; m++) {
-                        if (candles[m].low < gl.price - domStep * 0.45) hadDeeperBreak = true;
+                    for (let m = globalCandleIdx + 1; m < candles.length - 1; m++) {
+                        if (candles[m].close < gl.price - domStep * 0.30) hadDeeperBreak = true;
                     }
 
                     if (bidValid && !hadDeeperBreak) {
@@ -4017,7 +4019,7 @@ function drawAll() {
                         recentBidAbsIdx = Math.max(recentBidAbsIdx, sIdx);
                         if (lowestValidBidHold === null || gl.price < lowestValidBidHold) lowestValidBidHold = gl.price;
                         domWallStatusMap.set(k, { state: 'BID_INTACT', wt: wMult, vol: clusSell, sIdx });
-                    } else if (hadDeeperBreak && lastC.close > gl.price + domStep * 0.15 && lastC.close > lastC.open) {
+                    } else if (hadDeeperBreak && prevClosedC.close > gl.price + domStep * 0.20 && lastC.close > gl.price + domStep * 0.20) {
                         rBidAbs++;
                         reclaimBidCnt++;
                         reclaimedBidWeight += wMult * 1.25;
@@ -4038,8 +4040,8 @@ function drawAll() {
                     const volRatio = clusBuy / Math.max(effCellBench, 0.001);
                     const wMult = Math.min(3.2, Math.max(1.0, volRatio / 1.55));
                     let hadHigherBreak = false;
-                    for (let m = globalCandleIdx + 1; m < candles.length; m++) {
-                        if (candles[m].high > gl.price + domStep * 0.45) hadHigherBreak = true;
+                    for (let m = globalCandleIdx + 1; m < candles.length - 1; m++) {
+                        if (candles[m].close > gl.price + domStep * 0.30) hadHigherBreak = true;
                     }
 
                     if (askValid && !hadHigherBreak) {
@@ -4048,7 +4050,7 @@ function drawAll() {
                         recentAskAbsIdx = Math.max(recentAskAbsIdx, sIdx);
                         if (highestValidAskCap === null || gl.price > highestValidAskCap) highestValidAskCap = gl.price;
                         domWallStatusMap.set(k, { state: 'ASK_INTACT', wt: wMult, vol: clusBuy, sIdx });
-                    } else if (hadHigherBreak && lastC.close < gl.price - domStep * 0.15 && lastC.close < lastC.open) {
+                    } else if (hadHigherBreak && prevClosedC.close < gl.price - domStep * 0.20 && lastC.close < gl.price - domStep * 0.20) {
                         rAskAbs++;
                         reclaimAskCnt++;
                         reclaimedAskWeight += wMult * 1.25;
@@ -4100,23 +4102,23 @@ function drawAll() {
             const wStat = domWallStatusMap.get(k) || null;
             const distTicks = Math.round(Math.abs(p - liveCenterP) / domStep);
 
-            // CATEGORY 2 (>=10s Heavy Institutional Resting Wall Reaction):
             const aged10sBp = Math.max(st.bp || 0, rawD.agedBp || 0);
             const aged10sAp = Math.max(st.ap || 0, rawD.agedAp || 0);
             const aged10sBidAbs = rawD.agedBidExec || 0;
             const aged10sAskAbs = rawD.agedAskExec || 0;
 
-            // CATEGORY 1 (Live Millisecond DOM Flow: <10s Flash Pulls + Adds):
             const msFlashBp = rawD.flashBp || 0;
             const msFlashAp = rawD.flashAp || 0;
 
             const totRawBp = aged10sBp + msFlashBp;
             const totRawAp = aged10sAp + msFlashAp;
 
-            const closedCandleKeptBid = (st.lastFormedIdx === candles.length - 1) || (prevClosedC.close >= p - domStep * 0.20);
-            const closedCandleKeptAsk = (st.lastFormedIdx === candles.length - 1) || (prevClosedC.close <= p + domStep * 0.20);
-            const priceHoldingAboveBid = (lastC.close > p + domStep * 0.20) || (lastC.close >= p - domStep * 0.25 && (lastC.close >= lastC.open || closePos >= 0.45));
-            const priceCappedBelowAsk = (lastC.close < p - domStep * 0.20) || (lastC.close <= p + domStep * 0.25 && (lastC.close <= lastC.open || closePos <= 0.55));
+            // ANTI-PENDULUM FIX: Wall survival depends ONLY on whether price stays above/below the wall level,
+            // NEVER on whether the current live candle is temporarily green or red!
+            const closedCandleKeptBid = (st.lastFormedIdx === candles.length - 1) || (prevClosedC.close >= p - domStep * 0.25);
+            const closedCandleKeptAsk = (st.lastFormedIdx === candles.length - 1) || (prevClosedC.close <= p + domStep * 0.25);
+            const priceHoldingAboveBid = lastC.close >= p - domStep * 0.30;
+            const priceCappedBelowAsk = lastC.close <= p + domStep * 0.30;
 
             const bidHeldAlive = (wStat && wStat.state === 'BID_INTACT') || (
                 closedCandleKeptBid && priceHoldingAboveBid
@@ -4132,7 +4134,7 @@ function drawAll() {
 
             const brkBidAlive = !bidHeldAlive && (
                 (wStat && wStat.state === 'BID_BROKEN') || (
-                    lastC.close < p - domStep * 0.30
+                    lastC.close < p - domStep * 0.35
                     && (st.sell >= effCellBench * 1.25 || rawD.iceBid >= effCellBench * 0.50 || aged10sBidAbs >= effCellBench * 0.60)
                     && st.sell > st.buy * 1.25
                 )
@@ -4140,7 +4142,7 @@ function drawAll() {
 
             const brkAskAlive = !askCapAlive && (
                 (wStat && wStat.state === 'ASK_BROKEN') || (
-                    lastC.close > p + domStep * 0.30
+                    lastC.close > p + domStep * 0.35
                     && (st.buy >= effCellBench * 1.25 || rawD.iceAsk >= effCellBench * 0.50 || aged10sAskAbs >= effCellBench * 0.60)
                     && st.buy > st.sell * 1.25
                 )
@@ -4180,8 +4182,6 @@ function drawAll() {
             totMsBidAdd += r.rawD.msBidAdd;
             totMsAskAdd += r.rawD.msAskAdd;
 
-            // UPGRADE: Only credit Iceberg & 10sAbs to Intact Defense if the wall HELD (or Reclaimed)!
-            // If the wall was broken through, credit it to Broken/Liquidated Whale Memory!
             if ((r.bidHeldAlive || r.reclaimBidAlive) && r.p <= lastC.close + domStep * 0.35) {
                 totIceBid += r.rawD.iceBid;
                 totAged10sBidAbs += r.aged10sBidAbs;
@@ -4207,18 +4207,15 @@ function drawAll() {
             maxRowVal = Math.max(maxRowVal, r.st.buy, r.st.sell, r.totRawBp, r.totRawAp, r.bRest, r.aRest);
         });
 
-        // CATEGORY 2 METRIC (>=10s Institutional Wall Reaction: Pulled Fake Wall vs Absorbed Real Wall)
         const aged10sPullDelta = totAged10sBp - totAged10sAp;
         const aged10sAbsDelta = totAged10sBidAbs - totAged10sAskAbs;
 
-        // CATEGORY 1 METRIC (100% Render-Side 3.5s Sliding Window Millisecond Impulse & Trap Detector)
         const srvMs = obData.ms_telemetry || {};
         const msLiveDomDelta = (srvMs.ms_delta !== undefined)
             ? Number(srvMs.ms_delta)
             : ((totMsBidAdd - totFlashBp) - (totMsAskAdd - totFlashAp));
         const msSrvState = srvMs.state || 'NEU';
         const msSrvLabel = srvMs.dir_label || '⚪MS:NEU';
-        const domPullDelta = (totAged10sBp + totFlashBp) - (totAged10sAp + totFlashAp);
 
         const curRvol = (lastC.volume || 0) / avgFlowVol;
         const prevPoc = prevClosedC.poc != null ? prevClosedC.poc : (prevClosedC.high + prevClosedC.low) * 0.5;
@@ -4233,7 +4230,6 @@ function drawAll() {
             }
         }
 
-        // Unified Old Swing High & Old Swing Low (Strict Last 6 Closed Candles)
         let prevSwingHigh = -Infinity, prevSwingLow = Infinity;
         for (let k = Math.max(0, candles.length - 7); k < candles.length - 1; k++) {
             if (candles[k].high > prevSwingHigh) prevSwingHigh = candles[k].high;
@@ -4243,6 +4239,34 @@ function drawAll() {
         const closedCandles = candles.length > 2 ? candles.slice(0, -1) : candles;
         const closed6 = closedCandles.slice(-6);
         const avgCandleRange = closed6.reduce((s, x) => s + Math.max(x.high - x.low, rawStep), 0) / Math.max(1, closed6.length);
+
+        // =========================================================================
+        // SIDEWAYS / TWO-WAY EQUAL PRESSURE & OVERLAPPING CHOP DETECTOR
+        // =========================================================================
+        // 1. Check 6-Candle Rotational Efficiency & Color Alternation (Red-Green-Red-Green Chop)
+        let sumRanges6 = 0, colorFlips = 0;
+        const recentSeq = candles.slice(-6);
+        recentSeq.forEach((sc, idx) => {
+            sumRanges6 += Math.max(sc.high - sc.low, rawStep);
+            if (idx > 0) {
+                const curDir = sc.close >= sc.open ? 1 : -1;
+                const prevDir = recentSeq[idx - 1].close >= recentSeq[idx - 1].open ? 1 : -1;
+                if (curDir !== prevDir) colorFlips++;
+            }
+        });
+        const netMove6 = recentSeq.length >= 2 ? Math.abs(lastC.close - recentSeq[0].open) : 0;
+        const rotationalEff6 = netMove6 / Math.max(sumRanges6, rawStep);
+
+        // 2. Check 3-Candle Execution Balance (Are both Buyers and Sellers pounding equally?)
+        const execTotal3c = totExecBuy + totExecSell;
+        const execImbalanceRatio = execTotal3c > 0 ? (Math.abs(totExecBuy - totExecSell) / execTotal3c) : 0;
+        const bothExecStrongAndEqual = (execTotal3c >= avgFlowVol * 1.2) && (execImbalanceRatio < 0.16);
+
+        // 3. Check if Live Price is still trapped inside the recent 5-candle overlapping box
+        const box5 = closedCandles.slice(-5);
+        const box5Hi = box5.length > 0 ? Math.max(...box5.map(x => x.high)) : lastC.high;
+        const box5Lo = box5.length > 0 ? Math.min(...box5.map(x => x.low)) : lastC.low;
+        const trappedInsideBox5 = (lastC.close <= box5Hi - domStep * 0.20) && (lastC.close >= box5Lo + domStep * 0.20);
 
         let anchorBullScore = 0, anchorBearScore = 0;
         let anchorSupportPx = null, anchorResistPx = null;
@@ -4254,9 +4278,8 @@ function drawAll() {
             const ccRvol = (cc.volume || 0) / avgFlowVol;
             const rWt = ccRvol < 0.65 ? 0.45 : (ccRvol >= 1.3 ? 1.30 : 1.0);
 
-            // Upgraded: Only keep closed-candle anchor support/resistance if BOTH prevClosedC and live lastC haven't broken it!
-            const bullHeld = prevClosedC.close >= cc.low && lastC.close >= cc.low - domStep * 0.20;
-            const bearHeld = prevClosedC.close <= cc.high && lastC.close <= cc.high + domStep * 0.20;
+            const bullHeld = prevClosedC.close >= cc.low && lastC.close >= cc.low - domStep * 0.25;
+            const bearHeld = prevClosedC.close <= cc.high && lastC.close <= cc.high + domStep * 0.25;
 
             if (bullHeld && ccDelta < -effCellBench * 0.35 && ccClosePos >= 0.55) {
                 anchorBullScore += Math.round(20 * rWt);
@@ -4279,58 +4302,133 @@ function drawAll() {
             + Math.min(2.2, totIceAsk / Math.max(effCellBench * 1.2, 1))
             + Math.min(2.2, totAged10sAskAbs / Math.max(effCellBench * 1.2, 1));
 
-        if (totBullAbsPower > totBearAbsPower) anchorBullScore += Math.min(32, Math.round(14 + (totBullAbsPower - totBearAbsPower) * 7));
-        else if (totBearAbsPower > totBullAbsPower) anchorBearScore += Math.min(32, Math.round(14 + (totBearAbsPower - totBullAbsPower) * 7));
+        if (totBullAbsPower > totBearAbsPower) anchorBullScore += Math.min(30, Math.round(12 + (totBullAbsPower - totBearAbsPower) * 6));
+        else if (totBearAbsPower > totBullAbsPower) anchorBearScore += Math.min(30, Math.round(12 + (totBearAbsPower - totBullAbsPower) * 6));
 
-        if (sPocUp > sPocDn) anchorBullScore += 14;
-        else if (sPocDn > sPocUp) anchorBearScore += 14;
-
-        // If a newer Ask-Cap formed AFTER the last Bid-Hold and price is below it, decay stale Bull Anchor!
-        if (recentAskAbsIdx > recentBidAbsIdx && highestValidAskCap !== null && lastC.close < highestValidAskCap) {
-            anchorBullScore = Math.round(anchorBullScore * 0.40);
-        } else if (recentBidAbsIdx > recentAskAbsIdx && lowestValidBidHold !== null && lastC.close > lowestValidBidHold) {
-            anchorBearScore = Math.round(anchorBearScore * 0.40);
-        }
+        if (sPocUp > sPocDn) anchorBullScore += 12;
+        else if (sPocDn > sPocUp) anchorBearScore += 12;
 
         const isBigExpansionCandle = cRange >= avgCandleRange * 1.55;
-        const bodySize = Math.abs(lastC.close - lastC.open);
-        const upperWick = lastC.high - Math.max(lastC.open, lastC.close);
-        const lowerWick = Math.min(lastC.open, lastC.close) - lastC.low;
 
-        // STAGE-1 EARLY ABSORPTION SIGNALS (Volume-Weighted Bid-Held / Ask-Cap + Candle Close Confirmation!)
+        // =========================================================================
+        // INDEPENDENT BULL vs BEAR POWER & OPPOSITION WEAKNESS VERIFICATION
+        // (Rule: Buying Pressure ONLY works if Selling is WEAK; Selling ONLY works if Buying is WEAK!)
+        // =========================================================================
+        const minBookFloor = effCellBench * 1.25;
+        let liveDomFlowState = msSrvState;
+        if (liveDomFlowState === 'BULL' || (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25 && msLiveDomDelta >= 0)) {
+            liveDomFlowState = 'BULL';
+        } else if (liveDomFlowState === 'BEAR' || (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25 && msLiveDomDelta <= 0)) {
+            liveDomFlowState = 'BEAR';
+        }
+
+        let wall10sState = 'NEU';
+        if (aged10sPullDelta < -effCellBench * 0.18 || (aged10sAbsDelta > effCellBench * 0.35 && totBullAbsPower > totBearAbsPower)) wall10sState = 'BULL';
+        else if (aged10sPullDelta > effCellBench * 0.18 || (aged10sAbsDelta < -effCellBench * 0.35 && totBearAbsPower > totBullAbsPower)) wall10sState = 'BEAR';
+
+        // Calculate INDEPENDENT Bull Power (0 to 100) and INDEPENDENT Bear Power (0 to 100)
+        // WITHOUT using live candle red/green flicker!
+        let indBullPower = 0;
+        let indBearPower = 0;
+
+        // 1. Intact Absorption Power (Bid-Held vs Ask-Cap)
+        indBullPower += Math.min(32, Math.round(totBullAbsPower * 10));
+        indBearPower += Math.min(32, Math.round(totBearAbsPower * 10));
+
+        // 2. Broken / Liquidated Wall Power
+        if (reclaimBidCnt > 0) indBullPower += Math.min(20, Math.round(reclaimedBidWeight * 6));
+        if (reclaimAskCnt > 0) indBearPower += Math.min(20, Math.round(reclaimedAskWeight * 6));
+        if (brkAskCnt > 0 && rAskAbs === 0 && lastC.close > prevClosedC.high) indBullPower += Math.min(18, Math.round(brokenAskLiqWeight * 5));
+        if (brkBidCnt > 0 && rBidAbs === 0 && lastC.close < prevClosedC.low) indBearPower += Math.min(18, Math.round(brokenBidLiqWeight * 5));
+
+        // 3. >=10s Wall Pulls (Spoof / Vacuum)
+        if (aged10sPullDelta < -effCellBench * 0.18) indBullPower += 16;
+        else if (aged10sPullDelta > effCellBench * 0.18) indBearPower += 16;
+
+        // 4. Displacement Sweeps (⚡) & 3-Candle Execution Dominance
+        indBullPower += Math.min(16, dispBullLevels * 6);
+        indBearPower += Math.min(16, dispBearLevels * 6);
+        if (execImbalanceRatio >= 0.18) {
+            if (totExecBuy > totExecSell) indBullPower += Math.min(14, Math.round(execImbalanceRatio * 35));
+            else indBearPower += Math.min(14, Math.round(execImbalanceRatio * 35));
+        }
+
+        // 5. Closed-Candle Anchor & POC Migration (Stable Backbone)
+        indBullPower += Math.min(18, Math.round(anchorBullScore * 0.28));
+        indBearPower += Math.min(18, Math.round(anchorBearScore * 0.28));
+        if (prevClosedC.close >= prevPoc && lastC.close >= curPoc) indBullPower += 8;
+        if (prevClosedC.close <= prevPoc && lastC.close <= curPoc) indBearPower += 8;
+
+        // 6. Live Millisecond DOM Flow (Capped so 1s ticks cannot overpower structure)
+        if (liveDomFlowState === 'BULL') indBullPower += 8;
+        else if (liveDomFlowState === 'BEAR') indBearPower += 8;
+
+        // =========================================================================
+        // OPPOSITION WEAKNESS & TWO-WAY SIDEWAYS FIGHT CHECK (THE CORE FIX!)
+        // =========================================================================
+        const maxSidePower = Math.max(indBullPower, indBearPower, 1);
+        const minSidePower = Math.min(indBullPower, indBearPower);
+        const netPowerDiff = indBullPower - indBearPower;
+        // Imbalance Ratio: 0.0 = 100% Equal Sideways Fight; 0.50+ = Strong One-Sided Imbalance!
+        const powerImbalanceRatio = Math.abs(netPowerDiff) / maxSidePower;
+
+        // Is Selling WEAK? (Required for LONG!)
+        const sellingIsWeak = (
+            indBullPower >= 34
+            && indBearPower <= indBullPower * 0.52
+            && totBearAbsPower <= Math.max(0.85, totBullAbsPower * 0.45)
+            && dispBearLevels <= dispBullLevels
+        );
+
+        // Is Buying WEAK? (Required for SHORT!)
+        const buyingIsWeak = (
+            indBearPower >= 34
+            && indBullPower <= indBearPower * 0.52
+            && totBullAbsPower <= Math.max(0.85, totBearAbsPower * 0.45)
+            && dispBullLevels <= dispBearLevels
+        );
+
+        // Is it a TWO-WAY STRONG FIGHT / SIDEWAYS CLUSTER ZONE?
+        // (Both Buyers AND Sellers are strong, or price is chopping red/green inside an overlapping box without imbalance!)
+        const isTwoWayEqualFight = (
+            (indBullPower >= 28 && indBearPower >= 28 && powerImbalanceRatio < 0.38)
+            || (totBullAbsPower >= 1.1 && totBearAbsPower >= 1.1 && Math.abs(totBullAbsPower - totBearAbsPower) < 1.0)
+            || (trappedInsideBox5 && rotationalEff6 < 0.26 && colorFlips >= 2 && powerImbalanceRatio < 0.48)
+            || (bothExecStrongAndEqual && trappedInsideBox5 && powerImbalanceRatio < 0.45)
+        );
+
+        // CONFIRMED STAGE-1 / STAGE-2 SIGNALS (Now Require Opposition Weakness & Closed/Breakout Proof — Not 1s Candle Color!):
         const bidHeldCloseConfirmed = (
-            totBullAbsPower > totBearAbsPower + 0.35
-            && (lastC.close > lastC.open || (lowerWick > bodySize * 0.75 && closePos >= 0.48) || prevClosedC.close > prevClosedC.open)
-            && (lowestValidBidHold === null || lastC.close > lowestValidBidHold + domStep * 0.20)
+            sellingIsWeak && !isTwoWayEqualFight
+            && totBullAbsPower > totBearAbsPower + 0.5
+            && (prevClosedC.close > prevClosedC.open || lastC.close > prevClosedC.high)
+            && (lowestValidBidHold === null || lastC.close > lowestValidBidHold + domStep * 0.25)
         );
         const askCapCloseConfirmed = (
-            totBearAbsPower > totBullAbsPower + 0.35
-            && (lastC.close < lastC.open || (upperWick > bodySize * 0.75 && closePos <= 0.52) || prevClosedC.close < prevClosedC.open)
-            && (highestValidAskCap === null || lastC.close < highestValidAskCap - domStep * 0.20)
+            buyingIsWeak && !isTwoWayEqualFight
+            && totBearAbsPower > totBullAbsPower + 0.5
+            && (prevClosedC.close < prevClosedC.open || lastC.close < prevClosedC.low)
+            && (highestValidAskCap === null || lastC.close < highestValidAskCap - domStep * 0.25)
         );
 
-        // UPGRADED 4-WAY OLD HIGH/LOW LIQUIDITY ENGINE (Requires Real Absorption + Opposite Orderflow Pressure — No Blind Level Guessing!)
-        const bullSweepReject = lastC.low < prevSwingLow && lastC.close > prevSwingLow && (
-            bidHeldCloseConfirmed || reclaimBidCnt > 0 || (
-                closePos >= 0.52 && (rBidAbs > 0 || totIceBid > 0 || totAged10sBidAbs > 0)
-                && (aged10sPullDelta < 0 || msLiveDomDelta > 0 || lastC.close > lastC.open)
-            )
+        // UPGRADED 4-WAY OLD HIGH/LOW LIQUIDITY ENGINE (Only fires when Imbalance + Opposition Weakness is verified!)
+        const bullSweepReject = !isTwoWayEqualFight && sellingIsWeak && lastC.low < prevSwingLow && lastC.close > prevSwingLow && (
+            bidHeldCloseConfirmed || reclaimBidCnt > 0 || (closePos >= 0.58 && totBullAbsPower >= 1.2 && aged10sPullDelta <= 0)
         );
-        const bearSweepReject = lastC.high > prevSwingHigh && lastC.close < prevSwingHigh && (
-            askCapCloseConfirmed || reclaimAskCnt > 0 || (
-                closePos <= 0.48 && (rAskAbs > 0 || totIceAsk > 0 || totAged10sAskAbs > 0)
-                && (aged10sPullDelta > 0 || msLiveDomDelta < 0 || lastC.close < lastC.open)
-            )
+        const bearSweepReject = !isTwoWayEqualFight && buyingIsWeak && lastC.high > prevSwingHigh && lastC.close < prevSwingHigh && (
+            askCapCloseConfirmed || reclaimAskCnt > 0 || (closePos <= 0.42 && totBearAbsPower >= 1.2 && aged10sPullDelta >= 0)
         );
 
         const bullBreakoutDrive = (
-            lastC.high > prevSwingHigh && lastC.close > prevSwingHigh
-            && closePos >= 0.62 && (dispBullLevels > 0 || brkAskCnt > 0) && rAskAbs === 0
+            !isTwoWayEqualFight && sellingIsWeak
+            && lastC.high > prevSwingHigh && lastC.close > prevSwingHigh && lastC.close > box5Hi
+            && closePos >= 0.65 && (dispBullLevels > 0 || brkAskCnt > 0) && rAskAbs === 0
             && (aged10sPullDelta < -effCellBench * 0.15 || msLiveDomDelta > 0 || nearBidRest >= nearAskRest * 1.15)
         );
         const bearBreakdownDrive = (
-            lastC.low < prevSwingLow && lastC.close < prevSwingLow
-            && closePos <= 0.38 && (dispBearLevels > 0 || brkBidCnt > 0) && rBidAbs === 0
+            !isTwoWayEqualFight && buyingIsWeak
+            && lastC.low < prevSwingLow && lastC.close < prevSwingLow && lastC.close < box5Lo
+            && closePos <= 0.35 && (dispBearLevels > 0 || brkBidCnt > 0) && rBidAbs === 0
             && (aged10sPullDelta > effCellBench * 0.15 || msLiveDomDelta < 0 || nearAskRest >= nearBidRest * 1.15)
         );
 
@@ -4342,7 +4440,6 @@ function drawAll() {
         const r20Span = Math.max(r30Hi - r30Lo, rawStep);
         const rangeLocation = (lastC.close - r30Lo) / r20Span;
 
-        // 3-LAYER INSTITUTIONAL LIQUIDITY REFERENCE MEMORY (Day High/Low + PDH/PDL + 30c Major Swing + 6c Micro Swing)
         let prevMajorHigh = -Infinity, prevMajorLow = Infinity;
         for (let k = Math.max(0, candles.length - 30); k < candles.length - 1; k++) {
             if (candles[k].high > prevMajorHigh) prevMajorHigh = candles[k].high;
@@ -4369,233 +4466,176 @@ function drawAll() {
         const oiActive = oiState.active && (Date.now() - oiState.updatedAt < 30000);
         const oiDeltaVal = oiActive ? oiState.oiDelta : 0;
 
-        // PRESERVED & UPGRADED CORE SIGNALS (isBullExhaustionTrap, isBearExhaustionTrap, instBullDrive, instBearDrive, clusterLongBuildup, clusterShortBuildup)
         const isBullExhaustionTrap = (
             bearSweepReject
             || askCapCloseConfirmed
-            || (lastC.close > lastC.open && isBigExpansionCandle && rangeLocation >= 0.78 && !bullBreakoutDrive && (rAskAbs > rBidAbs || totIceAsk > totIceBid * 1.3))
-            || (lastC.close > lastC.open && anchorBearScore > anchorBullScore + 20 && lastC.close < (anchorResistPx || r30Hi))
-            || (lastC.delta > effCellBench * 0.45 && closePos <= 0.44 && rAskAbs >= rBidAbs)
+            || (!isTwoWayEqualFight && buyingIsWeak && lastC.delta > effCellBench * 0.45 && closePos <= 0.40 && rAskAbs > rBidAbs)
         );
 
         const isBearExhaustionTrap = (
             bullSweepReject
             || bidHeldCloseConfirmed
-            || (lastC.close < lastC.open && isBigExpansionCandle && rangeLocation <= 0.22 && !bearBreakdownDrive && (rBidAbs > rAskAbs || totIceBid > totIceAsk * 1.3))
-            || (lastC.close < lastC.open && anchorBullScore > anchorBearScore + 20 && lastC.close > (anchorSupportPx || r30Lo))
-            || (lastC.delta < -effCellBench * 0.45 && closePos >= 0.56 && rBidAbs >= rAskAbs)
+            || (!isTwoWayEqualFight && sellingIsWeak && lastC.delta < -effCellBench * 0.45 && closePos >= 0.60 && rBidAbs > rAskAbs)
         );
 
         const instBullDrive = (
             bullBreakoutDrive || (
-                !isBullExhaustionTrap
+                !isTwoWayEqualFight && sellingIsWeak && !isBullExhaustionTrap
                 && anchorBullScore >= anchorBearScore
-                && (dispBullLevels > dispBearLevels || aged10sPullDelta < -effCellBench * 0.20 || msLiveDomDelta > effCellBench * 0.40)
-                && lastC.close >= curPoc && prevClosedC.close >= prevPoc
-                && closePos >= 0.58
+                && (dispBullLevels > dispBearLevels || aged10sPullDelta < -effCellBench * 0.20)
+                && lastC.close > curPoc && prevClosedC.close >= prevPoc
+                && lastC.close > prevClosedC.high && closePos >= 0.62
             )
         );
 
         const instBearDrive = (
             bearBreakdownDrive || (
-                !isBearExhaustionTrap
+                !isTwoWayEqualFight && buyingIsWeak && !isBearExhaustionTrap
                 && anchorBearScore >= anchorBullScore
-                && (dispBearLevels > dispBullLevels || aged10sPullDelta > effCellBench * 0.20 || msLiveDomDelta < -effCellBench * 0.40)
-                && lastC.close <= curPoc && prevClosedC.close <= prevPoc
-                && closePos <= 0.42
+                && (dispBearLevels > dispBullLevels || aged10sPullDelta > effCellBench * 0.20)
+                && lastC.close < curPoc && prevClosedC.close <= prevPoc
+                && lastC.close < prevClosedC.low && closePos <= 0.38
             )
         );
 
-        const clusterLongBuildup = (anchorBullScore >= anchorBearScore + 12) && !instBearDrive && !askCapCloseConfirmed;
-        const clusterShortBuildup = (anchorBearScore >= anchorBullScore + 12) && !instBullDrive && !bidHeldCloseConfirmed;
+        const clusterLongBuildup = (indBullPower >= indBearPower + 12) && !instBearDrive && !askCapCloseConfirmed;
+        const clusterShortBuildup = (indBearPower >= indBullPower + 12) && !instBullDrive && !bidHeldCloseConfirmed;
 
-        // =========================================================================
-        // UPGRADED DYNAMIC CONTEXT + BROKEN WALL MEMORY + 3-STAGE SYNERGY ENGINE
-        // =========================================================================
         const atKeyHighZone = (lastC.high >= prevSwingHigh || sweptMajorHigh || nearDayHigh);
         const atKeyLowZone = (lastC.low <= prevSwingLow || sweptMajorLow || nearDayLow);
 
-        const hasAskDefense = (rAskAbs > 0 || totIceAsk > effCellBench * 0.35 || totAged10sAskAbs > effCellBench * 0.35);
-        const hasBidDefense = (rBidAbs > 0 || totIceBid > effCellBench * 0.35 || totAged10sBidAbs > effCellBench * 0.35);
-
-        let wall10sState = 'NEU';
-        if (aged10sPullDelta < -effCellBench * 0.18 || (aged10sAbsDelta > effCellBench * 0.32 && lastC.close >= curPoc)) wall10sState = 'BULL';
-        else if (aged10sPullDelta > effCellBench * 0.18 || (aged10sAbsDelta < -effCellBench * 0.32 && lastC.close <= curPoc)) wall10sState = 'BEAR';
-
-        const minBookFloor = effCellBench * 1.25;
-        let liveDomFlowState = msSrvState;
-        if (liveDomFlowState === 'BULL' || (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.25 && msLiveDomDelta >= 0)) {
-            liveDomFlowState = 'BULL';
-        } else if (liveDomFlowState === 'BEAR' || (nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.25 && msLiveDomDelta <= 0)) {
-            liveDomFlowState = 'BEAR';
-        }
-
-        // BROKEN WALL SCENARIOS:
-        // 1. Whale Stop-Hunt Reclaim (Old wall liquidated + New Intact Wall / Reclaim + Close Confirmation!)
-        const whaleStopHuntBullInit = (
+        const whaleStopHuntBullInit = !isTwoWayEqualFight && sellingIsWeak && (
             reclaimBidCnt > 0 || (
                 brkBidCnt > 0 && bidHeldCloseConfirmed
                 && recentBidAbsIdx >= structSet.length - 2
-                && (lastC.close > lastC.open && closePos >= 0.52)
+                && lastC.close > prevClosedC.high
             )
         );
-        const whaleStopHuntBearInit = (
+        const whaleStopHuntBearInit = !isTwoWayEqualFight && buyingIsWeak && (
             reclaimAskCnt > 0 || (
                 brkAskCnt > 0 && askCapCloseConfirmed
                 && recentAskAbsIdx >= structSet.length - 2
-                && (lastC.close < lastC.open && closePos <= 0.48)
+                && lastC.close < prevClosedC.low
             )
         );
 
-        // 2. Liquidated Wall Continuation Fuel (Old wall smashed + NO new defending wall!)
-        const liquidatedBidCascadeBear = (
+        const liquidatedBidCascadeBear = !isTwoWayEqualFight && buyingIsWeak && (
             brkBidCnt > 0 && !bidHeldCloseConfirmed && !whaleStopHuntBullInit
-            && rBidAbs === 0 && lastC.close <= curPoc
+            && rBidAbs === 0 && lastC.close < prevClosedC.low && lastC.close <= curPoc
         );
-        const liquidatedAskSqueezeBull = (
+        const liquidatedAskSqueezeBull = !isTwoWayEqualFight && sellingIsWeak && (
             brkAskCnt > 0 && !askCapCloseConfirmed && !whaleStopHuntBearInit
-            && rAskAbs === 0 && lastC.close >= curPoc
+            && rAskAbs === 0 && lastC.close > prevClosedC.high && lastC.close >= curPoc
         );
 
-        // STAGE-2 HIGH-PROBABILITY CONFIRMATION (Volume-Weighted Absorption + Spoof Pull 10sPΔ or msΔ Support!)
-        const spoofSupportsBull = (aged10sPullDelta < -effCellBench * 0.15 || msLiveDomDelta > effCellBench * 0.20 || liveDomFlowState === 'BULL');
-        const spoofSupportsBear = (aged10sPullDelta > effCellBench * 0.15 || msLiveDomDelta < -effCellBench * 0.20 || liveDomFlowState === 'BEAR');
+        const spoofSupportsBull = (aged10sPullDelta < -effCellBench * 0.18 || (msLiveDomDelta > effCellBench * 0.25 && nearBidRest > nearAskRest * 1.2));
+        const spoofSupportsBear = (aged10sPullDelta > effCellBench * 0.18 || (msLiveDomDelta < -effCellBench * 0.25 && nearAskRest > nearBidRest * 1.2));
 
-        const stage2BullConfirmed = (bidHeldCloseConfirmed || whaleStopHuntBullInit) && spoofSupportsBull;
-        const stage2BearConfirmed = (askCapCloseConfirmed || whaleStopHuntBearInit) && spoofSupportsBear;
+        const stage2BullConfirmed = !isTwoWayEqualFight && sellingIsWeak && (bidHeldCloseConfirmed || whaleStopHuntBullInit) && spoofSupportsBull;
+        const stage2BearConfirmed = !isTwoWayEqualFight && buyingIsWeak && (askCapCloseConfirmed || whaleStopHuntBearInit) && spoofSupportsBear;
 
-        // 4 GOLDEN INSTITUTIONAL COMBOS (Now Strictly Confirmed by Pure Orderflow Pressure — Zero Blind Level Guessing!):
-        const comboHighFakeSweepShort = !bullBreakoutDrive && (
-            whaleStopHuntBearInit || (
-                atKeyHighZone && hasAskDefense && askCapCloseConfirmed
-                && spoofSupportsBear
-                && (lastC.close < lastC.open || closePos <= 0.48 || lastC.close < curPoc)
-            )
+        const comboHighFakeSweepShort = !isTwoWayEqualFight && buyingIsWeak && !bullBreakoutDrive && (
+            whaleStopHuntBearInit || bearSweepReject || (atKeyHighZone && stage2BearConfirmed)
         );
-
-        const comboLowFakeSweepLong = !bearBreakdownDrive && (
-            whaleStopHuntBullInit || (
-                atKeyLowZone && hasBidDefense && bidHeldCloseConfirmed
-                && spoofSupportsBull
-                && (lastC.close > lastC.open || closePos >= 0.52 || lastC.close > curPoc)
-            )
+        const comboLowFakeSweepLong = !isTwoWayEqualFight && sellingIsWeak && !bearBreakdownDrive && (
+            whaleStopHuntBullInit || bullSweepReject || (atKeyLowZone && stage2BullConfirmed)
         );
+        const comboHighRealBreakoutLong = !isTwoWayEqualFight && sellingIsWeak && (bullBreakoutDrive || liquidatedAskSqueezeBull);
+        const comboLowRealBreakdownShort = !isTwoWayEqualFight && buyingIsWeak && (bearBreakdownDrive || liquidatedBidCascadeBear);
 
-        const comboHighRealBreakoutLong = (
-            bullBreakoutDrive || liquidatedAskSqueezeBull || (
-                atKeyHighZone && rAskAbs === 0 && lastC.close > prevSwingHigh
-                && closePos >= 0.60 && (dispBullLevels > 0 || aged10sPullDelta < -effCellBench * 0.18)
-                && (msLiveDomDelta >= 0 || liveDomFlowState === 'BULL')
-            )
-        );
+        // Determine Active Market Context Regime & Dynamic Multipliers
+        let activeRegime = 'SIDEWAYS_TWO_WAY_CLUSTER_FIGHT';
+        let wWall = 1.0, wAnchor = 1.0, wPull10s = 1.0, wMsDom = 0.8, wDisp = 1.0;
 
-        const comboLowRealBreakdownShort = (
-            bearBreakdownDrive || liquidatedBidCascadeBear || (
-                atKeyLowZone && rBidAbs === 0 && lastC.close < prevSwingLow
-                && closePos <= 0.40 && (dispBearLevels > 0 || aged10sPullDelta > effCellBench * 0.18)
-                && (msLiveDomDelta <= 0 || liveDomFlowState === 'BEAR')
-            )
-        );
-
-        // Determine Active Market Context Regime & Dynamic Signal Multipliers (Driven by Orderflow, NOT static High/Low!)
-        let activeRegime = 'MID_RANGE_AUCTION';
-        let wWall = 1.35, wAnchor = 1.0, wPull10s = 1.2, wMsDom = 1.0, wDisp = 1.1;
-
-        if (whaleStopHuntBullInit || whaleStopHuntBearInit) {
-            activeRegime = whaleStopHuntBullInit ? `WHALE_STOP_HUNT_RECLAIM_LONG (${activeLowPoolLbl})` : `WHALE_STOP_HUNT_REJECT_SHORT (${activeHighPoolLbl})`;
-            wWall = 2.2; wPull10s = 2.3; wMsDom = 1.8; wDisp = 1.5; wAnchor = 0.40;
+        if (isTwoWayEqualFight) {
+            activeRegime = `SIDEWAYS_CLUSTER_FIGHT (Bulls:${indBullPower} vs Bears:${indBearPower} | Imb:${Math.round(powerImbalanceRatio * 100)}%)`;
+            wWall = 0.8; wPull10s = 0.6; wMsDom = 0.4; wDisp = 0.7; wAnchor = 0.7;
+        } else if (whaleStopHuntBullInit || whaleStopHuntBearInit) {
+            activeRegime = whaleStopHuntBullInit ? `WHALE_STOP_HUNT_RECLAIM_LONG` : `WHALE_STOP_HUNT_REJECT_SHORT`;
+            wWall = 2.0; wPull10s = 2.0; wMsDom = 1.4; wDisp = 1.5; wAnchor = 0.6;
         } else if (stage2BullConfirmed || stage2BearConfirmed || comboHighFakeSweepShort || comboLowFakeSweepLong) {
-            activeRegime = (stage2BearConfirmed || comboHighFakeSweepShort) ? `STAGE_2_ABSORPTION_PLUS_SPOOF_SHORT` : `STAGE_2_ABSORPTION_PLUS_SPOOF_LONG`;
-            wWall = 2.1; wPull10s = 2.2; wMsDom = 1.75; wDisp = 1.4; wAnchor = 0.45;
-        } else if (comboHighRealBreakoutLong || comboLowRealBreakdownShort) {
-            activeRegime = comboHighRealBreakoutLong ? `REAL_VACUUM_BREAKOUT_LONG` : `REAL_VACUUM_BREAKDOWN_SHORT`;
-            wPull10s = 2.2; wDisp = 2.1; wMsDom = 1.75; wWall = 1.5; wAnchor = 0.85;
-        } else if (bidHeldCloseConfirmed || askCapCloseConfirmed) {
-            activeRegime = bidHeldCloseConfirmed ? `STAGE_1_EARLY_BID_HELD_REVERSAL` : `STAGE_1_EARLY_ASK_CAP_REVERSAL`;
-            wWall = 1.90; wPull10s = 1.65; wMsDom = 1.40; wAnchor = 0.55;
-        } else if (Math.abs(anchorBullScore - anchorBearScore) >= 18 && (sPocUp !== sPocDn)) {
-            activeRegime = anchorBullScore > anchorBearScore ? 'BULL_TREND_PULLBACK_DEFENSE' : 'BEAR_TREND_PULLBACK_DEFENSE';
-            wWall = 1.65; wAnchor = 1.50; wPull10s = 1.15; wMsDom = 0.75;
+            activeRegime = (stage2BearConfirmed || comboHighFakeSweepShort) ? `IMBALANCE_ABS_PLUS_SPOOF_SHORT` : `IMBALANCE_ABS_PLUS_SPOOF_LONG`;
+            wWall = 1.9; wPull10s = 1.9; wMsDom = 1.4; wDisp = 1.4; wAnchor = 0.7;
+        } else if (comboHighRealBreakoutLong || comboLowRealBreakdownShort || instBullDrive || instBearDrive) {
+            activeRegime = (comboHighRealBreakoutLong || instBullDrive) ? `ONE_WAY_BULL_IMBALANCE_DRIVE` : `ONE_WAY_BEAR_IMBALANCE_DRIVE`;
+            wPull10s = 1.9; wDisp = 1.9; wMsDom = 1.4; wWall = 1.4; wAnchor = 1.0;
+        } else if (sellingIsWeak) {
+            activeRegime = `BULL_IMBALANCE_BUILDING (Sellers Weak:${indBearPower} vs Bulls:${indBullPower})`;
+            wWall = 1.5; wAnchor = 1.2; wPull10s = 1.3; wMsDom = 0.9;
+        } else if (buyingIsWeak) {
+            activeRegime = `BEAR_IMBALANCE_BUILDING (Buyers Weak:${indBullPower} vs Bears:${indBearPower})`;
+            wWall = 1.5; wAnchor = 1.2; wPull10s = 1.3; wMsDom = 0.9;
         }
 
-        // 1. Volume-Weighted Intact Absorption Score:
+        // Component 1: Volume-Weighted Intact Absorption Score
         let dynWallPts = 0;
         if (totBullAbsPower > totBearAbsPower) {
-            const netAbs = totBullAbsPower - totBearAbsPower;
-            dynWallPts = Math.min(40, Math.round((10 + netAbs * 6.5) * wWall));
+            dynWallPts = Math.min(36, Math.round((8 + (totBullAbsPower - totBearAbsPower) * 6.5) * wWall));
         } else if (totBearAbsPower > totBullAbsPower) {
-            const netAbs = totBearAbsPower - totBullAbsPower;
-            dynWallPts = -Math.min(40, Math.round((10 + netAbs * 6.5) * wWall));
+            dynWallPts = -Math.min(36, Math.round((8 + (totBearAbsPower - totBullAbsPower) * 6.5) * wWall));
         }
 
-        // 2. Broken / Liquidated Wall Memory vs Reclaim Score:
+        // Component 2: Broken / Liquidated Wall Memory Score
         let brkWallPts = 0;
         let brkWallState = 'NEU';
         let brkWallLbl = 'NoBrokenWalls';
         if (whaleStopHuntBullInit) {
-            brkWallPts = Math.min(24, Math.round(12 + (reclaimedBidWeight + brokenBidLiqWeight) * 4.5));
-            brkWallState = 'BULL';
-            brkWallLbl = `🔥WhaleStopHuntReclaim(+${brkWallPts}pt)`;
+            brkWallPts = Math.min(22, Math.round(10 + (reclaimedBidWeight + brokenBidLiqWeight) * 4.0));
+            brkWallState = 'BULL'; brkWallLbl = `🔥WhaleStopHuntReclaim(+${brkWallPts}pt)`;
         } else if (whaleStopHuntBearInit) {
-            brkWallPts = -Math.min(24, Math.round(12 + (reclaimedAskWeight + brokenAskLiqWeight) * 4.5));
-            brkWallState = 'BEAR';
-            brkWallLbl = `🔥WhaleStopHuntReject(${brkWallPts}pt)`;
+            brkWallPts = -Math.min(22, Math.round(10 + (reclaimedAskWeight + brokenAskLiqWeight) * 4.0));
+            brkWallState = 'BEAR'; brkWallLbl = `🔥WhaleStopHuntReject(${brkWallPts}pt)`;
         } else if (liquidatedBidCascadeBear) {
-            brkWallPts = -Math.min(22, Math.round(10 + brokenBidLiqWeight * 5.0));
-            brkWallState = 'BEAR';
-            brkWallLbl = `💔BidWallLiquidated(${brkBidCnt}x | ${brkWallPts}pt)`;
+            brkWallPts = -Math.min(20, Math.round(8 + brokenBidLiqWeight * 4.5));
+            brkWallState = 'BEAR'; brkWallLbl = `💔BidWallLiquidated(${brkBidCnt}x | ${brkWallPts}pt)`;
         } else if (liquidatedAskSqueezeBull) {
-            brkWallPts = Math.min(22, Math.round(10 + brokenAskLiqWeight * 5.0));
-            brkWallState = 'BULL';
-            brkWallLbl = `💔AskWallLiquidated(${brkAskCnt}x | +${brkWallPts}pt)`;
+            brkWallPts = Math.min(20, Math.round(8 + brokenAskLiqWeight * 4.5));
+            brkWallState = 'BULL'; brkWallLbl = `💔AskWallLiquidated(${brkAskCnt}x | +${brkWallPts}pt)`;
         } else if (brkBidCnt > 0 || brkAskCnt > 0) {
             brkWallLbl = `BrkBid:${brkBidCnt} / BrkAsk:${brkAskCnt}`;
         }
 
-        // 3. Surviving 6-Candle Anchor & POC Migration Score:
+        // Component 3: Surviving 6c Anchor & POC Migration Score
         let locState = 'NEU';
         let pocStructPts = 0;
-        if (lastC.close >= curPoc && prevClosedC.close >= prevPoc && !askCapCloseConfirmed && !comboHighFakeSweepShort) {
-            pocStructPts += 10; locState = 'BULL';
-        } else if (lastC.close <= curPoc && prevClosedC.close <= prevPoc && !bidHeldCloseConfirmed && !comboLowFakeSweepLong) {
-            pocStructPts -= 10; locState = 'BEAR';
-        }
-        if (sPocUp > sPocDn && !askCapCloseConfirmed && !comboHighFakeSweepShort) pocStructPts += 6;
-        else if (sPocDn > sPocUp && !bidHeldCloseConfirmed && !comboLowFakeSweepLong) pocStructPts -= 6;
+        if (lastC.close > curPoc && prevClosedC.close >= prevPoc) { pocStructPts += 10; locState = 'BULL'; }
+        else if (lastC.close < curPoc && prevClosedC.close <= prevPoc) { pocStructPts -= 10; locState = 'BEAR'; }
+        if (sPocUp > sPocDn) pocStructPts += 6;
+        else if (sPocDn > sPocUp) pocStructPts -= 6;
 
-        const rawAnchorDiff = Math.max(-18, Math.min(18, Math.round((anchorBullScore - anchorBearScore) * 0.40)));
+        const rawAnchorDiff = Math.max(-16, Math.min(16, Math.round((anchorBullScore - anchorBearScore) * 0.35)));
         let dynAnchorPts = Math.round((rawAnchorDiff + pocStructPts) * wAnchor);
 
-        // 4. >=10s Wall Pulling / Absorption Score:
+        // Component 4: >=10s Wall Pull / Absorption Score (Anchored to Pull Delta, NOT live candle color!)
         let dynPull10sPts = 0;
-        if (wall10sState === 'BULL') dynPull10sPts = Math.min(28, Math.round(12 * wPull10s));
-        else if (wall10sState === 'BEAR') dynPull10sPts = -Math.min(28, Math.round(12 * wPull10s));
+        if (wall10sState === 'BULL') dynPull10sPts = Math.min(24, Math.round(11 * wPull10s));
+        else if (wall10sState === 'BEAR') dynPull10sPts = -Math.min(24, Math.round(11 * wPull10s));
 
-        // 5. Displacement, Sweeps & Effort-vs-Result Score:
+        // Component 5: Displacement & Sweep Score
         let dispVsTrapState = 'NEU';
         let deltaState = 'NEU';
         let baseTrigPts = 0;
         if (comboLowFakeSweepLong || comboHighRealBreakoutLong) baseTrigPts += 14;
         else if (comboHighFakeSweepShort || comboLowRealBreakdownShort) baseTrigPts -= 14;
 
-        if (dispBullLevels > dispBearLevels && !askCapCloseConfirmed) { baseTrigPts += 8; dispVsTrapState = 'BULL'; }
-        else if (dispBearLevels > dispBullLevels && !bidHeldCloseConfirmed) { baseTrigPts -= 8; dispVsTrapState = 'BEAR'; }
+        if (dispBullLevels > dispBearLevels) { baseTrigPts += 8; dispVsTrapState = 'BULL'; }
+        else if (dispBearLevels > dispBullLevels) { baseTrigPts -= 8; dispVsTrapState = 'BEAR'; }
 
-        if (isBearExhaustionTrap && bidHeldCloseConfirmed) { baseTrigPts += 10; deltaState = 'BULL'; }
-        else if (isBullExhaustionTrap && askCapCloseConfirmed) { baseTrigPts -= 10; deltaState = 'BEAR'; }
-        else if (instBullDrive) { baseTrigPts += 6; deltaState = 'BULL'; }
-        else if (instBearDrive) { baseTrigPts -= 6; deltaState = 'BEAR'; }
-        let dynTrigPts = Math.max(-28, Math.min(28, Math.round(baseTrigPts * wDisp)));
+        if (isBearExhaustionTrap) { baseTrigPts += 8; deltaState = 'BULL'; }
+        else if (isBullExhaustionTrap) { baseTrigPts -= 8; deltaState = 'BEAR'; }
+        else if (instBullDrive) { baseTrigPts += 8; deltaState = 'BULL'; }
+        else if (instBearDrive) { baseTrigPts -= 8; deltaState = 'BEAR'; }
+        let dynTrigPts = Math.max(-24, Math.min(24, Math.round(baseTrigPts * wDisp)));
 
-        // 6. Live Millisecond DOM Flow (msΔ) Score:
+        // Component 6: Live Millisecond DOM Flow Score
         let baseLiveDomPts = 0;
-        if (liveDomFlowState === 'BULL') baseLiveDomPts += 10;
-        else if (liveDomFlowState === 'BEAR') baseLiveDomPts -= 10;
+        if (liveDomFlowState === 'BULL') baseLiveDomPts += 8;
+        else if (liveDomFlowState === 'BEAR') baseLiveDomPts -= 8;
         if (smtState.bias === 1) baseLiveDomPts += 4;
         else if (smtState.bias === -1) baseLiveDomPts -= 4;
-        let dynLiveDomPts = Math.max(-22, Math.min(22, Math.round(baseLiveDomPts * wMsDom)));
+        let dynLiveDomPts = Math.max(-16, Math.min(16, Math.round(baseLiveDomPts * wMsDom)));
 
-        // 7. LIVE OPEN INTEREST (OIΔ) CONSISTENCY & SYNERGY BOOSTER (100% Symmetrical Bull & Bear!)
+        // Component 7: Open Interest (OIΔ) Synergy (Anchored to Net Orderflow Imbalance, NEVER flips on 1s candle color!)
         let oiPts = 0;
         let oiVerdictTxt = 'OI:STANDBY';
         let oiStateBadge = 'NEU';
@@ -4612,191 +4652,147 @@ function drawAll() {
 
             if (cMode === 'CONSISTENT_UP' || cMode === 'MILD_UP') {
                 const mult = isStrongConsistent ? 1.0 : (isMildConsistent ? 0.6 : 0.3);
-                if (askCapCloseConfirmed || comboHighFakeSweepShort) {
-                    oiPts = -Math.round(16 * mult);
-                    oiStateBadge = 'BEAR';
-                    oiVerdictTxt = `📈OIΔ:${dStr}(BuyersTrapped/NewShorts🔴)`;
-                } else if (bidHeldCloseConfirmed || comboLowFakeSweepLong) {
-                    oiPts = Math.round(16 * mult);
-                    oiStateBadge = 'BULL';
-                    oiVerdictTxt = `📈OIΔ:${dStr}(SellersTrapped/LimitBids🟢)`;
-                } else if (lastC.close > lastC.open && coreOrderflowSum >= 0) {
-                    oiPts = Math.round(12 * mult);
-                    oiStateBadge = 'BULL';
-                    oiVerdictTxt = `📈OIΔ:${dStr}(ConsistentLongAdd🟢)`;
-                } else if (lastC.close < lastC.open && coreOrderflowSum <= 0) {
-                    oiPts = -Math.round(12 * mult);
-                    oiStateBadge = 'BEAR';
-                    oiVerdictTxt = `📈OIΔ:${dStr}(ConsistentShortAdd🔴)`;
+                if (isTwoWayEqualFight) {
+                    oiVerdictTxt = `📈OIΔ:${dStr}(2-WayClusterBuild⚪)`;
+                } else if (buyingIsWeak && coreOrderflowSum <= -12) {
+                    oiPts = -Math.round(14 * mult); oiStateBadge = 'BEAR';
+                    oiVerdictTxt = `📈OIΔ:${dStr}(ShortImbalanceBuild🔴)`;
+                } else if (sellingIsWeak && coreOrderflowSum >= 12) {
+                    oiPts = Math.round(14 * mult); oiStateBadge = 'BULL';
+                    oiVerdictTxt = `📈OIΔ:${dStr}(LongImbalanceBuild🟢)`;
                 } else {
-                    oiVerdictTxt = `📈OIΔ:${dStr}(PositionsBuilding⚪)`;
+                    oiVerdictTxt = `📈OIΔ:${dStr}(PositionsAdding⚪)`;
                 }
             } else if (cMode === 'CONSISTENT_DOWN' || cMode === 'MILD_DOWN') {
                 const mult = isStrongConsistent ? 1.0 : (isMildConsistent ? 0.6 : 0.3);
-                if (askCapCloseConfirmed || whaleStopHuntBearInit) {
-                    oiPts = -Math.round(10 * mult);
-                    oiStateBadge = 'BEAR';
-                    oiVerdictTxt = `📉OIΔ:${dStr}(ShortCoverExhaustion🔴)`;
-                } else if (bidHeldCloseConfirmed || whaleStopHuntBullInit) {
-                    oiPts = Math.round(10 * mult);
-                    oiStateBadge = 'BULL';
-                    oiVerdictTxt = `📉OIΔ:${dStr}(LongLiqFlushBounce🟢)`;
-                } else if (liquidatedBidCascadeBear) {
-                    oiPts = -Math.round(10 * mult);
-                    oiStateBadge = 'BEAR';
-                    oiVerdictTxt = `📉OIΔ:${dStr}(LongsLiquidatingCascade🔴)`;
-                } else if (liquidatedAskSqueezeBull) {
-                    oiPts = Math.round(10 * mult);
-                    oiStateBadge = 'BULL';
-                    oiVerdictTxt = `📉OIΔ:${dStr}(ShortsLiquidatingSqueeze🟢)`;
-                } else if (lastC.close > lastC.open) {
-                    oiPts = -Math.round(4 * mult);
-                    oiVerdictTxt = `📉OIΔ:${dStr}(ShortsCovering/Unwind🟠)`;
+                if (isTwoWayEqualFight) {
+                    oiVerdictTxt = `📉OIΔ:${dStr}(ChopUnwind⚪)`;
+                } else if (sellingIsWeak && (bidHeldCloseConfirmed || whaleStopHuntBullInit)) {
+                    oiPts = Math.round(10 * mult); oiStateBadge = 'BULL';
+                    oiVerdictTxt = `📉OIΔ:${dStr}(StopHuntAbsorbed🟢)`;
+                } else if (buyingIsWeak && (askCapCloseConfirmed || whaleStopHuntBearInit)) {
+                    oiPts = -Math.round(10 * mult); oiStateBadge = 'BEAR';
+                    oiVerdictTxt = `📉OIΔ:${dStr}(ShortSqueezeCapped🔴)`;
                 } else {
-                    oiPts = Math.round(4 * mult);
-                    oiVerdictTxt = `📉OIΔ:${dStr}(LongsClosing/Unwind🟡)`;
+                    oiVerdictTxt = `📉OIΔ:${dStr}(PositionUnwind⚪)`;
                 }
             } else {
-                oiVerdictTxt = `⚖️OIΔ:${dStr}(Choppy/MixedOI⚪)`;
+                oiVerdictTxt = `⚖️OIΔ:${dStr}(ChoppyOI⚪)`;
             }
         }
 
-        let scalpPts = Math.max(-99, Math.min(99, coreOrderflowSum + oiPts));
+        let rawNetPts = coreOrderflowSum + oiPts;
 
-        // 3-STAGE MINIMUM SCORE GUARANTEES (So Early Absorption & Stage-2 Confirmations Never Lag Behind Old Candles!):
-        if (whaleStopHuntBullInit && scalpPts < 42) scalpPts = 42;
-        else if (whaleStopHuntBearInit && scalpPts > -42) scalpPts = -42;
-        else if (stage2BullConfirmed && scalpPts < 36) scalpPts = 36;
-        else if (stage2BearConfirmed && scalpPts > -36) scalpPts = -36;
-        else if (bidHeldCloseConfirmed && totBullAbsPower >= 1.6 && scalpPts < 22) scalpPts = 22;
-        else if (askCapCloseConfirmed && totBearAbsPower >= 1.6 && scalpPts > -22) scalpPts = -22;
-
-        // Anti-Counter-Bounce Guard During Active Wall Liquidation Cascade:
-        if (liquidatedBidCascadeBear && rBidAbs === 0 && scalpPts > -20) {
-            scalpPts = -Math.max(26, Math.abs(brkWallPts));
-        } else if (liquidatedAskSqueezeBull && rAskAbs === 0 && scalpPts < 20) {
-            scalpPts = Math.max(26, Math.abs(brkWallPts));
+        // =========================================================================
+        // THE ANTI-TRAP IMBALANCE GATE (BLOCKS ALL SIGNALS DURING TWO-WAY FIGHT!)
+        // =========================================================================
+        // 1. If Both Buyers & Sellers are strong (isTwoWayEqualFight), compress score into [-16, +16] so it NEVER triggers Long/Short!
+        if (isTwoWayEqualFight) {
+            rawNetPts = Math.max(-16, Math.min(16, Math.round(rawNetPts * 0.32)));
+        }
+        // 2. If Bull score is positive, but Selling is NOT weak (Sellers still have >52% of Bull power), cap below +24 (No Confirmed Long!)
+        else if (rawNetPts > 24 && !sellingIsWeak) {
+            rawNetPts = 22;
+        }
+        // 3. If Bear score is negative, but Buying is NOT weak (Buyers still have >52% of Bear power), cap above -24 (No Confirmed Short!)
+        else if (rawNetPts < -24 && !buyingIsWeak) {
+            rawNetPts = -22;
         }
 
-        // Battle Winner Banner (Preserves All Original Cases + Adds Broken Wall & Stop-Hunt Reclaim Cases!)
-        let battleWinner = `⚖️ [${tf.toUpperCase()}] MID-RANGE AUCTION — ${activeHighPoolLbl} vs ${activeLowPoolLbl}`;
+        // 4. Smooth 2-Poll Hysteresis Memory so score never jumps wildly on a single tick
+        if (typeof window._prevSmoothScalpPts === 'number' && window._prevSmoothSym === symbol && window._prevSmoothTf === tf) {
+            rawNetPts = Math.round(window._prevSmoothScalpPts * 0.35 + rawNetPts * 0.65);
+        }
+        window._prevSmoothScalpPts = rawNetPts;
+        window._prevSmoothSym = symbol;
+        window._prevSmoothTf = tf;
+
+        let scalpPts = Math.max(-99, Math.min(99, rawNetPts));
+
+        // Battle Winner Banner (Clearly Distinguishes Two-Way Sideways Fight vs True One-Way Imbalance!)
+        let battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS TWO-WAY FIGHT (Bulls:${indBullPower} vs Bears:${indBearPower}) — BOTH STRONG, WAIT IMBALANCE!`;
         let bwCol = '#ffd700';
 
-        if (whaleStopHuntBullInit) {
-            battleWinner = `🔥 [${tf.toUpperCase()}] OLD BID LIQUIDATED + NEW 🧊BID-HELD RECLAIM ➔ WHALE STOP-HUNT LONG!`;
+        if (isTwoWayEqualFight) {
+            const slightLeader = indBullPower > indBearPower + 5 ? 'Mild Bull Build' : (indBearPower > indBullPower + 5 ? 'Mild Bear Build' : 'Equal Fight');
+            battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS CLUSTER BUILDUP (Bulls:${indBullPower} vs Bears:${indBearPower} | ${slightLeader}) — LIQUIDITY SWEEP ZONE!`;
+            bwCol = '#ffd700';
+        } else if (whaleStopHuntBullInit && sellingIsWeak) {
+            battleWinner = `🔥 [${tf.toUpperCase()}] OLD BID LIQUIDATED + NEW 🧊BID-HELD (Sellers Exhausted:${indBearPower}) ➔ STOP-HUNT LONG!`;
             bwCol = '#00e676';
-        } else if (whaleStopHuntBearInit) {
-            battleWinner = `🔥 [${tf.toUpperCase()}] OLD ASK LIQUIDATED + NEW 🧊ASK-CAP REJECT ➔ WHALE STOP-HUNT SHORT!`;
+        } else if (whaleStopHuntBearInit && buyingIsWeak) {
+            battleWinner = `🔥 [${tf.toUpperCase()}] OLD ASK LIQUIDATED + NEW 🧊ASK-CAP (Buyers Exhausted:${indBullPower}) ➔ STOP-HUNT SHORT!`;
             bwCol = '#ff1744';
-        } else if (stage2BullConfirmed || comboLowFakeSweepLong) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] 🧊BID-HELD (Wt:${totBullAbsPower.toFixed(1)}x) + 🎭10s/msΔ FLIP ➔ CONFIRMED REVERSAL LONG!`;
+        } else if ((stage2BullConfirmed || comboLowFakeSweepLong) && sellingIsWeak) {
+            battleWinner = `🎯 [${tf.toUpperCase()}] 🧊BID-HELD + 🎭SPOOF/msΔ + SELLERS WEAK (${indBullPower}v${indBearPower}) ➔ CONFIRMED LONG!`;
             bwCol = '#00e5ff';
-        } else if (stage2BearConfirmed || comboHighFakeSweepShort) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] 🧊ASK-CAP (Wt:${totBearAbsPower.toFixed(1)}x) + 🎭10s/msΔ FLIP ➔ CONFIRMED REVERSAL SHORT!`;
+        } else if ((stage2BearConfirmed || comboHighFakeSweepShort) && buyingIsWeak) {
+            battleWinner = `🎯 [${tf.toUpperCase()}] 🧊ASK-CAP + 🎭SPOOF/msΔ + BUYERS WEAK (${indBearPower}v${indBullPower}) ➔ CONFIRMED SHORT!`;
             bwCol = '#ff9100';
-        } else if (liquidatedBidCascadeBear) {
-            battleWinner = `💔 [${tf.toUpperCase()}] INSTITUTIONAL BID WALL LIQUIDATED (${brkBidCnt}x) + NO NEW BID ➔ BEAR CASCADE!`;
-            bwCol = '#ff1744';
-        } else if (liquidatedAskSqueezeBull) {
-            battleWinner = `💔 [${tf.toUpperCase()}] INSTITUTIONAL ASK WALL LIQUIDATED (${brkAskCnt}x) + NO NEW ASK ➔ BULL SQUEEZE!`;
+        } else if ((comboHighRealBreakoutLong || instBullDrive) && sellingIsWeak) {
+            battleWinner = `🚀 [${tf.toUpperCase()}] TRUE BULL IMBALANCE BREAKOUT (Bulls:${indBullPower} vs WeakBears:${indBearPower} | ⚡Disp:${dispBullLevels})!`;
             bwCol = '#00e676';
-        } else if (comboHighRealBreakoutLong) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] ${activeHighPoolLbl} REAL VACUUM BREAKOUT (⚡Disp + 🎭AskPulled)!`;
-            bwCol = '#00e676';
-        } else if (comboLowRealBreakdownShort) {
-            battleWinner = `💥 [${tf.toUpperCase()}] ${activeLowPoolLbl} REAL VACUUM BREAKDOWN (⚡Disp + 🎭BidPulled)!`;
-            bwCol = '#ff1744';
-        } else if (bidHeldCloseConfirmed) {
-            battleWinner = `🛡️ [${tf.toUpperCase()}] STAGE-1 EARLY SIGNAL: 🧊BID-HELD (Wt:${totBullAbsPower.toFixed(1)}x) + UP CLOSE!`;
-            bwCol = '#00e5ff';
-        } else if (askCapCloseConfirmed) {
-            battleWinner = `🛡️ [${tf.toUpperCase()}] STAGE-1 EARLY SIGNAL: 🧊ASK-CAP (Wt:${totBearAbsPower.toFixed(1)}x) + DN CLOSE!`;
-            bwCol = '#ff9100';
-        } else if (aged10sPullDelta < -effCellBench * 0.20 && lastC.close > lastC.open && rAskAbs === 0) {
-            battleWinner = `🎭 [${tf.toUpperCase()}] >=10s FAKE ASK WALL PULLED (10sPΔ:${fmt(aged10sPullDelta)}) ➔ BULL VACUUM!`;
-            bwCol = '#e040fb';
-        } else if (aged10sPullDelta > effCellBench * 0.20 && lastC.close < lastC.open && rBidAbs === 0) {
-            battleWinner = `🎭 [${tf.toUpperCase()}] >=10s FAKE BID WALL PULLED (10sPΔ:+${fmt(aged10sPullDelta)}) ➔ BEAR VACUUM!`;
-            bwCol = '#ff4081';
-        } else if (instBullDrive) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] TRUE BULL DISPLACEMENT (SweepLvls:${dispBullLevels} | 10sAskPull:${fmt(totAged10sAp)})`;
-            bwCol = '#00e676';
-        } else if (instBearDrive) {
-            battleWinner = `💥 [${tf.toUpperCase()}] TRUE BEAR DISPLACEMENT (SweepLvls:${dispBearLevels} | 10sBidPull:${fmt(totAged10sBp)})`;
+        } else if ((comboLowRealBreakdownShort || instBearDrive) && buyingIsWeak) {
+            battleWinner = `💥 [${tf.toUpperCase()}] TRUE BEAR IMBALANCE BREAKDOWN (Bears:${indBearPower} vs WeakBulls:${indBullPower} | ⚡Disp:${dispBearLevels})!`;
             bwCol = '#ff1744';
         } else if (clusterLongBuildup) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE BID ACCUMULATION (BidAbs:${rBidAbs} vs AskAbs:${rAskAbs})`;
+            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE BID ACCUMULATION (Bulls:${indBullPower} vs Bears:${indBearPower} — Wait Seller Exhaustion)`;
             bwCol = '#00e5ff';
         } else if (clusterShortBuildup) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE ASK DISTRIBUTION (AskAbs:${rAskAbs} vs BidAbs:${rBidAbs})`;
+            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE ASK DISTRIBUTION (Bears:${indBearPower} vs Bulls:${indBullPower} — Wait Buyer Exhaustion)`;
             bwCol = '#ff9100';
         }
 
-        // Intraday Campaign Score (Aligned with Purged Macro Walls + Broken Wall Memory)
+        // Intraday Campaign Score
         let intraPts = macroInfo ? macroInfo.netMacro : 0;
         if (sPocUp > sPocDn) intraPts += 14;
         else if (sPocDn > sPocUp) intraPts -= 14;
-        intraPts += Math.round((dynWallPts + brkWallPts) * 0.45);
+        intraPts += Math.round((dynWallPts + brkWallPts) * 0.40);
         if (smtState.bias === 1) intraPts += 10;
         else if (smtState.bias === -1) intraPts -= 10;
         intraPts += Math.round(oiPts * 0.5);
 
-        if (intraPts < 0 && scalpPts >= 34 && (bidHeldCloseConfirmed || liquidatedAskSqueezeBull)) {
-            intraPts = Math.max(24, Math.round(scalpPts * 0.75));
-        } else if (intraPts > 0 && scalpPts <= -34 && (askCapCloseConfirmed || liquidatedBidCascadeBear)) {
-            intraPts = Math.min(-24, Math.round(scalpPts * 0.75));
-        }
-
         const scalpScoreVal = Math.abs(scalpPts);
-        let scalpFinalTxt = `⏳ NEUTRAL (${scalpPts >= 0 ? '+' : ''}${scalpPts})`;
+        let scalpFinalTxt = `⚖️ SIDEWAYS CLUSTER (${indBullPower}B vs ${indBearPower}S)`;
         let scalpFinalCol = '#ffca28';
 
-        if (whaleStopHuntBullInit && scalpPts >= 34) {
+        if (isTwoWayEqualFight) {
+            scalpFinalTxt = `⚖️ SIDEWAYS FIGHT (${indBullPower}B vs ${indBearPower}S — NO TRADE)`;
+            scalpFinalCol = '#ffca28';
+        } else if (whaleStopHuntBullInit && sellingIsWeak && scalpPts >= 34) {
             scalpFinalTxt = `🔥 STOP-HUNT RECLAIM LONG (+${scalpScoreVal})`;
             scalpFinalCol = '#00e676';
-        } else if (whaleStopHuntBearInit && scalpPts <= -34) {
+        } else if (whaleStopHuntBearInit && buyingIsWeak && scalpPts <= -34) {
             scalpFinalTxt = `🔥 STOP-HUNT REJECT SHORT (-${scalpScoreVal})`;
             scalpFinalCol = '#ff1744';
-        } else if (stage2BullConfirmed || (comboLowFakeSweepLong && scalpPts >= 32)) {
-            scalpFinalTxt = `🎯 CONFIRMED ABS+SPOOF LONG (+${scalpScoreVal})`;
+        } else if (scalpPts >= 34 && sellingIsWeak) {
+            scalpFinalTxt = (comboHighRealBreakoutLong || instBullDrive)
+                ? `🚀 IMBALANCE BREAKOUT LONG (+${scalpScoreVal})`
+                : `🟢 CONFIRMED IMBALANCE LONG (+${scalpScoreVal})`;
             scalpFinalCol = '#00e676';
-        } else if (stage2BearConfirmed || (comboHighFakeSweepShort && scalpPts <= -32)) {
-            scalpFinalTxt = `🎯 CONFIRMED ABS+SPOOF SHORT (-${scalpScoreVal})`;
+        } else if (scalpPts <= -34 && buyingIsWeak) {
+            scalpFinalTxt = (comboLowRealBreakdownShort || instBearDrive)
+                ? `💥 IMBALANCE BREAKDOWN SHORT (-${scalpScoreVal})`
+                : `🔴 CONFIRMED IMBALANCE SHORT (-${scalpScoreVal})`;
             scalpFinalCol = '#ff1744';
-        } else if (comboHighRealBreakoutLong && scalpPts >= 32) {
-            scalpFinalTxt = liquidatedAskSqueezeBull
-                ? `💔 ASK-LIQ BREAKOUT LONG (+${scalpScoreVal})`
-                : `🚀 BREAKOUT LONG (+${scalpScoreVal})`;
-            scalpFinalCol = '#00e676';
-        } else if (comboLowRealBreakdownShort && scalpPts <= -32) {
-            scalpFinalTxt = liquidatedBidCascadeBear
-                ? `💔 BID-LIQ BREAKDOWN SHORT (-${scalpScoreVal})`
-                : `💥 BREAKDOWN SHORT (-${scalpScoreVal})`;
-            scalpFinalCol = '#ff1744';
-        } else if (scalpPts >= 32) {
-            scalpFinalTxt = `🟢 CONFIRMED LONG (+${scalpScoreVal})`;
-            scalpFinalCol = '#00e676';
-        } else if (scalpPts <= -32) {
-            scalpFinalTxt = `🔴 CONFIRMED SHORT (-${scalpScoreVal})`;
-            scalpFinalCol = '#ff1744';
-        } else if (bidHeldCloseConfirmed || scalpPts >= 18) {
-            scalpFinalTxt = bidHeldCloseConfirmed
+        } else if (scalpPts >= 18) {
+            scalpFinalTxt = sellingIsWeak
                 ? `🛡️ EARLY LONG: BID-HELD (+${scalpScoreVal})`
-                : `🟡 BULL PRESSURE (+${scalpScoreVal})`;
+                : `🟡 BULLS LEADING (${indBullPower}v${indBearPower} | WAIT SELLER WEAKNESS)`;
             scalpFinalCol = '#00e5ff';
-        } else if (askCapCloseConfirmed || scalpPts <= -18) {
-            scalpFinalTxt = askCapCloseConfirmed
+        } else if (scalpPts <= -18) {
+            scalpFinalTxt = buyingIsWeak
                 ? `🛡️ EARLY SHORT: ASK-CAP (-${scalpScoreVal})`
-                : `🟠 BEAR PRESSURE (-${scalpScoreVal})`;
+                : `🟠 BEARS LEADING (${indBearPower}v${indBullPower} | WAIT BUYER WEAKNESS)`;
             scalpFinalCol = '#ff9100';
         }
 
         const intraScoreVal = Math.abs(intraPts);
-        let intraFinalTxt = `⏳ RANGE (${intraPts >= 0 ? '+' : ''}${intraPts})`;
+        let intraFinalTxt = `⏳ SIDEWAYS BUILDUP (${intraPts >= 0 ? '+' : ''}${intraPts})`;
         let intraFinalCol = '#ffca28';
-        if (intraPts >= 40) { intraFinalTxt = `🟢 MACRO LONG (+${intraScoreVal})`; intraFinalCol = '#00e676'; }
+        if (intraPts >= 40 && !isTwoWayEqualFight) { intraFinalTxt = `🟢 MACRO LONG (+${intraScoreVal})`; intraFinalCol = '#00e676'; }
         else if (intraPts >= 18) { intraFinalTxt = `🏦 ACCUMULATING LONG (+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
-        else if (intraPts <= -40) { intraFinalTxt = `🔴 MACRO SHORT (-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
+        else if (intraPts <= -40 && !isTwoWayEqualFight) { intraFinalTxt = `🔴 MACRO SHORT (-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
         else if (intraPts <= -18) { intraFinalTxt = `🏦 DISTRIBUTING SHORT (-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
 
         // =========================================================================
@@ -4811,7 +4807,7 @@ function drawAll() {
             vTitle.style.overflow = 'hidden';
             vTitle.style.textOverflow = 'ellipsis';
             vBox.style.borderColor = scalpFinalCol;
-            vBox.style.background = scalpPts >= 28 ? 'rgba(0, 200, 83, 0.16)' : (scalpPts <= -28 ? 'rgba(255, 23, 68, 0.16)' : 'rgba(20, 25, 38, 0.92)');
+            vBox.style.background = (scalpPts >= 34 && sellingIsWeak) ? 'rgba(0, 200, 83, 0.16)' : ((scalpPts <= -34 && buyingIsWeak) ? 'rgba(255, 23, 68, 0.16)' : 'rgba(20, 25, 38, 0.92)');
             vTitle.innerText = `⚡ SCALP [${tf.toUpperCase()}]: ${scalpFinalTxt}   |   🌊 MACRO: ${intraFinalTxt}`;
             if (vReasons) {
                 vReasons.style.display = 'none';
@@ -4819,22 +4815,24 @@ function drawAll() {
             }
         }
 
-        const execVsAbsState = instBullDrive ? 'BULL' : (instBearDrive ? 'BEAR' : (clusterLongBuildup ? 'BULL' : (clusterShortBuildup ? 'BEAR' : 'NEU')));
-        const execVsAbsLbl = isBearExhaustionTrap ? 'SellsAbsorbedAtBid🟢' : (isBullExhaustionTrap ? 'BuysCappedAtAsk🔴' : (clusterLongBuildup ? `BullAnchor(+${anchorBullScore})` : (clusterShortBuildup ? `BearAnchor(-${anchorBearScore})` : 'NeutralFight')));
+        const execVsAbsState = sellingIsWeak ? 'BULL' : (buyingIsWeak ? 'BEAR' : 'NEU');
+        const execVsAbsLbl = isTwoWayEqualFight
+            ? `2-WayFight(${indBullPower}B/${indBearPower}S)`
+            : (sellingIsWeak ? `SellersWeak🟢(${indBullPower}v${indBearPower})` : (buyingIsWeak ? `BuyersWeak🔴(${indBearPower}v${indBullPower})` : `Balanced(${indBullPower}v${indBearPower})`));
 
         const scalpMeterList = [
-            { name: `1. [x${wWall.toFixed(1)}] Vol-Weighted Intact Absorption (${dynWallPts >= 0 ? '+' : ''}${dynWallPts}pt)`, state: dynWallPts > 0 ? 'BULL' : (dynWallPts < 0 ? 'BEAR' : 'NEU'), val: `BidHeld:${rBidAbs}(Wt:${totBullAbsPower.toFixed(1)}x) vs AskCap:${rAskAbs}(Wt:${totBearAbsPower.toFixed(1)}x)` },
-            { name: `2. [Memory] Broken/Liquidated Wall vs Reclaim (${brkWallPts >= 0 ? '+' : ''}${brkWallPts}pt)`, state: brkWallState, val: brkWallLbl },
-            { name: `3. [x${wPull10s.toFixed(1)}] >=10s Heavy Wall Pull/Abs (${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts}pt)`, state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | Intact10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
-            { name: `4. [x${wMsDom.toFixed(1)}] Live Millisecond DOM Flow (${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts}pt)`, state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}] | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
-            { name: `5. [x${wDisp.toFixed(1)}] Sweep/Breakout & Displacement (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: (comboLowFakeSweepLong || comboHighRealBreakoutLong || dispVsTrapState === 'BULL') ? 'BULL' : ((comboHighFakeSweepShort || comboLowRealBreakdownShort || dispVsTrapState === 'BEAR') ? 'BEAR' : 'NEU'), val: `⚡Disp:${dispBullLevels}B/${dispBearLevels}S | ${activeHighPoolLbl} / ${activeLowPoolLbl}` },
-            { name: `6. [x${wAnchor.toFixed(1)}] 6-Candle Anchor & POC Control (${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts}pt)`, state: dynAnchorPts > 4 ? 'BULL' : (dynAnchorPts < -4 ? 'BEAR' : 'NEU'), val: `${execVsAbsLbl} | Px vs POC:${curPoc.toFixed(dec)}` },
-            { name: '7. Effort vs Result (Close vs Absorption)', state: bidHeldCloseConfirmed ? 'BULL' : (askCapCloseConfirmed ? 'BEAR' : deltaState), val: bidHeldCloseConfirmed ? 'BidHeld+UpClose🟢' : (askCapCloseConfirmed ? 'AskCap+DnClose🔴' : `Δ:${lastC.delta >= 0 ? '+' : ''}${fmt(lastC.delta)}`) },
-            { name: '8. [Ref Only] Dealing Range & Day High/Low', state: 'NEU', val: `Loc:${Math.round(rangeLocation * 100)}% | CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)} (0pt Ref)` },
+            { name: `1. [Imbalance Gate] Bull vs Bear Power & Weakness`, state: execVsAbsState, val: `${execVsAbsLbl} | Imb:${Math.round(powerImbalanceRatio * 100)}% (Need >=45%)` },
+            { name: `2. [x${wWall.toFixed(1)}] Vol-Weighted Intact Absorption (${dynWallPts >= 0 ? '+' : ''}${dynWallPts}pt)`, state: dynWallPts > 0 ? 'BULL' : (dynWallPts < 0 ? 'BEAR' : 'NEU'), val: `BidHeld:${rBidAbs}(Wt:${totBullAbsPower.toFixed(1)}x) vs AskCap:${rAskAbs}(Wt:${totBearAbsPower.toFixed(1)}x)` },
+            { name: `3. [Memory] Broken/Liquidated Wall vs Reclaim (${brkWallPts >= 0 ? '+' : ''}${brkWallPts}pt)`, state: brkWallState, val: brkWallLbl },
+            { name: `4. [x${wPull10s.toFixed(1)}] >=10s Heavy Wall Pull/Abs (${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts}pt)`, state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | Intact10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
+            { name: `5. [x${wMsDom.toFixed(1)}] Live Millisecond DOM Flow (${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts}pt)`, state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}] | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
+            { name: `6. [x${wDisp.toFixed(1)}] Displacement (⚡) & 3c Exec Imbalance (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: dispVsTrapState, val: `⚡Disp:${dispBullLevels}B/${dispBearLevels}S | 3cExecImb:${Math.round(execImbalanceRatio * 100)}%` },
+            { name: `7. [x${wAnchor.toFixed(1)}] 6-Candle Anchor & POC Control (${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts}pt)`, state: dynAnchorPts > 4 ? 'BULL' : (dynAnchorPts < -4 ? 'BEAR' : 'NEU'), val: `Anchor:${anchorBullScore}B/${anchorBearScore}S | POC:${curPoc.toFixed(dec)}` },
+            { name: '8. Sideways Box & Rotational Efficiency Check', state: isTwoWayEqualFight ? 'NEU' : execVsAbsState, val: `Eff:${Math.round(rotationalEff6 * 100)}% | Flips:${colorFlips} | ${isTwoWayEqualFight ? '⚠️CHOP-LOCK' : 'CLEAR'}` },
             { name: '9. 4-Candle POC Stepping Migration', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
             { name: `10. Live Open Interest Synergy (${oiPts >= 0 ? '+' : ''}${oiPts}pt)`, state: oiStateBadge, val: oiVerdictTxt },
             { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
-            { name: '12. RVOL Participation Filter', state: curRvol >= 0.85 ? execVsAbsState : 'NEU', val: `${curRvol.toFixed(1)}x Avg` }
+            { name: '12. [Ref Only] Day High/Low & Swings', state: 'NEU', val: `CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)} (0pt Ref)` }
         ];
 
         const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
@@ -4847,7 +4845,7 @@ function drawAll() {
             { name: '2. Multi-Swing Cluster Absorption (Unbroken)', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidAbs:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskAbs:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
             { name: '3. Broken/Liquidated Whale Wall Balance', state: brkWallState, val: `BrkBid:${brkBidCnt}(Wt:${brokenBidLiqWeight.toFixed(1)}) BrkAsk:${brkAskCnt}(Wt:${brokenAskLiqWeight.toFixed(1)})` },
             { name: '4. Session >=10s Wall Pulling Campaign (10sPΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `Sess10sPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
-            { name: '5. Displacement vs Absorption Balance', state: anchorBullScore > anchorBearScore ? 'BULL' : (anchorBearScore > anchorBullScore ? 'BEAR' : 'NEU'), val: `Bull:${anchorBullScore} vs Bear:${anchorBearScore}` },
+            { name: '5. Independent Bull vs Bear Power Balance', state: sellingIsWeak ? 'BULL' : (buyingIsWeak ? 'BEAR' : 'NEU'), val: `BullPwr:${indBullPower} vs BearPwr:${indBearPower} (Imb:${Math.round(powerImbalanceRatio * 100)}%)` },
             { name: '6. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
             { name: '7. [Ref Only] Day & Prev Day High/Low Magnet', state: 'NEU', val: `CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)} PDH:${pdh ? pdh.toFixed(dec) : '--'} PDL:${pdl ? pdl.toFixed(dec) : '--'}` },
             { name: '8. Unfinished Business & nPOC Gravity', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} UB-LO:${ubLoCnt} nPOCs:${nakedPocs.length}` },
@@ -4876,18 +4874,18 @@ function drawAll() {
 
             document.getElementById('meterModalBody').innerHTML = `
                 <div class="rule-sec" style="grid-column: 1 / -1; border-color:#00e5ff; background:#0e1422;">
-                    <h4 style="color:#00e5ff;">🏛️ LIVE INSTITUTIONAL CONTEXT, BROKEN-WALL MEMORY & OPEN INTEREST TELEMETRY</h4>
+                    <h4 style="color:#00e5ff;">🏛️ IMBALANCE vs TWO-WAY FIGHT DIAGNOSTIC, BROKEN-WALL MEMORY & OI TELEMETRY</h4>
                     <div style="display:flex; flex-wrap:wrap; gap:12px; font-size:11.5px; line-height:1.6;">
                         <span><b>Regime:</b> <code style="color:#ffeb3b;">${activeRegime}</code></span>
+                        <span><b>Imbalance Check:</b> <code style="color:${isTwoWayEqualFight ? '#ffca28' : '#00e676'};">BullPower:${indBullPower} vs BearPower:${indBearPower} (Imb:${Math.round(powerImbalanceRatio * 100)}% | SellingWeak:${sellingIsWeak} | BuyingWeak:${buyingIsWeak})</code></span>
                         <span><b>DOM Battle:</b> <span style="color:${bwCol};font-weight:bold;">${battleWinner}</span></span>
                         <span><b>Broken Wall Memory:</b> <code style="color:#ff80ab;">${brkWallLbl} (BrkBid:${brkBidCnt} | BrkAsk:${brkAskCnt} | Reclaim:${reclaimBidCnt}B/${reclaimAskCnt}A)</code></span>
-                        <span><b>Ref High/Low (0pt):</b> <code style="color:#00e5ff;">CDH:${cdh.toFixed(dec)} | CDL:${cdl.toFixed(dec)} | PDH:${pdh ? pdh.toFixed(dec) : '--'} | PDL:${pdl ? pdl.toFixed(dec) : '--'} | 30c:[${prevMajorHigh.toFixed(dec)}/${prevMajorLow.toFixed(dec)}] | 6c:[${prevSwingHigh.toFixed(dec)}/${prevSwingLow.toFixed(dec)}]</code></span>
                         <span><b>Live OI:</b> <code style="color:#69f0ae;">${oiVerdictTxt}</code></span>
-                        <span><b>Dynamic Score Split:</b> <code style="color:#cfd8dc;">IntactWalls:${dynWallPts >= 0 ? '+' : ''}${dynWallPts} | BrkWallMem:${brkWallPts >= 0 ? '+' : ''}${brkWallPts} | 10sPull:${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts} | Sweep/Disp:${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts} | msΔ:${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts} | Anchor/POC:${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts} | OI:${oiPts >= 0 ? '+' : ''}${oiPts} ➔ NET:${scalpPts >= 0 ? '+' : ''}${scalpPts}</code></span>
+                        <span><b>Score Split:</b> <code style="color:#cfd8dc;">IntactWalls:${dynWallPts >= 0 ? '+' : ''}${dynWallPts} | BrkWallMem:${brkWallPts >= 0 ? '+' : ''}${brkWallPts} | 10sPull:${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts} | Sweep/Disp:${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts} | msΔ:${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts} | Anchor/POC:${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts} | OI:${oiPts >= 0 ? '+' : ''}${oiPts} ➔ NET:${scalpPts >= 0 ? '+' : ''}${scalpPts}</code></span>
                     </div>
                 </div>
                 <div class="rule-sec" style="border-color:${scalpFinalCol};">
-                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] DYNAMIC SCALP METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
+                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] IMBALANCE SCALP METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
                     ${renderRows(scalpMeterList)}
                 </div>
                 <div class="rule-sec" style="border-color:${intraFinalCol};">
@@ -4902,6 +4900,16 @@ function drawAll() {
             timeframe: tf,
             live_price: lastC.close,
             active_context_regime: activeRegime,
+            imbalance_and_chop_check: {
+                independent_bull_power: indBullPower,
+                independent_bear_power: indBearPower,
+                imbalance_ratio_pct: Math.round(powerImbalanceRatio * 100),
+                is_selling_weak_for_long: sellingIsWeak,
+                is_buying_weak_for_short: buyingIsWeak,
+                is_two_way_sideways_fight: isTwoWayEqualFight,
+                rotational_efficiency_pct: Math.round(rotationalEff6 * 100),
+                candle_color_flips_in_6c: colorFlips
+            },
             range_location_pct: Math.round(rangeLocation * 100),
             key_liquidity_levels: {
                 current_day_high: cdh,
@@ -5049,7 +5057,7 @@ function drawAll() {
         ctx.textAlign = 'center';
         ctx.font = 'bold 8px monospace';
         ctx.fillStyle = '#cfd8dc';
-        ctx.fillText(`⚡${tf.toUpperCase()} LIVE+10s [🟢${sBullCnt} 🔴${sBearCnt} ⚪${sNeuCnt}]`, b1X + halfBoxW * 0.5, bY + 10);
+        ctx.fillText(`⚡${tf.toUpperCase()} IMBALANCE [🟢${sBullCnt} 🔴${sBearCnt} ⚪${sNeuCnt}]`, b1X + halfBoxW * 0.5, bY + 10);
         ctx.font = 'bold 9.5px monospace';
         ctx.fillStyle = scalpFinalCol;
         ctx.fillText(scalpFinalTxt, b1X + halfBoxW * 0.5, bY + 25);
