@@ -2017,6 +2017,13 @@ def home():
     <button class="btn" onclick="scaleX(1.18)">X+</button>
     <button class="btn" onclick="scaleX(0.84)">X-</button>
     <button class="btn" onclick="resetCamera()">Fit</button>
+    <div class="sep"></div>
+    <button class="btn" id="drawHBtn" onclick="setDrawTool('hline')" title="Horizontal Line">─</button>
+    <button class="btn" id="drawTBtn" onclick="setDrawTool('trend')" title="Diagonal Line">╱</button>
+    <button class="btn" id="drawBBtn" onclick="setDrawTool('box')" title="Box / FVG">▭</button>
+    <button class="btn" id="drawEBtn" onclick="setDrawTool('erase')" title="Click Drawing to Delete">⌫</button>
+    <button class="btn" onclick="undoDrawing()" title="Delete Last 1-by-1">↩</button>
+    <button class="btn" onclick="clearAllDrawings()" title="Delete All Drawings" style="color:#ff5252;">🗑️</button>
     <button class="btn active" id="viewModeBtn" onclick="toggleViewMode()">👁️ PRO</button>
     <button class="btn" id="domToggleBtn" onclick="toggleDOM()">DOM</button>
     <button class="btn" onclick="toggleMeter()" style="background:#7c4dff;color:#fff;border-color:#b388ff;font-weight:bold;">📊 METER</button>
@@ -2594,11 +2601,261 @@ function applyDrag(dx, dy) {
     needsRender = true;
 }
 
+// =========================================================================
+// ZERO-LOAD CANVAS DRAWING TOOLS (H-Line, Diagonal, Box+50%CE, 1-by-1 & All Del)
+// =========================================================================
+const TF_MS_MAP = { '1m': 60000, '3m': 180000, '5m': 300000, '15m': 900000, '30m': 1800000, '1h': 3600000, '4h': 14400000, '1d': 86400000 };
+let activeDrawTool = null;
+let draftDraw = null;
+let userDrawings = {};
+try { userDrawings = JSON.parse(localStorage.getItem('sa_drawings_v1') || '{}') || {}; } catch (e) { userDrawings = {}; }
+
+function saveUserDrawings() {
+    try { localStorage.setItem('sa_drawings_v1', JSON.stringify(userDrawings)); } catch (e) {}
+}
+
+function updateDrawBtnsUI() {
+    const map = { hline: 'drawHBtn', trend: 'drawTBtn', box: 'drawBBtn', erase: 'drawEBtn' };
+    Object.entries(map).forEach(([k, id]) => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('active', activeDrawTool === k);
+    });
+}
+
+function setDrawTool(tool) {
+    activeDrawTool = (activeDrawTool === tool) ? null : tool;
+    draftDraw = null;
+    updateDrawBtnsUI();
+    needsRender = true;
+}
+
+function undoDrawing() {
+    const list = userDrawings[symbol];
+    if (list && list.length > 0) {
+        list.pop();
+        saveUserDrawings();
+        needsRender = true;
+    }
+}
+
+function clearAllDrawings() {
+    if (userDrawings[symbol] && userDrawings[symbol].length > 0) {
+        userDrawings[symbol] = [];
+        saveUserDrawings();
+    }
+    draftDraw = null;
+    activeDrawTool = null;
+    updateDrawBtnsUI();
+    needsRender = true;
+}
+
+function xToTime(x, rightStart) {
+    if (!candles || candles.length === 0) return Date.now();
+    const tfMs = TF_MS_MAP[tf] || 60000;
+    const lastIdx = candles.length - 1;
+    const fIdx = lastIdx - (rightStart - x) / candleW;
+    if (fIdx <= 0) return candles[0].start + fIdx * tfMs;
+    if (fIdx >= lastIdx) return candles[lastIdx].start + (fIdx - lastIdx) * tfMs;
+    const lo = Math.floor(fIdx);
+    return candles[lo].start + (fIdx - lo) * (candles[lo + 1].start - candles[lo].start);
+}
+
+function timeToX(t, rightStart) {
+    if (!candles || candles.length === 0) return 0;
+    const tfMs = TF_MS_MAP[tf] || 60000;
+    const lastIdx = candles.length - 1;
+    if (t <= candles[0].start) return rightStart - (lastIdx - (t - candles[0].start) / tfMs) * candleW;
+    if (t >= candles[lastIdx].start) return rightStart - (lastIdx - (lastIdx + (t - candles[lastIdx].start) / tfMs)) * candleW;
+    for (let i = 0; i < lastIdx; i++) {
+        if (t >= candles[i].start && t <= candles[i + 1].start) {
+            const span = Math.max(1, candles[i + 1].start - candles[i].start);
+            return rightStart - (lastIdx - (i + (t - candles[i].start) / span)) * candleW;
+        }
+    }
+    return rightStart;
+}
+
+function getChartPoint(x, y) {
+    if (minP === null || maxP === null || !candles || candles.length === 0) return null;
+    const { chartW, chartH } = getLayout();
+    const pSpan = Math.max(maxP - minP, rawStep);
+    const price = minP + ((chartH - y) / chartH) * pSpan;
+    const rightStart = chartW - candleW * 0.62 + panX;
+    return { price, time: xToTime(x, rightStart), rightStart, chartW, chartH, pSpan };
+}
+
+function ptToSegDist(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-6) return Math.hypot(px - x1, py - y1);
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+function deleteDrawingAt(x, y) {
+    const list = userDrawings[symbol];
+    const cp = getChartPoint(x, y);
+    if (!list || list.length === 0 || !cp) return false;
+    const pToYLocal = p => cp.chartH - ((p - minP) / cp.pSpan) * cp.chartH;
+
+    for (let i = list.length - 1; i >= 0; i--) {
+        const d = list[i];
+        if (d.type === 'hline') {
+            if (Math.abs(y - pToYLocal(d.p1)) <= 10) {
+                list.splice(i, 1); saveUserDrawings(); needsRender = true; return true;
+            }
+        } else if (d.type === 'trend') {
+            const x1 = timeToX(d.t1, cp.rightStart), y1 = pToYLocal(d.p1);
+            const x2 = timeToX(d.t2, cp.rightStart), y2 = pToYLocal(d.p2);
+            if (ptToSegDist(x, y, x1, y1, x2, y2) <= 10) {
+                list.splice(i, 1); saveUserDrawings(); needsRender = true; return true;
+            }
+        } else if (d.type === 'box') {
+            const x1 = timeToX(d.t1, cp.rightStart), y1 = pToYLocal(d.p1);
+            const x2 = timeToX(d.t2, cp.rightStart), y2 = pToYLocal(d.p2);
+            const bx1 = Math.min(x1, x2) - 8, bx2 = Math.max(x1, x2) + 8;
+            const by1 = Math.min(y1, y2) - 8, by2 = Math.max(y1, y2) + 8;
+            if (x >= bx1 && x <= bx2 && y >= by1 && y <= by2) {
+                list.splice(i, 1); saveUserDrawings(); needsRender = true; return true;
+            }
+        }
+    }
+    return false;
+}
+
+function handleDrawDown(x, y) {
+    if (!activeDrawTool) return false;
+    if (activeDrawTool === 'erase') {
+        deleteDrawingAt(x, y);
+        return true;
+    }
+    const cp = getChartPoint(x, y);
+    if (!cp) return false;
+    if (!userDrawings[symbol]) userDrawings[symbol] = [];
+
+    if (activeDrawTool === 'hline') {
+        userDrawings[symbol].push({ type: 'hline', p1: cp.price });
+        saveUserDrawings();
+        activeDrawTool = null;
+        updateDrawBtnsUI();
+        needsRender = true;
+        return true;
+    }
+    if (draftDraw) {
+        draftDraw.t2 = cp.time;
+        draftDraw.p2 = cp.price;
+        userDrawings[symbol].push({ type: draftDraw.type, t1: draftDraw.t1, p1: draftDraw.p1, t2: draftDraw.t2, p2: draftDraw.p2 });
+        saveUserDrawings();
+        draftDraw = null;
+        activeDrawTool = null;
+        updateDrawBtnsUI();
+        needsRender = true;
+        return true;
+    }
+    draftDraw = { type: activeDrawTool, t1: cp.time, p1: cp.price, t2: cp.time, p2: cp.price, startX: x, startY: y, moved: false };
+    needsRender = true;
+    return true;
+}
+
+function handleDrawMove(x, y) {
+    if (!draftDraw) return false;
+    const cp = getChartPoint(x, y);
+    if (!cp) return false;
+    draftDraw.t2 = cp.time;
+    draftDraw.p2 = cp.price;
+    if (Math.hypot(x - draftDraw.startX, y - draftDraw.startY) > 12) draftDraw.moved = true;
+    needsRender = true;
+    return true;
+}
+
+function handleDrawUp() {
+    if (!draftDraw || !draftDraw.moved) return false;
+    if (!userDrawings[symbol]) userDrawings[symbol] = [];
+    userDrawings[symbol].push({ type: draftDraw.type, t1: draftDraw.t1, p1: draftDraw.p1, t2: draftDraw.t2, p2: draftDraw.p2 });
+    saveUserDrawings();
+    draftDraw = null;
+    activeDrawTool = null;
+    updateDrawBtnsUI();
+    needsRender = true;
+    return true;
+}
+
+function drawUserDrawings(rightStart, chartW, chartH, pToY, dec) {
+    const list = (userDrawings[symbol] || []).slice();
+    if (draftDraw) list.push(draftDraw);
+    if (list.length === 0) return;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, chartW, chartH);
+    ctx.clip();
+
+    list.forEach(d => {
+        if (d.type === 'hline') {
+            const py = pToY(d.p1);
+            if (py < -5 || py > chartH + 5) return;
+            ctx.strokeStyle = '#00e5ff';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(chartW, py); ctx.stroke();
+
+            const lbl = d.p1.toFixed(dec);
+            ctx.font = 'bold 9px monospace';
+            const tw = ctx.measureText(lbl).width + 8;
+            ctx.fillStyle = '#00e5ff';
+            ctx.fillRect(chartW - tw - 2, py - 7, tw, 14);
+            ctx.fillStyle = '#000';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(lbl, chartW - 6, py);
+        } else if (d.type === 'trend') {
+            const x1 = timeToX(d.t1, rightStart), y1 = pToY(d.p1);
+            const x2 = timeToX(d.t2, rightStart), y2 = pToY(d.p2);
+            ctx.strokeStyle = '#ffd740';
+            ctx.lineWidth = 1.8;
+            ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+            ctx.fillStyle = '#ffd740';
+            ctx.beginPath(); ctx.arc(x1, y1, 3, 0, Math.PI * 2); ctx.arc(x2, y2, 3, 0, Math.PI * 2); ctx.fill();
+        } else if (d.type === 'box') {
+            const x1 = timeToX(d.t1, rightStart), y1 = pToY(d.p1);
+            const x2 = timeToX(d.t2, rightStart), y2 = pToY(d.p2);
+            const bx = Math.min(x1, x2), by = Math.min(y1, y2);
+            const bw = Math.abs(x2 - x1), bh = Math.abs(y2 - y1);
+            ctx.fillStyle = 'rgba(0, 229, 255, 0.12)';
+            ctx.fillRect(bx, by, bw, bh);
+            ctx.strokeStyle = '#00e5ff';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(bx, by, bw, bh);
+            // 50% Midline (CE)
+            ctx.save();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(255, 235, 59, 0.65)';
+            ctx.beginPath(); ctx.moveTo(bx, by + bh * 0.5); ctx.lineTo(bx + bw, by + bh * 0.5); ctx.stroke();
+            ctx.restore();
+        }
+    });
+
+    ctx.restore();
+}
+
+window.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && (activeDrawTool || draftDraw)) {
+        activeDrawTool = null;
+        draftDraw = null;
+        updateDrawBtnsUI();
+        needsRender = true;
+    }
+});
+
 cv.addEventListener('mousedown', e => {
     const r = cv.getBoundingClientRect();
     lastX = e.clientX - r.left;
     lastY = e.clientY - r.top;
-    dragMode = detectZone(lastX, lastY);
+    const z = detectZone(lastX, lastY);
+    if (z === 'chart' && activeDrawTool) {
+        handleDrawDown(lastX, lastY);
+        return;
+    }
+    dragMode = z;
 });
 
 window.addEventListener('mousemove', e => {
@@ -2606,9 +2863,13 @@ window.addEventListener('mousemove', e => {
     curX = e.clientX - r.left;
     curY = e.clientY - r.top;
     const z = detectZone(curX, curY);
-    cv.style.cursor = (z === 'xaxis') ? 'ew-resize' : ((z === 'yaxis') ? 'ns-resize' : ((z === 'dom') ? 'ns-resize' : 'crosshair'));
+    cv.style.cursor = activeDrawTool && z === 'chart'
+        ? (activeDrawTool === 'erase' ? 'not-allowed' : 'cell')
+        : ((z === 'xaxis') ? 'ew-resize' : ((z === 'yaxis') ? 'ns-resize' : ((z === 'dom') ? 'ns-resize' : 'crosshair')));
 
-    if (dragMode) {
+    if (draftDraw) {
+        handleDrawMove(curX, curY);
+    } else if (dragMode) {
         applyDrag(curX - lastX, curY - lastY);
         lastX = curX;
         lastY = curY;
@@ -2617,9 +2878,13 @@ window.addEventListener('mousemove', e => {
     }
 });
 
-window.addEventListener('mouseup', () => { dragMode = null; });
+window.addEventListener('mouseup', () => {
+    if (draftDraw) handleDrawUp();
+    dragMode = null;
+});
 
 cv.addEventListener('dblclick', e => {
+    if (activeDrawTool) return;
     const r = cv.getBoundingClientRect();
     if (detectZone(e.clientX - r.left, e.clientY - r.top) === 'dom') {
         domScrollRows = 0;
@@ -2664,7 +2929,14 @@ cv.addEventListener('touchstart', e => {
         lastX = e.touches[0].clientX - r.left;
         lastY = e.touches[0].clientY - r.top;
         curX = lastX; curY = lastY;
-        dragMode = detectZone(lastX, lastY);
+        const z = detectZone(lastX, lastY);
+        if (z === 'chart' && activeDrawTool) {
+            handleDrawDown(lastX, lastY);
+            dragMode = null;
+            pinchDist = null;
+            return;
+        }
+        dragMode = z;
         pinchDist = null;
     } else if (e.touches.length === 2) {
         dragMode = null;
@@ -2675,7 +2947,12 @@ cv.addEventListener('touchstart', e => {
 cv.addEventListener('touchmove', e => {
     e.preventDefault();
     const r = cv.getBoundingClientRect();
-    if (e.touches.length === 1 && dragMode) {
+    if (e.touches.length === 1 && draftDraw) {
+        const tx = e.touches[0].clientX - r.left;
+        const ty = e.touches[0].clientY - r.top;
+        handleDrawMove(tx, ty);
+        lastX = tx; lastY = ty; curX = tx; curY = ty;
+    } else if (e.touches.length === 1 && dragMode) {
         const tx = e.touches[0].clientX - r.left;
         const ty = e.touches[0].clientY - r.top;
         applyDrag(tx - lastX, ty - lastY);
@@ -2692,7 +2969,11 @@ cv.addEventListener('touchmove', e => {
     }
 }, { passive: false });
 
-cv.addEventListener('touchend', () => { dragMode = null; pinchDist = null; });
+cv.addEventListener('touchend', () => {
+    if (draftDraw) handleDrawUp();
+    dragMode = null;
+    pinchDist = null;
+});
 
 // STEALTH CLIENT-SIDE BINANCE OI FETCHER (Multi-Sample Rolling Consistency + 3-Candle Baseline!)
 async function fetchClientOI() {
@@ -3799,6 +4080,8 @@ function drawAll() {
             ctx.fillText(tStr, cx, timeBarTop + 12);
         }
     });
+
+    drawUserDrawings(rightStart, chartW, chartH, pToY, dec);
 
     const hudW = Math.min(chartW - 12, 520);
     ctx.fillStyle = 'rgba(17, 21, 31, 0.92)';
