@@ -2515,6 +2515,7 @@ function toggleDOM() {
 }
 
 let dayLevels = { cdh: null, cdl: null, pdh: null, pdl: null };
+let htfFlow = { bias: 'NEU', score: 0, htf1: { tf: '15m', dir: 'NEU', poc: null }, htf2: { tf: '1h', dir: 'NEU', poc: null }, label: 'HTF:SYNCING' };
 let oiState = { active: false, oi: 0, baseOi: 0, candleStartTs: 0, oiDelta: 0, oiPct: 0, updatedAt: 0 };
 
 function setSym(s) {
@@ -2524,6 +2525,7 @@ function setSym(s) {
     peerCandles = [];
     obData = { bids: [], asks: [], dom_raw: [] };
     dayLevels = { cdh: null, cdl: null, pdh: null, pdl: null };
+    htfFlow = { bias: 'NEU', score: 0, htf1: { tf: '15m', dir: 'NEU', poc: null }, htf2: { tf: '1h', dir: 'NEU', poc: null }, label: 'HTF:SYNCING' };
     oiState = { active: false, oi: 0, baseOi: 0, candleStartTs: 0, oiDelta: 0, oiPct: 0, updatedAt: 0 };
     fpGlobalCache.clear();
     resetCamera();
@@ -3107,6 +3109,7 @@ async function fetchData(forceNow = false) {
         if (cData.status === 'ok' && cData.candles && cData.symbol === symbol) {
             candles = cData.candles;
             if (cData.day_levels) dayLevels = cData.day_levels;
+            if (cData.htf_flow) htfFlow = cData.htf_flow;
             if (candles.length > 0) {
                 const last = candles[candles.length - 1];
                 const pxEl = document.getElementById('pxBox');
@@ -5010,95 +5013,287 @@ function drawAll() {
 
         let scalpPts = Math.max(-99, Math.min(99, rawNetPts));
 
-        // Battle Winner Banner (Clearly Distinguishes Two-Way Sideways Fight vs True One-Way Imbalance!)
-        let battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS TWO-WAY FIGHT (Bulls:${indBullPower} vs Bears:${indBearPower}) — BOTH STRONG, WAIT IMBALANCE!`;
+        // =========================================================================
+        // ZERO-LAG TOP/BOTTOM CATCH + FAKE RETEST FILTER + NON-BLOCKING HTF [WT/CT]
+        // =========================================================================
+        const impSample = candles.slice(-24);
+        let impDir = 'NONE';
+        let impIdx = -1;
+        let impOriginPx = null;
+        let impBreakerPx = null;
+        let impExtremePx = null;
+        let impAvgVol = avgFlowVol;
+
+        for (let k = impSample.length - 1; k >= 0; k--) {
+            const ic = impSample[k];
+            const icVol = ic.volume || 0;
+            const icBody = Math.abs(ic.close - ic.open);
+            const icDelta = ic.delta || 0;
+            const strongVol = icVol >= avgFlowVol * 1.12;
+            const strongBody = icBody >= Math.max(avgCandleRange * 0.62, domStep * 1.4);
+            const oneSidedDelta = Math.abs(icDelta) >= Math.max(icVol * 0.13, effCellBench * 0.35);
+
+            if (strongVol && strongBody && oneSidedDelta) {
+                const dir = (ic.close > ic.open && icDelta > 0) ? 'BULL' : ((ic.close < ic.open && icDelta < 0) ? 'BEAR' : 'NONE');
+                if (dir !== 'NONE') {
+                    impDir = dir;
+                    impIdx = k;
+                    impBreakerPx = ic.poc != null ? ic.poc : (ic.open + ic.close) * 0.5;
+                    impOriginPx = dir === 'BULL' ? Math.min(ic.open, ic.low) : Math.max(ic.open, ic.high);
+                    impExtremePx = dir === 'BULL' ? ic.high : ic.low;
+                    let volSum = icVol, legCnt = 1;
+
+                    let b = k - 1;
+                    while (b >= 0 && legCnt < 4) {
+                        const bc = impSample[b];
+                        const sameDir = dir === 'BULL' ? (bc.close > bc.open) : (bc.close < bc.open);
+                        if (!sameDir || (bc.volume || 0) < avgFlowVol * 0.65) break;
+                        impOriginPx = dir === 'BULL' ? Math.min(impOriginPx, bc.open, bc.low) : Math.max(impOriginPx, bc.open, bc.high);
+                        volSum += (bc.volume || 0);
+                        legCnt++;
+                        b--;
+                    }
+                    for (let f = k + 1; f < impSample.length; f++) {
+                        if (dir === 'BULL' && impSample[f].high > impExtremePx) impExtremePx = impSample[f].high;
+                        if (dir === 'BEAR' && impSample[f].low < impExtremePx) impExtremePx = impSample[f].low;
+                    }
+                    impAvgVol = volSum / legCnt;
+                    break;
+                }
+            }
+        }
+
+        const candlesSinceImp = impIdx >= 0 ? (impSample.length - 1 - impIdx) : 99;
+        const htfBias = (htfFlow && htfFlow.bias) ? htfFlow.bias : 'NEU';
+        const htfLbl = (htfFlow && htfFlow.label) ? htfFlow.label : 'HTF:NEU';
+        const oiWeakOrCover = oiActive && oiDeltaVal <= 0;
+        const oiFreshBuild = !oiActive || oiDeltaVal > 0;
+
+        // 1. ZERO-LAG EXACT TOP / BOTTOM CATCH (Does NOT wait for HTF or Breaker POC!)
+        // Fires the second Heavy Absorption/Stop-Hunt stops price + Spoof/msΔ/Taker flips with ZERO opposing wall!
+        const earlyBottomCatchLong = (
+            !isTwoWayEqualFight && sellingIsWeak && rAskAbs === 0
+            && (totBullAbsPower >= 1.25 || whaleStopHuntBullInit || reclaimBidCnt > 0 || (bidHeldCloseConfirmed && stage2BullConfirmed))
+            && (wall10sState === 'BULL' || liveDomFlowState === 'BULL' || (lastC.delta > effCellBench * 0.25 && closePos >= 0.56))
+            && (lastC.close > curPoc || closePos >= 0.58)
+        );
+        const earlyTopCatchShort = (
+            !isTwoWayEqualFight && buyingIsWeak && rBidAbs === 0
+            && (totBearAbsPower >= 1.25 || whaleStopHuntBearInit || reclaimAskCnt > 0 || (askCapCloseConfirmed && stage2BearConfirmed))
+            && (wall10sState === 'BEAR' || liveDomFlowState === 'BEAR' || (lastC.delta < -effCellBench * 0.25 && closePos <= 0.44))
+            && (lastC.close < curPoc || closePos <= 0.42)
+        );
+
+        // 2. FAKE RETEST TRAP vs REAL REVERSAL CLASSIFIER
+        let marketPhase = 'CHOP_NO_IMPULSE';
+        let blockLongReason = null;
+        let blockShortReason = null;
+
+        if (impDir === 'BEAR') {
+            const brokeBearSupply = lastC.close > impBreakerPx + domStep * 0.25;
+            const realBullShift = (
+                brokeBearSupply
+                && sellingIsWeak && !isTwoWayEqualFight
+                && (dispBullLevels > 0 || totBullAbsPower >= 1.15 || brkAskCnt > 0 || whaleStopHuntBullInit)
+                && (wall10sState === 'BULL' || liveDomFlowState === 'BULL')
+            );
+            // Block ONLY weak low-absorption / short-covering bounces (NEVER blocks earlyBottomCatchLong!)
+            const weakBounceRetest = (
+                !realBullShift && !earlyBottomCatchLong
+                && lastC.close <= impOriginPx + domStep * 0.25
+                && (
+                    rAskAbs > 0
+                    || (lastC.close <= impBreakerPx + domStep * 0.25 && totBullAbsPower < 1.20)
+                    || ((lastC.volume || 0) < impAvgVol * 0.78 && totBullAbsPower < 1.20)
+                    || (oiWeakOrCover && totBullAbsPower < 1.25)
+                )
+            );
+
+            if (realBullShift) {
+                marketPhase = 'REAL_REVERSAL_BULL_SHIFT';
+                if (scalpPts < 42) scalpPts = 42;
+            } else if (earlyBottomCatchLong) {
+                marketPhase = 'EARLY_BOTTOM_CATCH_LONG';
+                if (scalpPts < 38) scalpPts = 38;
+            } else if (weakBounceRetest && (scalpPts > 0 || lastC.close > lastC.open)) {
+                marketPhase = 'FAKE_RETEST_BOUNCE_IN_BEAR_IMPULSE';
+                blockLongReason = `🚫 WEAK RETEST TRAP (No BidAbs | Below ${impBreakerPx.toFixed(dec)} — NO LONG!)`;
+            } else if (buyingIsWeak && !isTwoWayEqualFight && lastC.close < impBreakerPx) {
+                marketPhase = 'BEAR_IMPULSE_CONTINUATION';
+            } else {
+                marketPhase = 'BEAR_IMPULSE_CONSOLIDATION';
+            }
+        } else if (impDir === 'BULL') {
+            const brokeBullDemand = lastC.close < impBreakerPx - domStep * 0.25;
+            const realBearShift = (
+                brokeBullDemand
+                && buyingIsWeak && !isTwoWayEqualFight
+                && (dispBearLevels > 0 || totBearAbsPower >= 1.15 || brkBidCnt > 0 || whaleStopHuntBearInit)
+                && (wall10sState === 'BEAR' || liveDomFlowState === 'BEAR')
+            );
+            // Block ONLY weak low-absorption / profit-taking dips (NEVER blocks earlyTopCatchShort!)
+            const weakDipRetest = (
+                !realBearShift && !earlyTopCatchShort
+                && lastC.close >= impOriginPx - domStep * 0.25
+                && (
+                    rBidAbs > 0
+                    || (lastC.close >= impBreakerPx - domStep * 0.25 && totBearAbsPower < 1.20)
+                    || ((lastC.volume || 0) < impAvgVol * 0.78 && totBearAbsPower < 1.20)
+                    || (oiWeakOrCover && totBearAbsPower < 1.25)
+                )
+            );
+
+            if (realBearShift) {
+                marketPhase = 'REAL_REVERSAL_BEAR_SHIFT';
+                if (scalpPts > -42) scalpPts = -42;
+            } else if (earlyTopCatchShort) {
+                marketPhase = 'EARLY_TOP_CATCH_SHORT';
+                if (scalpPts > -38) scalpPts = -38;
+            } else if (weakDipRetest && (scalpPts < 0 || lastC.close < lastC.open)) {
+                marketPhase = 'FAKE_RETEST_DIP_IN_BULL_IMPULSE';
+                blockShortReason = `🚫 WEAK DIP TRAP (No AskCap | Above ${impBreakerPx.toFixed(dec)} — NO SHORT!)`;
+            } else if (sellingIsWeak && !isTwoWayEqualFight && lastC.close > impBreakerPx) {
+                marketPhase = 'BULL_IMPULSE_CONTINUATION';
+            } else {
+                marketPhase = 'BULL_IMPULSE_CONSOLIDATION';
+            }
+        } else {
+            if (earlyBottomCatchLong) {
+                marketPhase = 'EARLY_BOTTOM_CATCH_LONG';
+                if (scalpPts < 38) scalpPts = 38;
+            } else if (earlyTopCatchShort) {
+                marketPhase = 'EARLY_TOP_CATCH_SHORT';
+                if (scalpPts > -38) scalpPts = -38;
+            }
+        }
+
+        // Apply Retest Trap Cap ONLY for verified weak traps
+        if (blockLongReason && scalpPts > 16) scalpPts = 12;
+        if (blockShortReason && scalpPts < -16) scalpPts = -12;
+
+        // 3. NON-BLOCKING HTF [WT / CT] CONTEXT TAGGER
+        // HTF NEVER blocks a genuine Bottom/Top Catch or Real Shift! It only gives [WT] (With-Trend) or [CT] (Counter-Trend Tight-SL) tag!
+        const isBullSignalSide = scalpPts >= 32 && sellingIsWeak && !blockLongReason && !isTwoWayEqualFight;
+        const isBearSignalSide = scalpPts <= -32 && buyingIsWeak && !blockShortReason && !isTwoWayEqualFight;
+
+        let htfTag = '';
+        if (isBullSignalSide) {
+            if (htfBias === 'BULL') { htfTag = '[WT]'; scalpPts = Math.min(99, scalpPts + 10); }
+            else if (htfBias === 'BEAR') { htfTag = '[CT-TIGHT SL]'; }
+            else { htfTag = '[NEU]'; }
+        } else if (isBearSignalSide) {
+            if (htfBias === 'BEAR') { htfTag = '[WT]'; scalpPts = Math.max(-99, scalpPts - 10); }
+            else if (htfBias === 'BULL') { htfTag = '[CT-TIGHT SL]'; }
+            else { htfTag = '[NEU]'; }
+        }
+
+        // Battle Winner Banner
+        let battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS TWO-WAY FIGHT (${indBullPower}B vs ${indBearPower}S) — WAIT IMBALANCE`;
         let bwCol = '#ffd700';
 
         if (isTwoWayEqualFight) {
-            const slightLeader = indBullPower > indBearPower + 5 ? 'Mild Bull Build' : (indBearPower > indBullPower + 5 ? 'Mild Bear Build' : 'Equal Fight');
-            battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS CLUSTER BUILDUP (Bulls:${indBullPower} vs Bears:${indBearPower} | ${slightLeader}) — LIQUIDITY SWEEP ZONE!`;
+            battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS CLUSTER FIGHT (${indBullPower}B vs ${indBearPower}S | ${htfLbl}) — NO TRADE!`;
             bwCol = '#ffd700';
+        } else if (blockLongReason) {
+            battleWinner = `${blockLongReason} | Watch Short Reject!`;
+            bwCol = '#ffab00';
+        } else if (blockShortReason) {
+            battleWinner = `${blockShortReason} | Watch Long Bounce!`;
+            bwCol = '#ffab00';
+        } else if (marketPhase === 'EARLY_BOTTOM_CATCH_LONG') {
+            battleWinner = `🎯 [${tf.toUpperCase()}] EXACT BOTTOM CATCH ${htfTag}: 🧊BID-HELD (${totBullAbsPower.toFixed(1)}x) + 🎭10s/msΔ FLIP ➔ LONG!`;
+            bwCol = '#00e676';
+        } else if (marketPhase === 'EARLY_TOP_CATCH_SHORT') {
+            battleWinner = `🎯 [${tf.toUpperCase()}] EXACT TOP CATCH ${htfTag}: 🧊ASK-CAP (${totBearAbsPower.toFixed(1)}x) + 🎭10s/msΔ FLIP ➔ SHORT!`;
+            bwCol = '#ff1744';
+        } else if (marketPhase === 'REAL_REVERSAL_BULL_SHIFT') {
+            battleWinner = `🔄 [${tf.toUpperCase()}] REAL BULL SHIFT ${htfTag} (Broke Supply ${impBreakerPx.toFixed(dec)} | ${indBullPower}v${indBearPower}) ➔ LONG!`;
+            bwCol = '#00e676';
+        } else if (marketPhase === 'REAL_REVERSAL_BEAR_SHIFT') {
+            battleWinner = `🔄 [${tf.toUpperCase()}] REAL BEAR SHIFT ${htfTag} (Broke Demand ${impBreakerPx.toFixed(dec)} | ${indBearPower}v${indBullPower}) ➔ SHORT!`;
+            bwCol = '#ff1744';
+        } else if (isBullSignalSide && htfBias === 'BULL') {
+            battleWinner = `🚀 [${tf.toUpperCase()}] WITH-TREND DRIVE [WT]: ${htfLbl} + Bulls:${indBullPower} vs WeakBears:${indBearPower}!`;
+            bwCol = '#00e676';
+        } else if (isBearSignalSide && htfBias === 'BEAR') {
+            battleWinner = `💥 [${tf.toUpperCase()}] WITH-TREND DRIVE [WT]: ${htfLbl} + Bears:${indBearPower} vs WeakBulls:${indBullPower}!`;
+            bwCol = '#ff1744';
         } else if (whaleStopHuntBullInit && sellingIsWeak) {
-            battleWinner = `🔥 [${tf.toUpperCase()}] OLD BID LIQUIDATED + NEW 🧊BID-HELD (Sellers Exhausted:${indBearPower}) ➔ STOP-HUNT LONG!`;
+            battleWinner = `🔥 [${tf.toUpperCase()}] OLD BID LIQUIDATED + NEW 🧊BID-HELD ${htfTag} ➔ STOP-HUNT LONG!`;
             bwCol = '#00e676';
         } else if (whaleStopHuntBearInit && buyingIsWeak) {
-            battleWinner = `🔥 [${tf.toUpperCase()}] OLD ASK LIQUIDATED + NEW 🧊ASK-CAP (Buyers Exhausted:${indBullPower}) ➔ STOP-HUNT SHORT!`;
-            bwCol = '#ff1744';
-        } else if ((stage2BullConfirmed || comboLowFakeSweepLong) && sellingIsWeak) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] 🧊BID-HELD + 🎭SPOOF/msΔ + SELLERS WEAK (${indBullPower}v${indBearPower}) ➔ CONFIRMED LONG!`;
-            bwCol = '#00e5ff';
-        } else if ((stage2BearConfirmed || comboHighFakeSweepShort) && buyingIsWeak) {
-            battleWinner = `🎯 [${tf.toUpperCase()}] 🧊ASK-CAP + 🎭SPOOF/msΔ + BUYERS WEAK (${indBearPower}v${indBullPower}) ➔ CONFIRMED SHORT!`;
-            bwCol = '#ff9100';
-        } else if ((comboHighRealBreakoutLong || instBullDrive) && sellingIsWeak) {
-            battleWinner = `🚀 [${tf.toUpperCase()}] TRUE BULL IMBALANCE BREAKOUT (Bulls:${indBullPower} vs WeakBears:${indBearPower} | ⚡Disp:${dispBullLevels})!`;
-            bwCol = '#00e676';
-        } else if ((comboLowRealBreakdownShort || instBearDrive) && buyingIsWeak) {
-            battleWinner = `💥 [${tf.toUpperCase()}] TRUE BEAR IMBALANCE BREAKDOWN (Bears:${indBearPower} vs WeakBulls:${indBullPower} | ⚡Disp:${dispBearLevels})!`;
+            battleWinner = `🔥 [${tf.toUpperCase()}] OLD ASK LIQUIDATED + NEW 🧊ASK-CAP ${htfTag} ➔ STOP-HUNT SHORT!`;
             bwCol = '#ff1744';
         } else if (clusterLongBuildup) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE BID ACCUMULATION (Bulls:${indBullPower} vs Bears:${indBearPower} — Wait Seller Exhaustion)`;
+            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE BID BUILDUP (${indBullPower}v${indBearPower} | ${htfLbl}) — Wait Trigger`;
             bwCol = '#00e5ff';
         } else if (clusterShortBuildup) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE ASK DISTRIBUTION (Bears:${indBearPower} vs Bulls:${indBullPower} — Wait Buyer Exhaustion)`;
+            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE ASK BUILDUP (${indBearPower}v${indBullPower} | ${htfLbl}) — Wait Trigger`;
             bwCol = '#ff9100';
         }
 
-        // Intraday Campaign Score
+        // Intraday Campaign Score (HTF + Macro Flow)
         let intraPts = macroInfo ? macroInfo.netMacro : 0;
-        if (sPocUp > sPocDn) intraPts += 14;
-        else if (sPocDn > sPocUp) intraPts -= 14;
-        intraPts += Math.round((dynWallPts + brkWallPts) * 0.40);
-        if (smtState.bias === 1) intraPts += 10;
-        else if (smtState.bias === -1) intraPts -= 10;
-        intraPts += Math.round(oiPts * 0.5);
+        if (sPocUp > sPocDn) intraPts += 12;
+        else if (sPocDn > sPocUp) intraPts -= 12;
+        intraPts += Math.round((dynWallPts + brkWallPts) * 0.35);
+        intraPts += Math.round((htfFlow.score || 0) * 0.50);
+        if (smtState.bias === 1) intraPts += 8;
+        else if (smtState.bias === -1) intraPts -= 8;
+        intraPts += Math.round(oiPts * 0.45);
 
         const scalpScoreVal = Math.abs(scalpPts);
-        let scalpFinalTxt = `⚖️ SIDEWAYS CLUSTER (${indBullPower}B vs ${indBearPower}S)`;
+        let scalpFinalTxt = `⚖️ SIDEWAYS (${indBullPower}B vs ${indBearPower}S)`;
         let scalpFinalCol = '#ffca28';
 
         if (isTwoWayEqualFight) {
             scalpFinalTxt = `⚖️ SIDEWAYS FIGHT (${indBullPower}B vs ${indBearPower}S — NO TRADE)`;
             scalpFinalCol = '#ffca28';
-        } else if (whaleStopHuntBullInit && sellingIsWeak && scalpPts >= 34) {
-            scalpFinalTxt = `🔥 STOP-HUNT RECLAIM LONG (+${scalpScoreVal})`;
+        } else if (blockLongReason) {
+            scalpFinalTxt = `🚫 WEAK RETEST TRAP (NO LONG)`;
+            scalpFinalCol = '#ffab00';
+        } else if (blockShortReason) {
+            scalpFinalTxt = `🚫 WEAK DIP TRAP (NO SHORT)`;
+            scalpFinalCol = '#ffab00';
+        } else if (marketPhase === 'EARLY_BOTTOM_CATCH_LONG') {
+            scalpFinalTxt = `🎯 EARLY BOTTOM LONG ${htfTag} (+${scalpScoreVal})`;
             scalpFinalCol = '#00e676';
-        } else if (whaleStopHuntBearInit && buyingIsWeak && scalpPts <= -34) {
-            scalpFinalTxt = `🔥 STOP-HUNT REJECT SHORT (-${scalpScoreVal})`;
+        } else if (marketPhase === 'EARLY_TOP_CATCH_SHORT') {
+            scalpFinalTxt = `🎯 EARLY TOP SHORT ${htfTag} (-${scalpScoreVal})`;
             scalpFinalCol = '#ff1744';
-        } else if (scalpPts >= 34 && sellingIsWeak) {
-            scalpFinalTxt = (comboHighRealBreakoutLong || instBullDrive)
-                ? `🚀 IMBALANCE BREAKOUT LONG (+${scalpScoreVal})`
-                : `🟢 CONFIRMED IMBALANCE LONG (+${scalpScoreVal})`;
+        } else if (marketPhase === 'REAL_REVERSAL_BULL_SHIFT') {
+            scalpFinalTxt = `🔄 REAL REVERSAL LONG ${htfTag} (+${scalpScoreVal})`;
             scalpFinalCol = '#00e676';
-        } else if (scalpPts <= -34 && buyingIsWeak) {
-            scalpFinalTxt = (comboLowRealBreakdownShort || instBearDrive)
-                ? `💥 IMBALANCE BREAKDOWN SHORT (-${scalpScoreVal})`
-                : `🔴 CONFIRMED IMBALANCE SHORT (-${scalpScoreVal})`;
+        } else if (marketPhase === 'REAL_REVERSAL_BEAR_SHIFT') {
+            scalpFinalTxt = `🔄 REAL REVERSAL SHORT ${htfTag} (-${scalpScoreVal})`;
+            scalpFinalCol = '#ff1744';
+        } else if (isBullSignalSide) {
+            scalpFinalTxt = htfBias === 'BULL'
+                ? `🚀 WITH-TREND LONG [WT] (+${scalpScoreVal})`
+                : `🟢 IMBALANCE LONG ${htfTag} (+${scalpScoreVal})`;
+            scalpFinalCol = '#00e676';
+        } else if (isBearSignalSide) {
+            scalpFinalTxt = htfBias === 'BEAR'
+                ? `💥 WITH-TREND SHORT [WT] (-${scalpScoreVal})`
+                : `🔴 IMBALANCE SHORT ${htfTag} (-${scalpScoreVal})`;
             scalpFinalCol = '#ff1744';
         } else if (scalpPts >= 18) {
-            scalpFinalTxt = sellingIsWeak
-                ? `🛡️ EARLY LONG: BID-HELD (+${scalpScoreVal})`
-                : `🟡 BULLS LEADING (${indBullPower}v${indBearPower} | WAIT SELLER WEAKNESS)`;
+            scalpFinalTxt = `🟡 BULL BUILDING (${indBullPower}v${indBearPower} | WAIT FLIP)`;
             scalpFinalCol = '#00e5ff';
         } else if (scalpPts <= -18) {
-            scalpFinalTxt = buyingIsWeak
-                ? `🛡️ EARLY SHORT: ASK-CAP (-${scalpScoreVal})`
-                : `🟠 BEARS LEADING (${indBearPower}v${indBullPower} | WAIT BUYER WEAKNESS)`;
+            scalpFinalTxt = `🟠 BEAR BUILDING (${indBearPower}v${indBullPower} | WAIT FLIP)`;
             scalpFinalCol = '#ff9100';
         }
 
         const intraScoreVal = Math.abs(intraPts);
-        let intraFinalTxt = `⏳ SIDEWAYS BUILDUP (${intraPts >= 0 ? '+' : ''}${intraPts})`;
+        let intraFinalTxt = `⏳ RANGE (${htfLbl})`;
         let intraFinalCol = '#ffca28';
-        if (intraPts >= 40 && !isTwoWayEqualFight) { intraFinalTxt = `🟢 MACRO LONG (+${intraScoreVal})`; intraFinalCol = '#00e676'; }
-        else if (intraPts >= 18) { intraFinalTxt = `🏦 ACCUMULATING LONG (+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
-        else if (intraPts <= -40 && !isTwoWayEqualFight) { intraFinalTxt = `🔴 MACRO SHORT (-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
-        else if (intraPts <= -18) { intraFinalTxt = `🏦 DISTRIBUTING SHORT (-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
+        if (intraPts >= 38 && !isTwoWayEqualFight) { intraFinalTxt = `🟢 MACRO LONG [${htfLbl}] (+${intraScoreVal})`; intraFinalCol = '#00e676'; }
+        else if (intraPts >= 18) { intraFinalTxt = `🏦 BULL FLOW [${htfLbl}] (+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
+        else if (intraPts <= -38 && !isTwoWayEqualFight) { intraFinalTxt = `🔴 MACRO SHORT [${htfLbl}] (-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
+        else if (intraPts <= -18) { intraFinalTxt = `🏦 BEAR FLOW [${htfLbl}] (-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
 
-        // =========================================================================
-        // ULTRA-CLEAN SINGLE-LINE FRONT VERDICT BAR (ZERO WRAPPING = ZERO CHART LAG!)
-        // =========================================================================
+        // ULTRA-CLEAN SINGLE-LINE FRONT VERDICT BAR
         const vBox = document.getElementById('masterVerdictBox');
         const vTitle = document.getElementById('masterVerdictTitle');
         const vReasons = document.getElementById('masterVerdictReasons');
@@ -5108,8 +5303,8 @@ function drawAll() {
             vTitle.style.overflow = 'hidden';
             vTitle.style.textOverflow = 'ellipsis';
             vBox.style.borderColor = scalpFinalCol;
-            vBox.style.background = (scalpPts >= 34 && sellingIsWeak) ? 'rgba(0, 200, 83, 0.16)' : ((scalpPts <= -34 && buyingIsWeak) ? 'rgba(255, 23, 68, 0.16)' : 'rgba(20, 25, 38, 0.92)');
-            vTitle.innerText = `⚡ SCALP [${tf.toUpperCase()}]: ${scalpFinalTxt}   |   🌊 MACRO: ${intraFinalTxt}`;
+            vBox.style.background = isBullSignalSide ? 'rgba(0, 200, 83, 0.16)' : (isBearSignalSide ? 'rgba(255, 23, 68, 0.16)' : 'rgba(20, 25, 38, 0.92)');
+            vTitle.innerText = `⚡ SCALP [${tf.toUpperCase()}]: ${scalpFinalTxt}   |   🌊 ${intraFinalTxt}`;
             if (vReasons) {
                 vReasons.style.display = 'none';
                 vReasons.innerText = '';
@@ -5121,19 +5316,23 @@ function drawAll() {
             ? `2-WayFight(${indBullPower}B/${indBearPower}S)`
             : (sellingIsWeak ? `SellersWeak🟢(${indBullPower}v${indBearPower})` : (buyingIsWeak ? `BuyersWeak🔴(${indBearPower}v${indBullPower})` : `Balanced(${indBullPower}v${indBearPower})`));
 
+        const phaseState = ((marketPhase.includes('BULL') || marketPhase.includes('BOTTOM')) && !blockLongReason)
+            ? 'BULL'
+            : (((marketPhase.includes('BEAR') || marketPhase.includes('TOP')) && !blockShortReason) ? 'BEAR' : 'NEU');
+
         const scalpMeterList = [
-            { name: `1. [Imbalance Gate] Bull vs Bear Power & Weakness`, state: execVsAbsState, val: `${execVsAbsLbl} | Imb:${Math.round(powerImbalanceRatio * 100)}% (Need >=45%)` },
-            { name: `2. [x${wWall.toFixed(1)}] Vol-Weighted Intact Absorption (${dynWallPts >= 0 ? '+' : ''}${dynWallPts}pt)`, state: dynWallPts > 0 ? 'BULL' : (dynWallPts < 0 ? 'BEAR' : 'NEU'), val: `BidHeld:${rBidAbs}(Wt:${totBullAbsPower.toFixed(1)}x) vs AskCap:${rAskAbs}(Wt:${totBearAbsPower.toFixed(1)}x)` },
-            { name: `3. [Memory] Broken/Liquidated Wall vs Reclaim (${brkWallPts >= 0 ? '+' : ''}${brkWallPts}pt)`, state: brkWallState, val: brkWallLbl },
-            { name: `4. [x${wPull10s.toFixed(1)}] >=10s Heavy Wall Pull/Abs (${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts}pt)`, state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | Intact10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
-            { name: `5. [x${wMsDom.toFixed(1)}] Live Millisecond DOM Flow (${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts}pt)`, state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}] | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
-            { name: `6. [x${wDisp.toFixed(1)}] Displacement (⚡) & 3c Exec Imbalance (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: dispVsTrapState, val: `⚡Disp:${dispBullLevels}B/${dispBearLevels}S | 3cExecImb:${Math.round(execImbalanceRatio * 100)}%` },
-            { name: `7. [x${wAnchor.toFixed(1)}] 6-Candle Anchor & POC Control (${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts}pt)`, state: dynAnchorPts > 4 ? 'BULL' : (dynAnchorPts < -4 ? 'BEAR' : 'NEU'), val: `Anchor:${anchorBullScore}B/${anchorBearScore}S | POC:${curPoc.toFixed(dec)}` },
-            { name: '8. Sideways Box & Rotational Efficiency Check', state: isTwoWayEqualFight ? 'NEU' : execVsAbsState, val: `Eff:${Math.round(rotationalEff6 * 100)}% | Flips:${colorFlips} | ${isTwoWayEqualFight ? '⚠️CHOP-LOCK' : 'CLEAR'}` },
-            { name: '9. 4-Candle POC Stepping Migration', state: sPocUp > sPocDn ? 'BULL' : (sPocDn > sPocUp ? 'BEAR' : 'NEU'), val: `Up:${sPocUp}↑ vs Dn:${sPocDn}↓` },
+            { name: `1. [Zero-Lag State] Top/Bottom Catch vs Retest Trap`, state: phaseState, val: `${marketPhase} ${htfTag} (Imp:${impDir} Brk:${impBreakerPx ? impBreakerPx.toFixed(dec) : '--'})` },
+            { name: `2. [Non-Blocking HTF] Higher Timeframe Tag`, state: htfBias === 'BULL' ? 'BULL' : (htfBias === 'BEAR' ? 'BEAR' : 'NEU'), val: `${htfLbl} (Score:${htfFlow.score || 0} | Info Only)` },
+            { name: `3. [Imbalance Gate] Bull vs Bear Power & Weakness`, state: execVsAbsState, val: `${execVsAbsLbl} | Imb:${Math.round(powerImbalanceRatio * 100)}%` },
+            { name: `4. [x${wWall.toFixed(1)}] Vol-Weighted Intact Absorption (${dynWallPts >= 0 ? '+' : ''}${dynWallPts}pt)`, state: dynWallPts > 0 ? 'BULL' : (dynWallPts < 0 ? 'BEAR' : 'NEU'), val: `BidHeld:${rBidAbs}(Wt:${totBullAbsPower.toFixed(1)}x) vs AskCap:${rAskAbs}(Wt:${totBearAbsPower.toFixed(1)}x)` },
+            { name: `5. [Memory] Broken/Liquidated Wall vs Reclaim (${brkWallPts >= 0 ? '+' : ''}${brkWallPts}pt)`, state: brkWallState, val: brkWallLbl },
+            { name: `6. [x${wPull10s.toFixed(1)}] >=10s Heavy Wall Pull/Abs (${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts}pt)`, state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | 10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
+            { name: `7. [x${wMsDom.toFixed(1)}] Live Millisecond DOM Flow (${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts}pt)`, state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}] | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
+            { name: `8. [x${wDisp.toFixed(1)}] Displacement (⚡) & 3c Exec Imbalance (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: dispVsTrapState, val: `⚡Disp:${dispBullLevels}B/${dispBearLevels}S | 3cImb:${Math.round(execImbalanceRatio * 100)}%` },
+            { name: `9. 4-Candle POC Migration & Anchor (${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts}pt)`, state: dynAnchorPts > 4 ? 'BULL' : (dynAnchorPts < -4 ? 'BEAR' : 'NEU'), val: `POC Up:${sPocUp}↑ Dn:${sPocDn}↓ | CurPOC:${curPoc.toFixed(dec)}` },
             { name: `10. Live Open Interest Synergy (${oiPts >= 0 ? '+' : ''}${oiPts}pt)`, state: oiStateBadge, val: oiVerdictTxt },
             { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
-            { name: '12. [Ref Only] Day High/Low & Swings', state: 'NEU', val: `CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)} (0pt Ref)` }
+            { name: '12. [Ref Only] Day High/Low & Impulse Origin', state: 'NEU', val: `Orig:${impOriginPx ? impOriginPx.toFixed(dec) : '--'} | CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)}` }
         ];
 
         const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
@@ -5142,13 +5341,13 @@ function drawAll() {
         const ubLoCnt = unfinishedLevels.filter(u => u.type === 'UB-LOW' && u.price < lastC.close).length;
 
         const intraMeterList = [
-            { name: '1. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
-            { name: '2. Multi-Swing Cluster Absorption (Unbroken)', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidAbs:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskAbs:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
-            { name: '3. Broken/Liquidated Whale Wall Balance', state: brkWallState, val: `BrkBid:${brkBidCnt}(Wt:${brokenBidLiqWeight.toFixed(1)}) BrkAsk:${brkAskCnt}(Wt:${brokenAskLiqWeight.toFixed(1)})` },
-            { name: '4. Session >=10s Wall Pulling Campaign (10sPΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `Sess10sPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
-            { name: '5. Independent Bull vs Bear Power Balance', state: sellingIsWeak ? 'BULL' : (buyingIsWeak ? 'BEAR' : 'NEU'), val: `BullPwr:${indBullPower} vs BearPwr:${indBearPower} (Imb:${Math.round(powerImbalanceRatio * 100)}%)` },
-            { name: '6. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
-            { name: '7. [Ref Only] Day & Prev Day High/Low Magnet', state: 'NEU', val: `CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)} PDH:${pdh ? pdh.toFixed(dec) : '--'} PDL:${pdl ? pdl.toFixed(dec) : '--'}` },
+            { name: '1. Higher Timeframe Orderflow Context', state: htfBias === 'BULL' ? 'BULL' : (htfBias === 'BEAR' ? 'BEAR' : 'NEU'), val: `${htfLbl} (Score:${htfFlow.score || 0})` },
+            { name: '2. Dominant Impulse Leg & Breaker Zone', state: impDir === 'BULL' ? 'BULL' : (impDir === 'BEAR' ? 'BEAR' : 'NEU'), val: `Imp:${impDir} | Brk:${impBreakerPx ? impBreakerPx.toFixed(dec) : '--'} | Orig:${impOriginPx ? impOriginPx.toFixed(dec) : '--'}` },
+            { name: '3. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
+            { name: '4. Multi-Swing Cluster Absorption (Unbroken)', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidAbs:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskAbs:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
+            { name: '5. Broken/Liquidated Whale Wall Balance', state: brkWallState, val: `BrkBid:${brkBidCnt}(Wt:${brokenBidLiqWeight.toFixed(1)}) BrkAsk:${brkAskCnt}(Wt:${brokenAskLiqWeight.toFixed(1)})` },
+            { name: '6. Session >=10s Wall Pulling Campaign (10sPΔ)', state: (macroInfo && macroInfo.macroPullDelta < 0) ? 'BULL' : ((macroInfo && macroInfo.macroPullDelta > 0) ? 'BEAR' : 'NEU'), val: `Sess10sPΔ:${macroInfo ? fmt(macroInfo.macroPullDelta) : 0}` },
+            { name: '7. Price vs Session Equilibrium POC', state: (lastC.close > avgSessPoc + domStep) ? 'BULL' : ((lastC.close < avgSessPoc - domStep) ? 'BEAR' : 'NEU'), val: `AvgPOC:${avgSessPoc.toFixed(dec)}` },
             { name: '8. Unfinished Business & nPOC Gravity', state: ubHiCnt > ubLoCnt ? 'BULL' : (ubLoCnt > ubHiCnt ? 'BEAR' : 'NEU'), val: `UB-HI:${ubHiCnt} UB-LO:${ubLoCnt} nPOCs:${nakedPocs.length}` },
             { name: '9. Orderbook Macro Depth + Live OI', state: (nearBidRest >= minBookFloor && nearBidRest > nearAskRest * 1.30) ? 'BULL' : ((nearAskRest >= minBookFloor && nearAskRest > nearBidRest * 1.30) ? 'BEAR' : oiStateBadge), val: `B:${fmt(nearBidRest)} A:${fmt(nearAskRest)} | ${oiVerdictTxt}` },
             { name: '10. SMT Divergence Alignment', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text }
@@ -5175,22 +5374,22 @@ function drawAll() {
 
             document.getElementById('meterModalBody').innerHTML = `
                 <div class="rule-sec" style="grid-column: 1 / -1; border-color:#00e5ff; background:#0e1422;">
-                    <h4 style="color:#00e5ff;">🏛️ IMBALANCE vs TWO-WAY FIGHT DIAGNOSTIC, BROKEN-WALL MEMORY & OI TELEMETRY</h4>
+                    <h4 style="color:#00e5ff;">🏛️ ZERO-LAG TOP/BOTTOM CATCH, RETEST TRAP FILTER & NON-BLOCKING HTF</h4>
                     <div style="display:flex; flex-wrap:wrap; gap:12px; font-size:11.5px; line-height:1.6;">
-                        <span><b>Regime:</b> <code style="color:#ffeb3b;">${activeRegime}</code></span>
-                        <span><b>Imbalance Check:</b> <code style="color:${isTwoWayEqualFight ? '#ffca28' : '#00e676'};">BullPower:${indBullPower} vs BearPower:${indBearPower} (Imb:${Math.round(powerImbalanceRatio * 100)}% | SellingWeak:${sellingIsWeak} | BuyingWeak:${buyingIsWeak})</code></span>
+                        <span><b>Market Phase:</b> <code style="color:#ffeb3b;">${marketPhase} ${htfTag}</code></span>
+                        <span><b>HTF Context (Non-Blocking):</b> <code style="color:${htfBias === 'BULL' ? '#00e676' : (htfBias === 'BEAR' ? '#ff5252' : '#ffca28')};">${htfLbl} (Score:${htfFlow.score || 0})</code></span>
+                        <span><b>Last Impulse Leg:</b> <code style="color:#00e5ff;">Dir:${impDir} (${candlesSinceImp}c ago) | BreakerPOC:${impBreakerPx ? impBreakerPx.toFixed(dec) : '--'} | Origin:${impOriginPx ? impOriginPx.toFixed(dec) : '--'} | ImpAvgVol:${fmt(impAvgVol)}</code></span>
+                        <span><b>Retest Trap Filter:</b> <code style="color:#ffab00;">${blockLongReason || blockShortReason || 'CLEAR (Real Orderflow Move)'}</code></span>
+                        <span><b>Imbalance:</b> <code style="color:#69f0ae;">Bull:${indBullPower} vs Bear:${indBearPower} (Imb:${Math.round(powerImbalanceRatio * 100)}%) | ${oiVerdictTxt}</code></span>
                         <span><b>DOM Battle:</b> <span style="color:${bwCol};font-weight:bold;">${battleWinner}</span></span>
-                        <span><b>Broken Wall Memory:</b> <code style="color:#ff80ab;">${brkWallLbl} (BrkBid:${brkBidCnt} | BrkAsk:${brkAskCnt} | Reclaim:${reclaimBidCnt}B/${reclaimAskCnt}A)</code></span>
-                        <span><b>Live OI:</b> <code style="color:#69f0ae;">${oiVerdictTxt}</code></span>
-                        <span><b>Score Split:</b> <code style="color:#cfd8dc;">IntactWalls:${dynWallPts >= 0 ? '+' : ''}${dynWallPts} | BrkWallMem:${brkWallPts >= 0 ? '+' : ''}${brkWallPts} | 10sPull:${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts} | Sweep/Disp:${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts} | msΔ:${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts} | Anchor/POC:${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts} | OI:${oiPts >= 0 ? '+' : ''}${oiPts} ➔ NET:${scalpPts >= 0 ? '+' : ''}${scalpPts}</code></span>
                     </div>
                 </div>
                 <div class="rule-sec" style="border-color:${scalpFinalCol};">
-                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] IMBALANCE SCALP METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
+                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] ZERO-LAG SCALP METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
                     ${renderRows(scalpMeterList)}
                 </div>
                 <div class="rule-sec" style="border-color:${intraFinalCol};">
-                    <h4 style="color:${intraFinalCol};">🌊 [${tf.toUpperCase()}] MACRO CAMPAIGN METER: ${intraFinalTxt} (🟢${iBullCnt} Bull | 🔴${iBearCnt} Bear | ⚪${iNeuCnt} Neu)</h4>
+                    <h4 style="color:${intraFinalCol};">🌊 [${tf.toUpperCase()}] MACRO & HTF METER: ${intraFinalTxt} (🟢${iBullCnt} Bull | 🔴${iBearCnt} Bear | ⚪${iNeuCnt} Neu)</h4>
                     ${renderRows(intraMeterList)}
                 </div>
             `;
@@ -5201,6 +5400,21 @@ function drawAll() {
             timeframe: tf,
             live_price: lastC.close,
             active_context_regime: activeRegime,
+            impulse_state_machine: {
+                market_phase: marketPhase,
+                htf_alignment_tag: htfTag,
+                early_bottom_catch_long: earlyBottomCatchLong,
+                early_top_catch_short: earlyTopCatchShort,
+                dominant_impulse_dir: impDir,
+                candles_since_impulse: candlesSinceImp,
+                impulse_breaker_poc: impBreakerPx,
+                impulse_origin_invalidation: impOriginPx,
+                impulse_avg_volume: Math.round(impAvgVol),
+                current_candle_volume: Math.round(lastC.volume || 0),
+                long_blocked_trap_reason: blockLongReason,
+                short_blocked_trap_reason: blockShortReason
+            },
+            htf_orderflow_sync: htfFlow,
             imbalance_and_chop_check: {
                 independent_bull_power: indBullPower,
                 independent_bear_power: indBearPower,
@@ -5630,6 +5844,53 @@ client_oi_cache = {
     for sym in SYMBOLS
 }
 
+def _calc_htf_snapshot(symbol, tf_k):
+    hist = list(candles[symbol].get(tf_k, []))[-5:]
+    curr = current_candles[symbol].get(tf_k)
+    if curr is not None:
+        c_fin = finalize_candle(curr)
+        if not hist or c_fin["start"] != hist[-1]["start"]:
+            hist.append(c_fin)
+    if len(hist) < 2:
+        return {"tf": tf_k, "dir": "NEU", "score": 0, "poc": None, "delta": 0}
+
+    last_h = hist[-1]
+    prev_h = hist[-2]
+    l_cls = float(last_h.get("close", 0.0))
+    l_opn = float(last_h.get("open", 0.0))
+    l_poc = float(last_h["poc"]) if last_h.get("poc") is not None else (float(last_h["high"]) + float(last_h["low"])) * 0.5
+    p_poc = float(prev_h["poc"]) if prev_h.get("poc") is not None else (float(prev_h["high"]) + float(prev_h["low"])) * 0.5
+    l_delta = float(last_h.get("delta", 0.0))
+    sum_delta = sum(float(x.get("delta", 0.0)) for x in hist[-3:])
+
+    sc = 0
+    if l_cls > l_poc:
+        sc += 18
+    elif l_cls < l_poc:
+        sc -= 18
+    if l_poc > p_poc:
+        sc += 14
+    elif l_poc < p_poc:
+        sc -= 14
+    if l_cls > l_opn and l_delta > 0:
+        sc += 14
+    elif l_cls < l_opn and l_delta < 0:
+        sc -= 14
+    if sum_delta > 0:
+        sc += 8
+    elif sum_delta < 0:
+        sc -= 8
+
+    d_str = "BULL" if sc >= 20 else ("BEAR" if sc <= -20 else "NEU")
+    return {
+        "tf": tf_k,
+        "dir": d_str,
+        "score": sc,
+        "poc": round(l_poc, 6),
+        "delta": round(l_delta, 2),
+    }
+
+
 @app.route("/api/candles")
 def api_candles():
     symbol = request.args.get("symbol", "BTCUSDT").upper()
@@ -5650,13 +5911,39 @@ def api_candles():
             if not finished or current_final["start"] != finished[-1]["start"]:
                 finished.append(current_final)
 
-        # Piggyback Zero-Load Day High/Low (CDH/CDL) & Previous Day High/Low (PDH/PDL) from existing 1d RAM candles!
         d_curr = current_candles[symbol].get("1d")
         d_hist = candles[symbol].get("1d")
         cdh = float(d_curr["high"]) if d_curr else (max(float(x["high"]) for x in finished) if finished else None)
         cdl = float(d_curr["low"]) if d_curr else (min(float(x["low"]) for x in finished) if finished else None)
         pdh = float(d_hist[-1]["high"]) if d_hist and len(d_hist) > 0 else None
         pdl = float(d_hist[-1]["low"]) if d_hist and len(d_hist) > 0 else None
+
+        if timeframe in ("1m", "3m", "5m"):
+            htf1_k, htf2_k = "15m", "1h"
+        elif timeframe in ("15m", "30m"):
+            htf1_k, htf2_k = "1h", "4h"
+        else:
+            htf1_k, htf2_k = "4h", "1d"
+
+        h1_s = _calc_htf_snapshot(symbol, htf1_k)
+        h2_s = _calc_htf_snapshot(symbol, htf2_k)
+        htf_comb = int(round(h1_s["score"] * 0.60 + h2_s["score"] * 0.40))
+        if h1_s["dir"] == "BULL" and h2_s["dir"] != "BEAR" and htf_comb >= 18:
+            htf_bias = "BULL"
+        elif h1_s["dir"] == "BEAR" and h2_s["dir"] != "BULL" and htf_comb <= -18:
+            htf_bias = "BEAR"
+        elif h1_s["dir"] != h2_s["dir"] and h1_s["dir"] != "NEU" and h2_s["dir"] != "NEU":
+            htf_bias = "MIXED"
+        else:
+            htf_bias = "NEU"
+
+        htf_flow = {
+            "bias": htf_bias,
+            "score": htf_comb,
+            "htf1": h1_s,
+            "htf2": h2_s,
+            "label": f"{htf1_k.upper()}:{h1_s['dir']} | {htf2_k.upper()}:{h2_s['dir']}",
+        }
 
         return jsonify({
             "status": "ok",
@@ -5670,6 +5957,7 @@ def api_candles():
                 "pdh": pdh,
                 "pdl": pdl,
             },
+            "htf_flow": htf_flow,
         })
 
 
@@ -5972,28 +6260,36 @@ def api_ai_mentor():
     neu_list = [f"{p.get('name')} -> {p.get('val')}" for p in params if p.get("state") == "NEU"]
 
     abs_mem = engine_data.get("absorption_and_broken_wall_memory", {})
+    sm_obj = engine_data.get("impulse_state_machine", {})
+    htf_obj = engine_data.get("htf_orderflow_sync", {})
+    imb_obj = engine_data.get("imbalance_and_chop_check", {})
+
     context_truth = f"""
 BHASHA KA KADA NIYAM (STRICT HINGLISH RULE):
-- Tujhe apna 100% jawab ठेठ देसी HINGLISH (Roman Hindi, jaise: "Bhai abhi price ke niche heavy BID-HELD baitha hai aur 10s Ask wall pull ho rahi hai...") me hi likhna hai!
-- Pure English me sentences bilkul MAT likhna! Technical terms (POC, msΔ, 10sPΔ, Ask-Cap, Bid-Hold, 💔BRK-BID/ASK, 🔥SWP-RCLM, OIΔ, SL, TP) use kar, par samjhane wali bhasha 100% Hinglish honi chahiye.
+- Tujhe apna 100% jawab ठेठ देसी HINGLISH (Roman Hindi) me hi likhna hai! Pure English sentences bilkul MAT likhna.
 
-DYNAMIC ENGINE DATA (GROUND TRUTH):
-- Active Market Regime: {active_regime}
-- Master Scalp Verdict: {scalp_bias} (Dynamic Net Score: {scalp_score} | Decisive Cut: ±32)
-- Master Intraday Campaign: {intra_bias} (Macro Score: {intra_score})
+ZERO-LAG TOP/BOTTOM CATCH & RETEST TRAP GROUND TRUTH:
+- Market Phase: {sm_obj.get('market_phase', 'UNKNOWN')} | HTF Tag: {sm_obj.get('htf_alignment_tag', '')}
+- Early Bottom Catch Long: {sm_obj.get('early_bottom_catch_long')} | Early Top Catch Short: {sm_obj.get('early_top_catch_short')}
+- Dominant Impulse Leg: Dir={sm_obj.get('dominant_impulse_dir')} | BreakerPOC={sm_obj.get('impulse_breaker_poc')} | Origin={sm_obj.get('impulse_origin_invalidation')} | ImpAvgVol={sm_obj.get('impulse_avg_volume')} vs CurVol={sm_obj.get('current_candle_volume')}
+- Weak Retest Trap Alerts: LongBlock={sm_obj.get('long_blocked_trap_reason')} | ShortBlock={sm_obj.get('short_blocked_trap_reason')}
+- Higher Timeframe Context (Non-Blocking [WT]/[CT]): {json.dumps(htf_obj)}
+- Imbalance & Chop Check: {json.dumps(imb_obj)}
+- Master Scalp Verdict: {scalp_bias} (Score: {scalp_score})
+- Master Intraday Verdict: {intra_bias} (Score: {intra_score})
 - Volume-Weighted Absorption & Broken Wall Memory: {json.dumps(abs_mem)}
 - Dynamic Weights: {json.dumps(dyn_obj)}
-- Reference High/Low Coordinates (Strictly 0pt Reference Only): {json.dumps(key_lvls)}
+- Reference Coordinates (0pt Ref): {json.dumps(key_lvls)}
 - Live Open Interest (OI): {json.dumps(oi_obj)}
 - BULLISH PARAMETERS ({len(bull_list)}): {"; ".join(bull_list) if bull_list else "Koi nahi"}
 - BEARISH PARAMETERS ({len(bear_list)}): {"; ".join(bear_list) if bear_list else "Koi nahi"}
 - NEUTRAL PARAMETERS ({len(neu_list)}): {"; ".join(neu_list) if neu_list else "Koi nahi"}
 
 NIYAM:
-1. CDH/CDL, PDH/PDL, aur Swing High/Low sirf Reference Points hain—kabhi bhi sirf level dekh kar bounce ya rejection assume mat karna!
-2. Volume-Weighted Absorption (BID-HELD / ASK-CAP) + Close Confirmation = Stage-1 Early Signal. Jab uske sath >=10s Spoof Pull (10sPΔ) ya msΔ jud jaye = Stage-2 High-Prob Confirmation!
-3. Broken Wall Memory (💔BRK-BID / 💔BRK-ASK): Agar koi bada wall toot gaya aur naya wall nahi bana, toh wo aggressor continuation fuel hai. Agar purana wall liquidate karke naya wall banaya aur reclaim kiya (🔥SWP-RCLM), toh wo Whale Stop-Hunt Reversal hai!
-4. Diplomatic ("dono side ki baat") bilkul mat karna. Dynamic Score ({scalp_score}) ke hisab se ek-tarfa saaf stand lena!"""
+1. Agar `early_bottom_catch_long` ya `early_top_catch_short` TRUE hai, toh HTF opposite hone par bhi trade mana MAT karna — bolna ki exact Bottom/Top par Heavy Absorption + 10s/msΔ flip aa gaya hai, sirf `[CT-TIGHT SL]` ke sath wall ke piche tight SL rakhna hai!
+2. Agar `long_blocked_trap_reason` ya `short_blocked_trap_reason` active hai, toh saaf bolna ki wahan koi heavy absorption nahi hai aur ye pichle impulse ka weak retest / short-covering trap hai!
+3. `[WT]` (With-Trend) hone par bade targets (nPOC/UB) hold karne ka plan dena, `[CT]` hone par nearest Breaker POC / nPOC par profit book karne ka plan dena.
+4. Diplomatic mat banna — data ke hisab se ek-tarfa saaf faisla dena!"""
 
     q_low = (question or "").strip().lower()
 
