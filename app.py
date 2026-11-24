@@ -3089,6 +3089,7 @@ setTimeout(fetchClientOI, 600);
 
 let fetching = false;
 let fetchSeq = 0;
+let dataVersion = 0;
 async function fetchData(forceNow = false) {
     if (fetching && !forceNow) return;
     fetching = true;
@@ -3122,6 +3123,7 @@ async function fetchData(forceNow = false) {
         }
         document.getElementById('connTxt').innerText = '● SYNC';
         document.getElementById('connTxt').style.color = '#00e676';
+        dataVersion++;
         needsRender = true;
     } catch (e) {
         document.getElementById('connTxt').innerText = '● RETRY';
@@ -5001,310 +5003,326 @@ function drawAll() {
             rawNetPts = -22;
         }
 
-        // 4. Adaptive Zero-Lag Filter: Instant jump on real institutional burst (>=16pt shift), light smoothing only on tiny noise!
-        if (typeof window._prevSmoothScalpPts === 'number' && window._prevSmoothSym === symbol && window._prevSmoothTf === tf) {
-            if (Math.abs(rawNetPts - window._prevSmoothScalpPts) < 16) {
-                rawNetPts = Math.round(window._prevSmoothScalpPts * 0.18 + rawNetPts * 0.82);
+        // =========================================================================
+        // ORDERFLOW DENSITY MEMORY + COUNTER-FLOW MEASURE + ANTI-FLICKER LATCH
+        // =========================================================================
+        const densWin = candles.slice(-16);
+        let waveBullDens = 0, waveBearDens = 0;
+        let recBullDens = 0, recBearDens = 0;
+        const bullHeavyList = [], bearHeavyList = [];
+
+        densWin.forEach((dc, idx) => {
+            const dVol = dc.volume || 0;
+            const volNorm = dVol / Math.max(avgFlowVol, 0.001);
+            const buySh = dVol > 0 ? (dc.buy_volume || 0) / dVol : 0.5;
+            const sellSh = 1 - buySh;
+            const dSpan = Math.max(dc.high - dc.low, rawStep);
+            const dClosePos = (dc.close - dc.low) / dSpan;
+            const bodyEff = Math.abs(dc.close - dc.open) / dSpan;
+            const dDelta = dc.delta || 0;
+
+            // Measure true institutional density (Volume * Dominance * Price Result + Absorption Effort-vs-Result)
+            let cBullD = volNorm * (buySh >= 0.52 ? buySh * 1.4 : buySh * 0.75) * (dc.close >= dc.open ? (1 + bodyEff * 0.75) : 0.60);
+            let cBearD = volNorm * (sellSh >= 0.52 ? sellSh * 1.4 : sellSh * 0.75) * (dc.close <= dc.open ? (1 + bodyEff * 0.75) : 0.60);
+
+            // Absorption density credit: heavy negative delta closing high = Bull density; heavy positive delta closing low = Bear density
+            if (dDelta < -effCellBench * 0.35 && dClosePos >= 0.56) cBullD += volNorm * 0.85;
+            if (dDelta > effCellBench * 0.35 && dClosePos <= 0.44) cBearD += volNorm * 0.85;
+
+            const ageWt = 0.55 + (0.45 * ((idx + 1) / Math.max(1, densWin.length)));
+            waveBullDens += cBullD * ageWt;
+            waveBearDens += cBearD * ageWt;
+
+            if (cBullD >= 0.9) bullHeavyList.push(cBullD);
+            if (cBearD >= 0.9) bearHeavyList.push(cBearD);
+
+            if (idx >= densWin.length - 3) {
+                const rWt = (idx === densWin.length - 1) ? 1.0 : ((idx === densWin.length - 2) ? 0.75 : 0.50);
+                recBullDens += cBullD * rWt;
+                recBearDens += cBearD * rWt;
             }
+        });
+
+        // Add Live Structural Orderflow Density (Intact Absorption + Broken Walls + 10s Pulls + Displacement — NOT 1s msΔ flicker!)
+        const liveStructBullD = (totBullAbsPower * 0.85) + (dispBullLevels * 0.55) + (reclaimBidCnt * 0.80) + (brkAskCnt > 0 && rAskAbs === 0 ? 0.65 : 0) + (aged10sPullDelta < -effCellBench * 0.16 ? 0.55 : 0);
+        const liveStructBearD = (totBearAbsPower * 0.85) + (dispBearLevels * 0.55) + (reclaimAskCnt * 0.80) + (brkBidCnt > 0 && rBidAbs === 0 ? 0.65 : 0) + (aged10sPullDelta > effCellBench * 0.16 ? 0.55 : 0);
+
+        recBullDens += liveStructBullD;
+        recBearDens += liveStructBearD;
+        waveBullDens += liveStructBullD * 0.65;
+        waveBearDens += liveStructBearD * 0.65;
+
+        const waveTotalD = Math.max(waveBullDens + waveBearDens, 0.01);
+        const waveBullPct = Math.round((waveBullDens / waveTotalD) * 100);
+        const waveBearPct = 100 - waveBullPct;
+
+        const recTotalD = Math.max(recBullDens + recBearDens, 0.01);
+        const recBullPct = Math.round((recBullDens / recTotalD) * 100);
+        const recBearPct = 100 - recBullPct;
+
+        // Top-3 heavy impulse average density of each side (Memory of how strong the prior heavy wave really was)
+        bullHeavyList.sort((a, b) => b - a);
+        bearHeavyList.sort((a, b) => b - a);
+        const peakBullWaveD = bullHeavyList.length > 0 ? bullHeavyList.slice(0, 3).reduce((a, b) => a + b, 0) : Math.max(waveBullDens * 0.35, 1.0);
+        const peakBearWaveD = bearHeavyList.length > 0 ? bearHeavyList.slice(0, 3).reduce((a, b) => a + b, 0) : Math.max(waveBearDens * 0.35, 1.0);
+
+        // Dominant Wave Side & Counter-Orderflow Break Ratio
+        const waveSpreadPct = Math.abs(waveBullPct - waveBearPct);
+        let domWaveSide = (waveBullPct >= 56) ? 'BULL' : ((waveBearPct >= 56) ? 'BEAR' : 'SIDEWAYS');
+
+        // Measure Counter-Orderflow Density against the Dominant Heavy Wave
+        let counterDensityPct = 0;
+        if (domWaveSide === 'BEAR') {
+            counterDensityPct = Math.min(180, Math.round((recBullDens / Math.max(peakBearWaveD, 1.0)) * 100));
+        } else if (domWaveSide === 'BULL') {
+            counterDensityPct = Math.min(180, Math.round((recBearDens / Math.max(peakBullWaveD, 1.0)) * 100));
+        } else {
+            counterDensityPct = Math.min(100, Math.round((Math.min(waveBullDens, waveBearDens) / Math.max(waveBullDens, waveBearDens, 0.01)) * 100));
         }
-        window._prevSmoothScalpPts = rawNetPts;
-        window._prevSmoothSym = symbol;
-        window._prevSmoothTf = tf;
 
-        let scalpPts = Math.max(-99, Math.min(99, rawNetPts));
-
-        // =========================================================================
-        // ZERO-LAG TOP/BOTTOM CATCH + FAKE RETEST FILTER + NON-BLOCKING HTF [WT/CT]
-        // =========================================================================
+        // Dominant Impulse Reference Levels (for Breaker / Origin tracking)
         const impSample = candles.slice(-24);
-        let impDir = 'NONE';
-        let impIdx = -1;
-        let impOriginPx = null;
-        let impBreakerPx = null;
-        let impExtremePx = null;
-        let impAvgVol = avgFlowVol;
-
+        let impDir = domWaveSide === 'SIDEWAYS' ? 'NONE' : domWaveSide;
+        let impIdx = -1, impOriginPx = null, impBreakerPx = null, impAvgVol = avgFlowVol;
         for (let k = impSample.length - 1; k >= 0; k--) {
             const ic = impSample[k];
             const icVol = ic.volume || 0;
             const icBody = Math.abs(ic.close - ic.open);
             const icDelta = ic.delta || 0;
-            const strongVol = icVol >= avgFlowVol * 1.12;
-            const strongBody = icBody >= Math.max(avgCandleRange * 0.62, domStep * 1.4);
-            const oneSidedDelta = Math.abs(icDelta) >= Math.max(icVol * 0.13, effCellBench * 0.35);
-
-            if (strongVol && strongBody && oneSidedDelta) {
+            if (icVol >= avgFlowVol * 1.10 && icBody >= Math.max(avgCandleRange * 0.60, domStep * 1.3) && Math.abs(icDelta) >= Math.max(icVol * 0.12, effCellBench * 0.30)) {
                 const dir = (ic.close > ic.open && icDelta > 0) ? 'BULL' : ((ic.close < ic.open && icDelta < 0) ? 'BEAR' : 'NONE');
                 if (dir !== 'NONE') {
                     impDir = dir;
                     impIdx = k;
                     impBreakerPx = ic.poc != null ? ic.poc : (ic.open + ic.close) * 0.5;
                     impOriginPx = dir === 'BULL' ? Math.min(ic.open, ic.low) : Math.max(ic.open, ic.high);
-                    impExtremePx = dir === 'BULL' ? ic.high : ic.low;
-                    let volSum = icVol, legCnt = 1;
-
-                    let b = k - 1;
-                    while (b >= 0 && legCnt < 4) {
-                        const bc = impSample[b];
-                        const sameDir = dir === 'BULL' ? (bc.close > bc.open) : (bc.close < bc.open);
-                        if (!sameDir || (bc.volume || 0) < avgFlowVol * 0.65) break;
-                        impOriginPx = dir === 'BULL' ? Math.min(impOriginPx, bc.open, bc.low) : Math.max(impOriginPx, bc.open, bc.high);
-                        volSum += (bc.volume || 0);
-                        legCnt++;
-                        b--;
-                    }
-                    for (let f = k + 1; f < impSample.length; f++) {
-                        if (dir === 'BULL' && impSample[f].high > impExtremePx) impExtremePx = impSample[f].high;
-                        if (dir === 'BEAR' && impSample[f].low < impExtremePx) impExtremePx = impSample[f].low;
-                    }
-                    impAvgVol = volSum / legCnt;
+                    impAvgVol = icVol;
                     break;
                 }
             }
         }
-
         const candlesSinceImp = impIdx >= 0 ? (impSample.length - 1 - impIdx) : 99;
         const htfBias = (htfFlow && htfFlow.bias) ? htfFlow.bias : 'NEU';
-        const htfLbl = (htfFlow && htfFlow.label) ? htfFlow.label : 'HTF:NEU';
-        const oiWeakOrCover = oiActive && oiDeltaVal <= 0;
-        const oiFreshBuild = !oiActive || oiDeltaVal > 0;
+        const htfLbl = (htfFlow && htfFlow.label) ? htfFlow.label : 'HTF:SYNC';
 
-        // 1. ZERO-LAG EXACT TOP / BOTTOM CATCH (Does NOT wait for HTF or Breaker POC!)
-        // Fires the second Heavy Absorption/Stop-Hunt stops price + Spoof/msΔ/Taker flips with ZERO opposing wall!
-        const earlyBottomCatchLong = (
-            !isTwoWayEqualFight && sellingIsWeak && rAskAbs === 0
-            && (totBullAbsPower >= 1.25 || whaleStopHuntBullInit || reclaimBidCnt > 0 || (bidHeldCloseConfirmed && stage2BullConfirmed))
-            && (wall10sState === 'BULL' || liveDomFlowState === 'BULL' || (lastC.delta > effCellBench * 0.25 && closePos >= 0.56))
-            && (lastC.close > curPoc || closePos >= 0.58)
-        );
-        const earlyTopCatchShort = (
-            !isTwoWayEqualFight && buyingIsWeak && rBidAbs === 0
-            && (totBearAbsPower >= 1.25 || whaleStopHuntBearInit || reclaimAskCnt > 0 || (askCapCloseConfirmed && stage2BearConfirmed))
-            && (wall10sState === 'BEAR' || liveDomFlowState === 'BEAR' || (lastC.delta < -effCellBench * 0.25 && closePos <= 0.44))
-            && (lastC.close < curPoc || closePos <= 0.42)
+        // Density-Driven Market Classification:
+        // 1. SIDEWAYS / ACCUMULATION: Equal density maintained on both sides!
+        const isDensityAccumulation = (
+            (waveSpreadPct <= 12 && Math.abs(recBullPct - recBearPct) <= 18)
+            || (isTwoWayEqualFight && waveSpreadPct <= 18)
         );
 
-        // 2. FAKE RETEST TRAP vs REAL REVERSAL CLASSIFIER
-        let marketPhase = 'CHOP_NO_IMPULSE';
+        // 2. REAL REVERSAL: Counter-orderflow density is >= 85% of prior heavy wave + real Absorption/Shift!
+        const realBullReversal = (
+            domWaveSide === 'BEAR' && !isDensityAccumulation
+            && counterDensityPct >= 85
+            && recBullPct >= 58 && rAskAbs === 0
+            && (totBullAbsPower >= 1.10 || dispBullLevels > 0 || whaleStopHuntBullInit || reclaimBidCnt > 0)
+            && (lastC.close > curPoc || (impBreakerPx !== null && lastC.close > impBreakerPx))
+        );
+        const realBearReversal = (
+            domWaveSide === 'BULL' && !isDensityAccumulation
+            && counterDensityPct >= 85
+            && recBearPct >= 58 && rBidAbs === 0
+            && (totBearAbsPower >= 1.10 || dispBearLevels > 0 || whaleStopHuntBearInit || reclaimAskCnt > 0)
+            && (lastC.close < curPoc || (impBreakerPx !== null && lastC.close < impBreakerPx))
+        );
+
+        // 3. RETEST (PULLBACK): Dominant heavy wave is intact, counter-orderflow density is TOO WEAK (< 75%) to break it!
+        const isBearTrendRetesting = (
+            domWaveSide === 'BEAR' && !realBullReversal && !isDensityAccumulation
+            && counterDensityPct < 75
+            && (rawNetPts > 0 || lastC.close > lastC.open || recBullPct >= 50)
+        );
+        const isBullTrendRetesting = (
+            domWaveSide === 'BULL' && !realBearReversal && !isDensityAccumulation
+            && counterDensityPct < 75
+            && (rawNetPts < 0 || lastC.close < lastC.open || recBearPct >= 50)
+        );
+
+        // Adjust rawNetPts using Orderflow Density Memory so 1-tick noise can NEVER overpower heavy prior density!
+        let densityScore = Math.round(((waveBullPct - 50) * 0.85) + ((recBullPct - 50) * 0.75));
+        let blendedPts = Math.round(rawNetPts * 0.55 + densityScore * 0.45);
+
+        let marketPhase = 'SIDEWAYS_ACCUMULATION';
         let blockLongReason = null;
         let blockShortReason = null;
 
-        if (impDir === 'BEAR') {
-            const brokeBearSupply = lastC.close > impBreakerPx + domStep * 0.25;
-            const realBullShift = (
-                brokeBearSupply
-                && sellingIsWeak && !isTwoWayEqualFight
-                && (dispBullLevels > 0 || totBullAbsPower >= 1.15 || brkAskCnt > 0 || whaleStopHuntBullInit)
-                && (wall10sState === 'BULL' || liveDomFlowState === 'BULL')
-            );
-            // Block ONLY weak low-absorption / short-covering bounces (NEVER blocks earlyBottomCatchLong!)
-            const weakBounceRetest = (
-                !realBullShift && !earlyBottomCatchLong
-                && lastC.close <= impOriginPx + domStep * 0.25
-                && (
-                    rAskAbs > 0
-                    || (lastC.close <= impBreakerPx + domStep * 0.25 && totBullAbsPower < 1.20)
-                    || ((lastC.volume || 0) < impAvgVol * 0.78 && totBullAbsPower < 1.20)
-                    || (oiWeakOrCover && totBullAbsPower < 1.25)
-                )
-            );
-
-            if (realBullShift) {
-                marketPhase = 'REAL_REVERSAL_BULL_SHIFT';
-                if (scalpPts < 42) scalpPts = 42;
-            } else if (earlyBottomCatchLong) {
-                marketPhase = 'EARLY_BOTTOM_CATCH_LONG';
-                if (scalpPts < 38) scalpPts = 38;
-            } else if (weakBounceRetest && (scalpPts > 0 || lastC.close > lastC.open)) {
-                marketPhase = 'FAKE_RETEST_BOUNCE_IN_BEAR_IMPULSE';
-                blockLongReason = `🚫 WEAK RETEST TRAP (No BidAbs | Below ${impBreakerPx.toFixed(dec)} — NO LONG!)`;
-            } else if (buyingIsWeak && !isTwoWayEqualFight && lastC.close < impBreakerPx) {
-                marketPhase = 'BEAR_IMPULSE_CONTINUATION';
-            } else {
-                marketPhase = 'BEAR_IMPULSE_CONSOLIDATION';
-            }
-        } else if (impDir === 'BULL') {
-            const brokeBullDemand = lastC.close < impBreakerPx - domStep * 0.25;
-            const realBearShift = (
-                brokeBullDemand
-                && buyingIsWeak && !isTwoWayEqualFight
-                && (dispBearLevels > 0 || totBearAbsPower >= 1.15 || brkBidCnt > 0 || whaleStopHuntBearInit)
-                && (wall10sState === 'BEAR' || liveDomFlowState === 'BEAR')
-            );
-            // Block ONLY weak low-absorption / profit-taking dips (NEVER blocks earlyTopCatchShort!)
-            const weakDipRetest = (
-                !realBearShift && !earlyTopCatchShort
-                && lastC.close >= impOriginPx - domStep * 0.25
-                && (
-                    rBidAbs > 0
-                    || (lastC.close >= impBreakerPx - domStep * 0.25 && totBearAbsPower < 1.20)
-                    || ((lastC.volume || 0) < impAvgVol * 0.78 && totBearAbsPower < 1.20)
-                    || (oiWeakOrCover && totBearAbsPower < 1.25)
-                )
-            );
-
-            if (realBearShift) {
-                marketPhase = 'REAL_REVERSAL_BEAR_SHIFT';
-                if (scalpPts > -42) scalpPts = -42;
-            } else if (earlyTopCatchShort) {
-                marketPhase = 'EARLY_TOP_CATCH_SHORT';
-                if (scalpPts > -38) scalpPts = -38;
-            } else if (weakDipRetest && (scalpPts < 0 || lastC.close < lastC.open)) {
-                marketPhase = 'FAKE_RETEST_DIP_IN_BULL_IMPULSE';
-                blockShortReason = `🚫 WEAK DIP TRAP (No AskCap | Above ${impBreakerPx.toFixed(dec)} — NO SHORT!)`;
-            } else if (sellingIsWeak && !isTwoWayEqualFight && lastC.close > impBreakerPx) {
-                marketPhase = 'BULL_IMPULSE_CONTINUATION';
-            } else {
-                marketPhase = 'BULL_IMPULSE_CONSOLIDATION';
-            }
+        if (isDensityAccumulation) {
+            marketPhase = 'SIDEWAYS_EQUAL_DENSITY_ACCUMULATION';
+            blendedPts = Math.max(-15, Math.min(15, Math.round(blendedPts * 0.30)));
+        } else if (realBullReversal) {
+            marketPhase = 'REAL_REVERSAL_BULL_BREAKOUT';
+            blendedPts = Math.max(46, Math.abs(blendedPts) + 14);
+        } else if (realBearReversal) {
+            marketPhase = 'REAL_REVERSAL_BEAR_BREAKDOWN';
+            blendedPts = -Math.max(46, Math.abs(blendedPts) + 14);
+        } else if (isBearTrendRetesting) {
+            marketPhase = 'BEAR_TREND_RETESTING_WEAK_BOUNCE';
+            blockLongReason = `RETEST ONLY (Bear Wave:${waveBearPct}% vs Weak Bull Counter:${counterDensityPct}%)`;
+            blendedPts = -Math.max(22, Math.round(waveBearPct - 35));
+        } else if (isBullTrendRetesting) {
+            marketPhase = 'BULL_TREND_RETESTING_WEAK_DIP';
+            blockShortReason = `RETEST ONLY (Bull Wave:${waveBullPct}% vs Weak Bear Counter:${counterDensityPct}%)`;
+            blendedPts = Math.max(22, Math.round(waveBullPct - 35));
+        } else if (domWaveSide === 'BULL' && recBullPct >= 56) {
+            marketPhase = 'BULL_DENSITY_EXPANSION';
+            if (blendedPts < 34 && sellingIsWeak) blendedPts = 36;
+        } else if (domWaveSide === 'BEAR' && recBearPct >= 56) {
+            marketPhase = 'BEAR_DENSITY_EXPANSION';
+            if (blendedPts > -34 && buyingIsWeak) blendedPts = -36;
         } else {
-            if (earlyBottomCatchLong) {
-                marketPhase = 'EARLY_BOTTOM_CATCH_LONG';
-                if (scalpPts < 38) scalpPts = 38;
-            } else if (earlyTopCatchShort) {
-                marketPhase = 'EARLY_TOP_CATCH_SHORT';
-                if (scalpPts > -38) scalpPts = -38;
+            marketPhase = domWaveSide === 'BULL' ? 'BULL_DENSITY_PAUSE' : (domWaveSide === 'BEAR' ? 'BEAR_DENSITY_PAUSE' : 'SIDEWAYS_EQUAL_DENSITY_ACCUMULATION');
+        }
+
+        // ANTI-TICK-FLICKER PERSISTENT LATCH (Updates ONLY when fresh server data arrives, NEVER on mousemove!)
+        if (!window._ofLatch || window._ofLatch.sym !== symbol || window._ofLatch.tf !== tf) {
+            window._ofLatch = {
+                sym: symbol, tf: tf, ver: -1,
+                pts: blendedPts, side: 'SIDEWAYS',
+                pendingSide: null, pendingCount: 0,
+                phase: marketPhase
+            };
+        }
+        if (window._ofLatch.ver !== dataVersion) {
+            const L = window._ofLatch;
+            L.ver = dataVersion;
+            const targetSide = blendedPts >= 32 ? 'BULL' : (blendedPts <= -32 ? 'BEAR' : 'SIDEWAYS');
+            const instantBreakaway = realBullReversal || realBearReversal || counterDensityPct >= 100 || Math.abs(blendedPts - L.pts) >= 28;
+
+            if (targetSide === L.side || instantBreakaway || L.side === 'SIDEWAYS') {
+                L.side = targetSide;
+                L.pendingSide = null;
+                L.pendingCount = 0;
+                L.pts = Math.round(L.pts * 0.25 + blendedPts * 0.75);
+                L.phase = marketPhase;
+            } else {
+                // Require 2 consecutive fresh server polls before flipping an established trend
+                if (L.pendingSide === targetSide) L.pendingCount++;
+                else { L.pendingSide = targetSide; L.pendingCount = 1; }
+                if (L.pendingCount >= 2) {
+                    L.side = targetSide;
+                    L.pendingSide = null;
+                    L.pendingCount = 0;
+                    L.pts = blendedPts;
+                    L.phase = marketPhase;
+                } else {
+                    L.pts = Math.round(L.pts * 0.65 + blendedPts * 0.35);
+                }
             }
         }
 
-        // Apply Retest Trap Cap ONLY for verified weak traps
-        if (blockLongReason && scalpPts > 16) scalpPts = 12;
-        if (blockShortReason && scalpPts < -16) scalpPts = -12;
+        let scalpPts = Math.max(-99, Math.min(99, window._ofLatch.pts));
+        const latchedSide = window._ofLatch.side;
+        const latchedPhase = window._ofLatch.phase;
 
-        // 3. NON-BLOCKING HTF [WT / CT] CONTEXT TAGGER
-        // HTF NEVER blocks a genuine Bottom/Top Catch or Real Shift! It only gives [WT] (With-Trend) or [CT] (Counter-Trend Tight-SL) tag!
-        const isBullSignalSide = scalpPts >= 32 && sellingIsWeak && !blockLongReason && !isTwoWayEqualFight;
-        const isBearSignalSide = scalpPts <= -32 && buyingIsWeak && !blockShortReason && !isTwoWayEqualFight;
-
+        // Clean HTF Tag (NEVER prints ugly [NEU]!)
         let htfTag = '';
-        if (isBullSignalSide) {
-            if (htfBias === 'BULL') { htfTag = '[WT]'; scalpPts = Math.min(99, scalpPts + 10); }
-            else if (htfBias === 'BEAR') { htfTag = '[CT-TIGHT SL]'; }
-            else { htfTag = '[NEU]'; }
-        } else if (isBearSignalSide) {
-            if (htfBias === 'BEAR') { htfTag = '[WT]'; scalpPts = Math.max(-99, scalpPts - 10); }
-            else if (htfBias === 'BULL') { htfTag = '[CT-TIGHT SL]'; }
-            else { htfTag = '[NEU]'; }
+        if (latchedSide === 'BULL') {
+            if (htfBias === 'BULL') { htfTag = ' [HTF✓]'; scalpPts = Math.min(99, scalpPts + 6); }
+            else if (htfBias === 'BEAR') { htfTag = ' [CT]'; }
+        } else if (latchedSide === 'BEAR') {
+            if (htfBias === 'BEAR') { htfTag = ' [HTF✓]'; scalpPts = Math.max(-99, scalpPts - 6); }
+            else if (htfBias === 'BULL') { htfTag = ' [CT]'; }
         }
-
-        // Battle Winner Banner
-        let battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS TWO-WAY FIGHT (${indBullPower}B vs ${indBearPower}S) — WAIT IMBALANCE`;
-        let bwCol = '#ffd700';
-
-        if (isTwoWayEqualFight) {
-            battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS CLUSTER FIGHT (${indBullPower}B vs ${indBearPower}S | ${htfLbl}) — NO TRADE!`;
-            bwCol = '#ffd700';
-        } else if (blockLongReason) {
-            battleWinner = `${blockLongReason} | Watch Short Reject!`;
-            bwCol = '#ffab00';
-        } else if (blockShortReason) {
-            battleWinner = `${blockShortReason} | Watch Long Bounce!`;
-            bwCol = '#ffab00';
-        } else if (marketPhase === 'EARLY_BOTTOM_CATCH_LONG') {
-            battleWinner = `🎯 [${tf.toUpperCase()}] EXACT BOTTOM CATCH ${htfTag}: 🧊BID-HELD (${totBullAbsPower.toFixed(1)}x) + 🎭10s/msΔ FLIP ➔ LONG!`;
-            bwCol = '#00e676';
-        } else if (marketPhase === 'EARLY_TOP_CATCH_SHORT') {
-            battleWinner = `🎯 [${tf.toUpperCase()}] EXACT TOP CATCH ${htfTag}: 🧊ASK-CAP (${totBearAbsPower.toFixed(1)}x) + 🎭10s/msΔ FLIP ➔ SHORT!`;
-            bwCol = '#ff1744';
-        } else if (marketPhase === 'REAL_REVERSAL_BULL_SHIFT') {
-            battleWinner = `🔄 [${tf.toUpperCase()}] REAL BULL SHIFT ${htfTag} (Broke Supply ${impBreakerPx.toFixed(dec)} | ${indBullPower}v${indBearPower}) ➔ LONG!`;
-            bwCol = '#00e676';
-        } else if (marketPhase === 'REAL_REVERSAL_BEAR_SHIFT') {
-            battleWinner = `🔄 [${tf.toUpperCase()}] REAL BEAR SHIFT ${htfTag} (Broke Demand ${impBreakerPx.toFixed(dec)} | ${indBearPower}v${indBullPower}) ➔ SHORT!`;
-            bwCol = '#ff1744';
-        } else if (isBullSignalSide && htfBias === 'BULL') {
-            battleWinner = `🚀 [${tf.toUpperCase()}] WITH-TREND DRIVE [WT]: ${htfLbl} + Bulls:${indBullPower} vs WeakBears:${indBearPower}!`;
-            bwCol = '#00e676';
-        } else if (isBearSignalSide && htfBias === 'BEAR') {
-            battleWinner = `💥 [${tf.toUpperCase()}] WITH-TREND DRIVE [WT]: ${htfLbl} + Bears:${indBearPower} vs WeakBulls:${indBullPower}!`;
-            bwCol = '#ff1744';
-        } else if (whaleStopHuntBullInit && sellingIsWeak) {
-            battleWinner = `🔥 [${tf.toUpperCase()}] OLD BID LIQUIDATED + NEW 🧊BID-HELD ${htfTag} ➔ STOP-HUNT LONG!`;
-            bwCol = '#00e676';
-        } else if (whaleStopHuntBearInit && buyingIsWeak) {
-            battleWinner = `🔥 [${tf.toUpperCase()}] OLD ASK LIQUIDATED + NEW 🧊ASK-CAP ${htfTag} ➔ STOP-HUNT SHORT!`;
-            bwCol = '#ff1744';
-        } else if (clusterLongBuildup) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE BID BUILDUP (${indBullPower}v${indBearPower} | ${htfLbl}) — Wait Trigger`;
-            bwCol = '#00e5ff';
-        } else if (clusterShortBuildup) {
-            battleWinner = `🏦 [${tf.toUpperCase()}] PASSIVE ASK BUILDUP (${indBearPower}v${indBullPower} | ${htfLbl}) — Wait Trigger`;
-            bwCol = '#ff9100';
-        }
-
-        // Intraday Campaign Score (HTF + Macro Flow)
-        let intraPts = macroInfo ? macroInfo.netMacro : 0;
-        if (sPocUp > sPocDn) intraPts += 12;
-        else if (sPocDn > sPocUp) intraPts -= 12;
-        intraPts += Math.round((dynWallPts + brkWallPts) * 0.35);
-        intraPts += Math.round((htfFlow.score || 0) * 0.50);
-        if (smtState.bias === 1) intraPts += 8;
-        else if (smtState.bias === -1) intraPts -= 8;
-        intraPts += Math.round(oiPts * 0.45);
 
         const scalpScoreVal = Math.abs(scalpPts);
-        let scalpFinalTxt = `⚖️ SIDEWAYS (${indBullPower}B vs ${indBearPower}S)`;
+        let scalpFinalTxt = `⚖️ SIDEWAYS ACCUM (B:${waveBullPct}% vs S:${waveBearPct}%)`;
         let scalpFinalCol = '#ffca28';
+        let scalpDir = 'NEU';
 
-        if (isTwoWayEqualFight) {
-            scalpFinalTxt = `⚖️ SIDEWAYS FIGHT (${indBullPower}B vs ${indBearPower}S — NO TRADE)`;
-            scalpFinalCol = '#ffca28';
-        } else if (blockLongReason) {
-            scalpFinalTxt = `🚫 WEAK RETEST TRAP (NO LONG)`;
-            scalpFinalCol = '#ffab00';
-        } else if (blockShortReason) {
-            scalpFinalTxt = `🚫 WEAK DIP TRAP (NO SHORT)`;
-            scalpFinalCol = '#ffab00';
-        } else if (marketPhase === 'EARLY_BOTTOM_CATCH_LONG') {
-            scalpFinalTxt = `🎯 EARLY BOTTOM LONG ${htfTag} (+${scalpScoreVal})`;
+        if (isDensityAccumulation || latchedSide === 'SIDEWAYS') {
+            if (isBearTrendRetesting) {
+                scalpFinalTxt = `🟠 BEAR RETESTING (Counter:${counterDensityPct}% Weak — NO LONG)`;
+                scalpFinalCol = '#ff9100';
+                scalpDir = 'BEAR';
+            } else if (isBullTrendRetesting) {
+                scalpFinalTxt = `🟡 BULL RETESTING (Counter:${counterDensityPct}% Weak — NO SHORT)`;
+                scalpFinalCol = '#00e5ff';
+                scalpDir = 'BULL';
+            } else {
+                scalpFinalTxt = `⚖️ SIDEWAYS ACCUM (B:${waveBullPct}% vs S:${waveBearPct}%)`;
+                scalpFinalCol = '#ffca28';
+                scalpDir = 'NEU';
+            }
+        } else if (latchedSide === 'BULL') {
+            scalpDir = 'BULL';
             scalpFinalCol = '#00e676';
-        } else if (marketPhase === 'EARLY_TOP_CATCH_SHORT') {
-            scalpFinalTxt = `🎯 EARLY TOP SHORT ${htfTag} (-${scalpScoreVal})`;
+            if (latchedPhase === 'REAL_REVERSAL_BULL_BREAKOUT') {
+                scalpFinalTxt = `🔄 REVERSAL LONG${htfTag} (Counter:${counterDensityPct}% | +${scalpScoreVal})`;
+            } else {
+                scalpFinalTxt = `🟢 LONG DRIVE${htfTag} (Bull:${waveBullPct}% | +${scalpScoreVal})`;
+            }
+        } else if (latchedSide === 'BEAR') {
+            scalpDir = 'BEAR';
             scalpFinalCol = '#ff1744';
-        } else if (marketPhase === 'REAL_REVERSAL_BULL_SHIFT') {
-            scalpFinalTxt = `🔄 REAL REVERSAL LONG ${htfTag} (+${scalpScoreVal})`;
-            scalpFinalCol = '#00e676';
-        } else if (marketPhase === 'REAL_REVERSAL_BEAR_SHIFT') {
-            scalpFinalTxt = `🔄 REAL REVERSAL SHORT ${htfTag} (-${scalpScoreVal})`;
-            scalpFinalCol = '#ff1744';
-        } else if (isBullSignalSide) {
-            scalpFinalTxt = htfBias === 'BULL'
-                ? `🚀 WITH-TREND LONG [WT] (+${scalpScoreVal})`
-                : `🟢 IMBALANCE LONG ${htfTag} (+${scalpScoreVal})`;
-            scalpFinalCol = '#00e676';
-        } else if (isBearSignalSide) {
-            scalpFinalTxt = htfBias === 'BEAR'
-                ? `💥 WITH-TREND SHORT [WT] (-${scalpScoreVal})`
-                : `🔴 IMBALANCE SHORT ${htfTag} (-${scalpScoreVal})`;
-            scalpFinalCol = '#ff1744';
-        } else if (scalpPts >= 18) {
-            scalpFinalTxt = `🟡 BULL BUILDING (${indBullPower}v${indBearPower} | WAIT FLIP)`;
-            scalpFinalCol = '#00e5ff';
-        } else if (scalpPts <= -18) {
-            scalpFinalTxt = `🟠 BEAR BUILDING (${indBearPower}v${indBullPower} | WAIT FLIP)`;
-            scalpFinalCol = '#ff9100';
+            if (latchedPhase === 'REAL_REVERSAL_BEAR_BREAKDOWN') {
+                scalpFinalTxt = `🔄 REVERSAL SHORT${htfTag} (Counter:${counterDensityPct}% | -${scalpScoreVal})`;
+            } else {
+                scalpFinalTxt = `🔴 SHORT DRIVE${htfTag} (Bear:${waveBearPct}% | -${scalpScoreVal})`;
+            }
         }
 
-        const intraScoreVal = Math.abs(intraPts);
-        let intraFinalTxt = `⏳ RANGE (${htfLbl})`;
-        let intraFinalCol = '#ffca28';
-        if (intraPts >= 38 && !isTwoWayEqualFight) { intraFinalTxt = `🟢 MACRO LONG [${htfLbl}] (+${intraScoreVal})`; intraFinalCol = '#00e676'; }
-        else if (intraPts >= 18) { intraFinalTxt = `🏦 BULL FLOW [${htfLbl}] (+${intraScoreVal})`; intraFinalCol = '#00e5ff'; }
-        else if (intraPts <= -38 && !isTwoWayEqualFight) { intraFinalTxt = `🔴 MACRO SHORT [${htfLbl}] (-${intraScoreVal})`; intraFinalCol = '#ff1744'; }
-        else if (intraPts <= -18) { intraFinalTxt = `🏦 BEAR FLOW [${htfLbl}] (-${intraScoreVal})`; intraFinalCol = '#ff9100'; }
+        // Intraday / Macro Score (Synced with Wave Density + HTF Flow)
+        let intraPts = macroInfo ? macroInfo.netMacro : 0;
+        intraPts += Math.round((waveBullPct - 50) * 0.90);
+        if (sPocUp > sPocDn) intraPts += 10;
+        else if (sPocDn > sPocUp) intraPts -= 10;
+        intraPts += Math.round((htfFlow.score || 0) * 0.50);
+        intraPts += Math.round(oiPts * 0.35);
+        intraPts = Math.max(-99, Math.min(99, intraPts));
 
-        // ULTRA-CLEAN SINGLE-LINE FRONT VERDICT BAR
+        const intraScoreVal = Math.abs(intraPts);
+        let intraFinalTxt = `⚖️ RANGE (${htfLbl})`;
+        let intraFinalCol = '#ffca28';
+        if (intraPts >= 34 && !isDensityAccumulation) {
+            intraFinalTxt = `🟢 BULL (+${intraScoreVal} | ${htfLbl})`;
+            intraFinalCol = '#00e676';
+        } else if (intraPts >= 16) {
+            intraFinalTxt = `🔵 BULL BIAS (+${intraScoreVal} | ${htfLbl})`;
+            intraFinalCol = '#00e5ff';
+        } else if (intraPts <= -34 && !isDensityAccumulation) {
+            intraFinalTxt = `🔴 BEAR (-${intraScoreVal} | ${htfLbl})`;
+            intraFinalCol = '#ff1744';
+        } else if (intraPts <= -16) {
+            intraFinalTxt = `🟠 BEAR BIAS (-${intraScoreVal} | ${htfLbl})`;
+            intraFinalCol = '#ff9100';
+        }
+
+        // Battle Winner Banner (Consistent with Density Engine)
+        let battleWinner = `⚖️ [${tf.toUpperCase()}] SIDEWAYS ACCUMULATION (Wave B:${waveBullPct}% vs S:${waveBearPct}%) — EQUAL DENSITY!`;
+        let bwCol = '#ffd700';
+        if (latchedPhase === 'REAL_REVERSAL_BULL_BREAKOUT') {
+            battleWinner = `🔄 [${tf.toUpperCase()}] REAL REVERSAL LONG: Counter Bull Density (${counterDensityPct}%) Broke Bear Wave!`;
+            bwCol = '#00e676';
+        } else if (latchedPhase === 'REAL_REVERSAL_BEAR_BREAKDOWN') {
+            battleWinner = `🔄 [${tf.toUpperCase()}] REAL REVERSAL SHORT: Counter Bear Density (${counterDensityPct}%) Broke Bull Wave!`;
+            bwCol = '#ff1744';
+        } else if (isBearTrendRetesting) {
+            battleWinner = `🟠 [${tf.toUpperCase()}] BEAR TREND RETESTING: Bear Wave ${waveBearPct}% Intact (Bull Counter Only ${counterDensityPct}%)!`;
+            bwCol = '#ff9100';
+        } else if (isBullTrendRetesting) {
+            battleWinner = `🟡 [${tf.toUpperCase()}] BULL TREND RETESTING: Bull Wave ${waveBullPct}% Intact (Bear Counter Only ${counterDensityPct}%)!`;
+            bwCol = '#00e5ff';
+        } else if (latchedSide === 'BULL') {
+            battleWinner = `🟢 [${tf.toUpperCase()}] BULL DENSITY CONTROL (Wave:${waveBullPct}% | Live:${recBullPct}% | Counter:${counterDensityPct}%)`;
+            bwCol = '#00e676';
+        } else if (latchedSide === 'BEAR') {
+            battleWinner = `🔴 [${tf.toUpperCase()}] BEAR DENSITY CONTROL (Wave:${waveBearPct}% | Live:${recBearPct}% | Counter:${counterDensityPct}%)`;
+            bwCol = '#ff1744';
+        }
+
+        // FRONT VERDICT BAR — INDEPENDENT COLORS FOR SCALP & MACRO (NEVER SHOWS MACRO BULL IN RED!)
         const vBox = document.getElementById('masterVerdictBox');
         const vTitle = document.getElementById('masterVerdictTitle');
         const vReasons = document.getElementById('masterVerdictReasons');
         if (vBox && vTitle) {
-            vTitle.style.color = scalpFinalCol;
             vTitle.style.whiteSpace = 'nowrap';
             vTitle.style.overflow = 'hidden';
             vTitle.style.textOverflow = 'ellipsis';
             vBox.style.borderColor = scalpFinalCol;
-            vBox.style.background = isBullSignalSide ? 'rgba(0, 200, 83, 0.16)' : (isBearSignalSide ? 'rgba(255, 23, 68, 0.16)' : 'rgba(20, 25, 38, 0.92)');
-            vTitle.innerText = `⚡ SCALP [${tf.toUpperCase()}]: ${scalpFinalTxt}   |   🌊 ${intraFinalTxt}`;
+            vBox.style.background = scalpDir === 'BULL' ? 'rgba(0, 200, 83, 0.14)' : (scalpDir === 'BEAR' ? 'rgba(255, 23, 68, 0.14)' : 'rgba(20, 25, 38, 0.92)');
+            vTitle.innerHTML = `<span style="color:${scalpFinalCol};font-weight:bold;">⚡ SCALP [${tf.toUpperCase()}]: ${scalpFinalTxt}</span><span style="color:#546e7a;margin:0 8px;">|</span><span style="color:${intraFinalCol};font-weight:bold;">🌊 MACRO: ${intraFinalTxt}</span>`;
             if (vReasons) {
                 vReasons.style.display = 'none';
                 vReasons.innerText = '';
@@ -5312,27 +5330,21 @@ function drawAll() {
         }
 
         const execVsAbsState = sellingIsWeak ? 'BULL' : (buyingIsWeak ? 'BEAR' : 'NEU');
-        const execVsAbsLbl = isTwoWayEqualFight
-            ? `2-WayFight(${indBullPower}B/${indBearPower}S)`
-            : (sellingIsWeak ? `SellersWeak🟢(${indBullPower}v${indBearPower})` : (buyingIsWeak ? `BuyersWeak🔴(${indBearPower}v${indBullPower})` : `Balanced(${indBullPower}v${indBearPower})`));
-
-        const phaseState = ((marketPhase.includes('BULL') || marketPhase.includes('BOTTOM')) && !blockLongReason)
-            ? 'BULL'
-            : (((marketPhase.includes('BEAR') || marketPhase.includes('TOP')) && !blockShortReason) ? 'BEAR' : 'NEU');
+        const densState = domWaveSide === 'BULL' ? 'BULL' : (domWaveSide === 'BEAR' ? 'BEAR' : 'NEU');
 
         const scalpMeterList = [
-            { name: `1. [Zero-Lag State] Top/Bottom Catch vs Retest Trap`, state: phaseState, val: `${marketPhase} ${htfTag} (Imp:${impDir} Brk:${impBreakerPx ? impBreakerPx.toFixed(dec) : '--'})` },
-            { name: `2. [Non-Blocking HTF] Higher Timeframe Tag`, state: htfBias === 'BULL' ? 'BULL' : (htfBias === 'BEAR' ? 'BEAR' : 'NEU'), val: `${htfLbl} (Score:${htfFlow.score || 0} | Info Only)` },
-            { name: `3. [Imbalance Gate] Bull vs Bear Power & Weakness`, state: execVsAbsState, val: `${execVsAbsLbl} | Imb:${Math.round(powerImbalanceRatio * 100)}%` },
-            { name: `4. [x${wWall.toFixed(1)}] Vol-Weighted Intact Absorption (${dynWallPts >= 0 ? '+' : ''}${dynWallPts}pt)`, state: dynWallPts > 0 ? 'BULL' : (dynWallPts < 0 ? 'BEAR' : 'NEU'), val: `BidHeld:${rBidAbs}(Wt:${totBullAbsPower.toFixed(1)}x) vs AskCap:${rAskAbs}(Wt:${totBearAbsPower.toFixed(1)}x)` },
-            { name: `5. [Memory] Broken/Liquidated Wall vs Reclaim (${brkWallPts >= 0 ? '+' : ''}${brkWallPts}pt)`, state: brkWallState, val: brkWallLbl },
-            { name: `6. [x${wPull10s.toFixed(1)}] >=10s Heavy Wall Pull/Abs (${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts}pt)`, state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | 10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
-            { name: `7. [x${wMsDom.toFixed(1)}] Live Millisecond DOM Flow (${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts}pt)`, state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}] | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
-            { name: `8. [x${wDisp.toFixed(1)}] Displacement (⚡) & 3c Exec Imbalance (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: dispVsTrapState, val: `⚡Disp:${dispBullLevels}B/${dispBearLevels}S | 3cImb:${Math.round(execImbalanceRatio * 100)}%` },
-            { name: `9. 4-Candle POC Migration & Anchor (${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts}pt)`, state: dynAnchorPts > 4 ? 'BULL' : (dynAnchorPts < -4 ? 'BEAR' : 'NEU'), val: `POC Up:${sPocUp}↑ Dn:${sPocDn}↓ | CurPOC:${curPoc.toFixed(dec)}` },
-            { name: `10. Live Open Interest Synergy (${oiPts >= 0 ? '+' : ''}${oiPts}pt)`, state: oiStateBadge, val: oiVerdictTxt },
-            { name: '11. SMT Divergence Radar', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: smtState.text },
-            { name: '12. [Ref Only] Day High/Low & Impulse Origin', state: 'NEU', val: `Orig:${impOriginPx ? impOriginPx.toFixed(dec) : '--'} | CDH:${cdh.toFixed(dec)} CDL:${cdl.toFixed(dec)}` }
+            { name: `1. [Density Memory] 16c Dominant Wave Density`, state: densState, val: `Wave Bull:${waveBullPct}% vs Bear:${waveBearPct}% (Dom:${domWaveSide})` },
+            { name: `2. [Retest vs Reversal] Counter-Orderflow Measure`, state: realBullReversal ? 'BULL' : (realBearReversal ? 'BEAR' : densState), val: `Counter:${counterDensityPct}% (>=85% Reversal | <75% Retest) -> ${marketPhase}` },
+            { name: `3. [Live 3c Density] Current Active Flow vs Walls`, state: recBullPct >= 58 ? 'BULL' : (recBearPct >= 58 ? 'BEAR' : 'NEU'), val: `Live Bull:${recBullPct}% vs Bear:${recBearPct}% | Imb:${Math.round(powerImbalanceRatio * 100)}%` },
+            { name: `4. [HTF Sync] Higher Timeframe Orderflow`, state: htfBias === 'BULL' ? 'BULL' : (htfBias === 'BEAR' ? 'BEAR' : 'NEU'), val: `${htfLbl} (Score:${htfFlow.score || 0})` },
+            { name: `5. [x${wWall.toFixed(1)}] Vol-Weighted Intact Absorption (${dynWallPts >= 0 ? '+' : ''}${dynWallPts}pt)`, state: dynWallPts > 0 ? 'BULL' : (dynWallPts < 0 ? 'BEAR' : 'NEU'), val: `BidHeld:${rBidAbs}(Wt:${totBullAbsPower.toFixed(1)}x) vs AskCap:${rAskAbs}(Wt:${totBearAbsPower.toFixed(1)}x)` },
+            { name: `6. [Memory] Broken/Liquidated Wall vs Reclaim (${brkWallPts >= 0 ? '+' : ''}${brkWallPts}pt)`, state: brkWallState, val: brkWallLbl },
+            { name: `7. [x${wPull10s.toFixed(1)}] >=10s Heavy Wall Pull/Abs (${dynPull10sPts >= 0 ? '+' : ''}${dynPull10sPts}pt)`, state: wall10sState, val: `10sPΔ:${aged10sPullDelta >= 0 ? '+' : ''}${fmt(aged10sPullDelta)} | 10sAbs:${fmt(totAged10sBidAbs)}B/${fmt(totAged10sAskAbs)}A` },
+            { name: `8. [x${wMsDom.toFixed(1)}] Millisecond DOM Timing (${dynLiveDomPts >= 0 ? '+' : ''}${dynLiveDomPts}pt)`, state: liveDomFlowState, val: `msΔ:${msLiveDomDelta >= 0 ? '+' : ''}${fmt(msLiveDomDelta)} [${msSrvLabel}] | Rest:${fmt(nearBidRest)}B/${fmt(nearAskRest)}A` },
+            { name: `9. [x${wDisp.toFixed(1)}] Displacement (⚡) & 3c Exec Imbalance (${dynTrigPts >= 0 ? '+' : ''}${dynTrigPts}pt)`, state: dispVsTrapState, val: `⚡Disp:${dispBullLevels}B/${dispBearLevels}S | 3cImb:${Math.round(execImbalanceRatio * 100)}%` },
+            { name: `10. 4-Candle POC Migration & Anchor (${dynAnchorPts >= 0 ? '+' : ''}${dynAnchorPts}pt)`, state: dynAnchorPts > 4 ? 'BULL' : (dynAnchorPts < -4 ? 'BEAR' : 'NEU'), val: `POC Up:${sPocUp}↑ Dn:${sPocDn}↓ | CurPOC:${curPoc.toFixed(dec)}` },
+            { name: `11. Live Open Interest Synergy (${oiPts >= 0 ? '+' : ''}${oiPts}pt)`, state: oiStateBadge, val: oiVerdictTxt },
+            { name: '12. SMT & Impulse Reference', state: smtState.bias === 1 ? 'BULL' : (smtState.bias === -1 ? 'BEAR' : 'NEU'), val: `${smtState.text} | BrkPOC:${impBreakerPx ? impBreakerPx.toFixed(dec) : '--'}` }
         ];
 
         const sessionPocsList = candles.slice(-15).map(x => x.poc).filter(x => x != null);
@@ -5342,7 +5354,7 @@ function drawAll() {
 
         const intraMeterList = [
             { name: '1. Higher Timeframe Orderflow Context', state: htfBias === 'BULL' ? 'BULL' : (htfBias === 'BEAR' ? 'BEAR' : 'NEU'), val: `${htfLbl} (Score:${htfFlow.score || 0})` },
-            { name: '2. Dominant Impulse Leg & Breaker Zone', state: impDir === 'BULL' ? 'BULL' : (impDir === 'BEAR' ? 'BEAR' : 'NEU'), val: `Imp:${impDir} | Brk:${impBreakerPx ? impBreakerPx.toFixed(dec) : '--'} | Orig:${impOriginPx ? impOriginPx.toFixed(dec) : '--'}` },
+            { name: '2. 16-Candle Wave Orderflow Density', state: densState, val: `Bull:${waveBullPct}% vs Bear:${waveBearPct}% | Counter:${counterDensityPct}%` },
             { name: '3. Session Cumulative Delta (CVD)', state: (macroInfo && macroInfo.totalCvd > 0) ? 'BULL' : ((macroInfo && macroInfo.totalCvd < 0) ? 'BEAR' : 'NEU'), val: `CVD:${macroInfo ? fmt(macroInfo.totalCvd) : 0}` },
             { name: '4. Multi-Swing Cluster Absorption (Unbroken)', state: (macroInfo && macroInfo.macroBidAbsorbs > macroInfo.macroAskAbsorbs) ? 'BULL' : ((macroInfo && macroInfo.macroAskAbsorbs > macroInfo.macroBidAbsorbs) ? 'BEAR' : 'NEU'), val: `BidAbs:${macroInfo ? macroInfo.macroBidAbsorbs : 0} vs AskAbs:${macroInfo ? macroInfo.macroAskAbsorbs : 0}` },
             { name: '5. Broken/Liquidated Whale Wall Balance', state: brkWallState, val: `BrkBid:${brkBidCnt}(Wt:${brokenBidLiqWeight.toFixed(1)}) BrkAsk:${brkAskCnt}(Wt:${brokenAskLiqWeight.toFixed(1)})` },
@@ -5374,18 +5386,18 @@ function drawAll() {
 
             document.getElementById('meterModalBody').innerHTML = `
                 <div class="rule-sec" style="grid-column: 1 / -1; border-color:#00e5ff; background:#0e1422;">
-                    <h4 style="color:#00e5ff;">🏛️ ZERO-LAG TOP/BOTTOM CATCH, RETEST TRAP FILTER & NON-BLOCKING HTF</h4>
+                    <h4 style="color:#00e5ff;">🏛️ ORDERFLOW DENSITY MEMORY: RETEST vs REAL REVERSAL vs SIDEWAYS ACCUMULATION</h4>
                     <div style="display:flex; flex-wrap:wrap; gap:12px; font-size:11.5px; line-height:1.6;">
-                        <span><b>Market Phase:</b> <code style="color:#ffeb3b;">${marketPhase} ${htfTag}</code></span>
-                        <span><b>HTF Context (Non-Blocking):</b> <code style="color:${htfBias === 'BULL' ? '#00e676' : (htfBias === 'BEAR' ? '#ff5252' : '#ffca28')};">${htfLbl} (Score:${htfFlow.score || 0})</code></span>
-                        <span><b>Last Impulse Leg:</b> <code style="color:#00e5ff;">Dir:${impDir} (${candlesSinceImp}c ago) | BreakerPOC:${impBreakerPx ? impBreakerPx.toFixed(dec) : '--'} | Origin:${impOriginPx ? impOriginPx.toFixed(dec) : '--'} | ImpAvgVol:${fmt(impAvgVol)}</code></span>
-                        <span><b>Retest Trap Filter:</b> <code style="color:#ffab00;">${blockLongReason || blockShortReason || 'CLEAR (Real Orderflow Move)'}</code></span>
-                        <span><b>Imbalance:</b> <code style="color:#69f0ae;">Bull:${indBullPower} vs Bear:${indBearPower} (Imb:${Math.round(powerImbalanceRatio * 100)}%) | ${oiVerdictTxt}</code></span>
+                        <span><b>Market Phase:</b> <code style="color:#ffeb3b;">${marketPhase}</code></span>
+                        <span><b>16c Wave Density:</b> <code style="color:#00e5ff;">Bull:${waveBullPct}% vs Bear:${waveBearPct}% (Dom:${domWaveSide})</code></span>
+                        <span><b>Counter-Flow Measure:</b> <code style="color:${counterDensityPct >= 85 ? '#00e676' : '#ffab00'};">${counterDensityPct}% of Dominant Wave (>=85% Breaks Trend | &lt;75% Retest)</code></span>
+                        <span><b>HTF Sync:</b> <code style="color:${htfBias === 'BULL' ? '#00e676' : (htfBias === 'BEAR' ? '#ff5252' : '#ffca28')};">${htfLbl} (Score:${htfFlow.score || 0})</code></span>
+                        <span><b>Live OI:</b> <code style="color:#69f0ae;">${oiVerdictTxt}</code></span>
                         <span><b>DOM Battle:</b> <span style="color:${bwCol};font-weight:bold;">${battleWinner}</span></span>
                     </div>
                 </div>
                 <div class="rule-sec" style="border-color:${scalpFinalCol};">
-                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] ZERO-LAG SCALP METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
+                    <h4 style="color:${scalpFinalCol};">⚡ [${tf.toUpperCase()}] DENSITY SCALP METER: ${scalpFinalTxt} (🟢${sBullCnt} Bull | 🔴${sBearCnt} Bear | ⚪${sNeuCnt} Neu)</h4>
                     ${renderRows(scalpMeterList)}
                 </div>
                 <div class="rule-sec" style="border-color:${intraFinalCol};">
@@ -5399,12 +5411,25 @@ function drawAll() {
             symbol: symbol,
             timeframe: tf,
             live_price: lastC.close,
-            active_context_regime: activeRegime,
+            active_context_regime: marketPhase,
+            orderflow_density_engine: {
+                dominant_wave_side: domWaveSide,
+                wave_bull_density_pct: waveBullPct,
+                wave_bear_density_pct: waveBearPct,
+                live_3c_bull_density_pct: recBullPct,
+                live_3c_bear_density_pct: recBearPct,
+                counter_flow_vs_dominant_pct: counterDensityPct,
+                is_sideways_equal_density_accum: isDensityAccumulation,
+                is_real_bull_reversal: realBullReversal,
+                is_real_bear_reversal: realBearReversal,
+                is_bear_trend_retesting: isBearTrendRetesting,
+                is_bull_trend_retesting: isBullTrendRetesting,
+                latched_direction: latchedSide,
+                market_phase: marketPhase
+            },
             impulse_state_machine: {
                 market_phase: marketPhase,
-                htf_alignment_tag: htfTag,
-                early_bottom_catch_long: earlyBottomCatchLong,
-                early_top_catch_short: earlyTopCatchShort,
+                htf_alignment_tag: htfTag.trim(),
                 dominant_impulse_dir: impDir,
                 candles_since_impulse: candlesSinceImp,
                 impulse_breaker_poc: impBreakerPx,
@@ -5421,11 +5446,10 @@ function drawAll() {
                 imbalance_ratio_pct: Math.round(powerImbalanceRatio * 100),
                 is_selling_weak_for_long: sellingIsWeak,
                 is_buying_weak_for_short: buyingIsWeak,
-                is_two_way_sideways_fight: isTwoWayEqualFight,
+                is_two_way_sideways_fight: isTwoWayEqualFight || isDensityAccumulation,
                 rotational_efficiency_pct: Math.round(rotationalEff6 * 100),
                 candle_color_flips_in_6c: colorFlips
             },
-            range_location_pct: Math.round(rangeLocation * 100),
             key_liquidity_levels: {
                 current_day_high: cdh,
                 current_day_low: cdl,
@@ -5443,10 +5467,6 @@ function drawAll() {
                 intact_bid_volume_weight: Number(totBullAbsPower.toFixed(2)),
                 intact_ask_cap_count: rAskAbs,
                 intact_ask_volume_weight: Number(totBearAbsPower.toFixed(2)),
-                stage1_bid_held_up_close: bidHeldCloseConfirmed,
-                stage1_ask_cap_dn_close: askCapCloseConfirmed,
-                stage2_bull_abs_plus_spoof: stage2BullConfirmed,
-                stage2_bear_abs_plus_spoof: stage2BearConfirmed,
                 broken_bid_walls_count: brkBidCnt,
                 broken_ask_walls_count: brkAskCnt,
                 whale_stop_hunt_bull_reclaim: whaleStopHuntBullInit,
@@ -5454,7 +5474,7 @@ function drawAll() {
                 broken_wall_verdict: brkWallLbl
             },
             dynamic_weights_applied: {
-                regime: activeRegime,
+                regime: marketPhase,
                 wall_pts: dynWallPts,
                 broken_wall_memory_pts: brkWallPts,
                 pull_10s_pts: dynPull10sPts,
@@ -5469,8 +5489,6 @@ function drawAll() {
                 open_interest: oiActive ? Math.round(oiState.oi) : null,
                 oi_delta: oiActive ? Math.round(oiDeltaVal * 100) / 100 : null,
                 consistency: oiActive ? oiState.consistency : 'STANDBY',
-                up_steps: oiActive ? oiState.upSteps : 0,
-                down_steps: oiActive ? oiState.downSteps : 0,
                 oi_verdict: oiVerdictTxt
             },
             current_candle: {
@@ -5487,23 +5505,9 @@ function drawAll() {
             },
             dom_and_clusters: {
                 battle_verdict: battleWinner,
-                anchor_bull_score: anchorBullScore,
-                anchor_bear_score: anchorBearScore,
                 exec_buy_3c: Math.round(totExecBuy),
                 exec_sell_3c: Math.round(totExecSell),
-                bid_cluster_absorptions: rBidAbs,
-                ask_cluster_absorptions: rAskAbs,
-                bull_displacement_levels: dispBullLevels,
-                bear_displacement_levels: dispBearLevels,
-                iceberg_bid_reloads: Math.round(totIceBid),
-                iceberg_ask_reloads: Math.round(totIceAsk),
-                aged_10s_bid_pulled: Math.round(totAged10sBp),
-                aged_10s_ask_pulled: Math.round(totAged10sAp),
-                aged_10s_bid_absorbed: Math.round(totAged10sBidAbs),
-                aged_10s_ask_absorbed: Math.round(totAged10sAskAbs),
                 aged_10s_pull_delta: Math.round(aged10sPullDelta),
-                ms_flash_bid_pulled: Math.round(totFlashBp),
-                ms_flash_ask_pulled: Math.round(totFlashAp),
                 ms_live_dom_delta: Math.round(msLiveDomDelta),
                 ms_impulse_label: msSrvLabel,
                 near_resting_bid_wall: Math.round(nearBidRest),
@@ -5851,11 +5855,11 @@ def _calc_htf_snapshot(symbol, tf_k):
         c_fin = finalize_candle(curr)
         if not hist or c_fin["start"] != hist[-1]["start"]:
             hist.append(c_fin)
-    if len(hist) < 2:
+    if len(hist) == 0:
         return {"tf": tf_k, "dir": "NEU", "score": 0, "poc": None, "delta": 0}
 
     last_h = hist[-1]
-    prev_h = hist[-2]
+    prev_h = hist[-2] if len(hist) >= 2 else last_h
     l_cls = float(last_h.get("close", 0.0))
     l_opn = float(last_h.get("open", 0.0))
     l_poc = float(last_h["poc"]) if last_h.get("poc") is not None else (float(last_h["high"]) + float(last_h["low"])) * 0.5
@@ -5868,20 +5872,25 @@ def _calc_htf_snapshot(symbol, tf_k):
         sc += 18
     elif l_cls < l_poc:
         sc -= 18
-    if l_poc > p_poc:
-        sc += 14
-    elif l_poc < p_poc:
-        sc -= 14
-    if l_cls > l_opn and l_delta > 0:
-        sc += 14
-    elif l_cls < l_opn and l_delta < 0:
-        sc -= 14
+    if len(hist) >= 2:
+        if l_poc > p_poc:
+            sc += 14
+        elif l_poc < p_poc:
+            sc -= 14
+    if l_cls > l_opn:
+        sc += 10
+    elif l_cls < l_opn:
+        sc -= 10
+    if l_delta > 0:
+        sc += 8
+    elif l_delta < 0:
+        sc -= 8
     if sum_delta > 0:
         sc += 8
     elif sum_delta < 0:
         sc -= 8
 
-    d_str = "BULL" if sc >= 20 else ("BEAR" if sc <= -20 else "NEU")
+    d_str = "BULL" if sc >= 12 else ("BEAR" if sc <= -12 else "NEU")
     return {
         "tf": tf_k,
         "dir": d_str,
@@ -5927,13 +5936,16 @@ def api_candles():
 
         h1_s = _calc_htf_snapshot(symbol, htf1_k)
         h2_s = _calc_htf_snapshot(symbol, htf2_k)
-        htf_comb = int(round(h1_s["score"] * 0.60 + h2_s["score"] * 0.40))
-        if h1_s["dir"] == "BULL" and h2_s["dir"] != "BEAR" and htf_comb >= 18:
+        # If higher TF (h2) is flat/empty after boot, rely on h1 instead of diluting to NEU
+        if h2_s["dir"] == "NEU" and h1_s["dir"] != "NEU":
+            htf_comb = int(h1_s["score"])
+        else:
+            htf_comb = int(round(h1_s["score"] * 0.65 + h2_s["score"] * 0.35))
+
+        if htf_comb >= 12 and h1_s["dir"] != "BEAR":
             htf_bias = "BULL"
-        elif h1_s["dir"] == "BEAR" and h2_s["dir"] != "BULL" and htf_comb <= -18:
+        elif htf_comb <= -12 and h1_s["dir"] != "BULL":
             htf_bias = "BEAR"
-        elif h1_s["dir"] != h2_s["dir"] and h1_s["dir"] != "NEU" and h2_s["dir"] != "NEU":
-            htf_bias = "MIXED"
         else:
             htf_bias = "NEU"
 
@@ -6240,133 +6252,80 @@ def api_ai_mentor():
     engine_data = data.get("engine_data", {})
 
     live_news = fetch_live_crypto_news(symbol)
-    news_block = "\n".join(live_news) if live_news else "No major breaking news in the last few minutes."
+    news_block = "\n".join(live_news) if live_news else "No major breaking news."
 
     scalp_obj = engine_data.get("scalp_10factor_verdict", {})
     intra_obj = engine_data.get("intraday_10factor_verdict", {})
     dyn_obj = engine_data.get("dynamic_weights_applied", {})
     key_lvls = engine_data.get("key_liquidity_levels", {})
     oi_obj = engine_data.get("open_interest_telemetry", {})
+    dens_obj = engine_data.get("orderflow_density_engine", {})
+    abs_mem = engine_data.get("absorption_and_broken_wall_memory", {})
+    htf_obj = engine_data.get("htf_orderflow_sync", {})
 
     scalp_bias = scalp_obj.get("final_bias", "WAIT")
     scalp_score = scalp_obj.get("quant_score", 0)
     intra_bias = intra_obj.get("final_bias", "WAIT")
     intra_score = intra_obj.get("quant_score", 0)
-    active_regime = engine_data.get("active_context_regime", "MID_RANGE_AUCTION")
+    active_regime = engine_data.get("active_context_regime", "SIDEWAYS")
 
     params = scalp_obj.get("parameters", [])
     bull_list = [f"{p.get('name')} -> {p.get('val')}" for p in params if p.get("state") == "BULL"]
     bear_list = [f"{p.get('name')} -> {p.get('val')}" for p in params if p.get("state") == "BEAR"]
-    neu_list = [f"{p.get('name')} -> {p.get('val')}" for p in params if p.get("state") == "NEU"]
 
-    abs_mem = engine_data.get("absorption_and_broken_wall_memory", {})
-    sm_obj = engine_data.get("impulse_state_machine", {})
-    htf_obj = engine_data.get("htf_orderflow_sync", {})
-    imb_obj = engine_data.get("imbalance_and_chop_check", {})
+    # Trim duplicate verbose arrays so Gemini responds 3x faster with zero timeout
+    slim_telemetry = {
+        "live_price": engine_data.get("live_price"),
+        "density_engine": dens_obj,
+        "htf_sync": htf_obj,
+        "absorption_memory": abs_mem,
+        "dom_clusters": engine_data.get("dom_and_clusters"),
+        "current_candle": engine_data.get("current_candle"),
+        "magnets": engine_data.get("magnets"),
+        "ref_levels": key_lvls,
+        "oi": oi_obj,
+    }
 
     context_truth = f"""
-BHASHA KA KADA NIYAM (STRICT HINGLISH RULE):
-- Tujhe apna 100% jawab ठेठ देसी HINGLISH (Roman Hindi) me hi likhna hai! Pure English sentences bilkul MAT likhna.
+BHASHA NIYAM: 100% ठेठ देसी HINGLISH (Roman Hindi) me jawab de. Pure English sentences MAT likhna.
 
-ZERO-LAG TOP/BOTTOM CATCH & RETEST TRAP GROUND TRUTH:
-- Market Phase: {sm_obj.get('market_phase', 'UNKNOWN')} | HTF Tag: {sm_obj.get('htf_alignment_tag', '')}
-- Early Bottom Catch Long: {sm_obj.get('early_bottom_catch_long')} | Early Top Catch Short: {sm_obj.get('early_top_catch_short')}
-- Dominant Impulse Leg: Dir={sm_obj.get('dominant_impulse_dir')} | BreakerPOC={sm_obj.get('impulse_breaker_poc')} | Origin={sm_obj.get('impulse_origin_invalidation')} | ImpAvgVol={sm_obj.get('impulse_avg_volume')} vs CurVol={sm_obj.get('current_candle_volume')}
-- Weak Retest Trap Alerts: LongBlock={sm_obj.get('long_blocked_trap_reason')} | ShortBlock={sm_obj.get('short_blocked_trap_reason')}
-- Higher Timeframe Context (Non-Blocking [WT]/[CT]): {json.dumps(htf_obj)}
-- Imbalance & Chop Check: {json.dumps(imb_obj)}
-- Master Scalp Verdict: {scalp_bias} (Score: {scalp_score})
-- Master Intraday Verdict: {intra_bias} (Score: {intra_score})
-- Volume-Weighted Absorption & Broken Wall Memory: {json.dumps(abs_mem)}
-- Dynamic Weights: {json.dumps(dyn_obj)}
-- Reference Coordinates (0pt Ref): {json.dumps(key_lvls)}
-- Live Open Interest (OI): {json.dumps(oi_obj)}
-- BULLISH PARAMETERS ({len(bull_list)}): {"; ".join(bull_list) if bull_list else "Koi nahi"}
-- BEARISH PARAMETERS ({len(bear_list)}): {"; ".join(bear_list) if bear_list else "Koi nahi"}
-- NEUTRAL PARAMETERS ({len(neu_list)}): {"; ".join(neu_list) if neu_list else "Koi nahi"}
+ORDERFLOW DENSITY ENGINE (GROUND TRUTH):
+- Market Phase: {dens_obj.get('market_phase', active_regime)} | Latched Direction: {dens_obj.get('latched_direction')}
+- 16-Candle Dominant Wave Density: Bull={dens_obj.get('wave_bull_density_pct')}% vs Bear={dens_obj.get('wave_bear_density_pct')}% (Dominant={dens_obj.get('dominant_wave_side')})
+- Live 3-Candle Density: Bull={dens_obj.get('live_3c_bull_density_pct')}% vs Bear={dens_obj.get('live_3c_bear_density_pct')}%
+- Counter-Flow Measure vs Prior Heavy Wave: {dens_obj.get('counter_flow_vs_dominant_pct')}% (>=85% = Real Reversal, <75% = Weak Retest)
+- Sideways Equal Density Accumulation: {dens_obj.get('is_sideways_equal_density_accum')}
+- Scalp Verdict: {scalp_bias} (Score: {scalp_score}) | Macro Verdict: {intra_bias} (Score: {intra_score})
+- HTF Sync: {htf_obj.get('label')} (Bias: {htf_obj.get('bias')})
+- BULLISH SIGNALS ({len(bull_list)}): {"; ".join(bull_list) if bull_list else "Koi nahi"}
+- BEARISH SIGNALS ({len(bear_list)}): {"; ".join(bear_list) if bear_list else "Koi nahi"}
 
 NIYAM:
-1. Agar `early_bottom_catch_long` ya `early_top_catch_short` TRUE hai, toh HTF opposite hone par bhi trade mana MAT karna — bolna ki exact Bottom/Top par Heavy Absorption + 10s/msΔ flip aa gaya hai, sirf `[CT-TIGHT SL]` ke sath wall ke piche tight SL rakhna hai!
-2. Agar `long_blocked_trap_reason` ya `short_blocked_trap_reason` active hai, toh saaf bolna ki wahan koi heavy absorption nahi hai aur ye pichle impulse ka weak retest / short-covering trap hai!
-3. `[WT]` (With-Trend) hone par bade targets (nPOC/UB) hold karne ka plan dena, `[CT]` hone par nearest Breaker POC / nPOC par profit book karne ka plan dena.
-4. Diplomatic mat banna — data ke hisab se ek-tarfa saaf faisla dena!"""
+1. Counter-Flow Measure (<75%) par kabhi reversal mat bolna — saaf bolna ki pichli heavy wave zinda hai aur ye sirf RETEST hai.
+2. Sideways Equal Density Accumulation TRUE hone par koi trade force mat karna — breakout / imbalance ka wait bolna.
+3. Diplomatic mat banna — data ke hisab se ek-tarfa saaf faisla, Entry, SL aur TP levels batana."""
 
     q_low = (question or "").strip().lower()
-
     if "main long trade dekh raha hu" in q_low:
-        prompt = f"""Tu ek pakka Desi Institutional Risk Auditor aur Orderflow Mentor hai. Jawab 100% HINGLISH me de.
-{context_truth}
-
-TRADER KA SAWAL: Trader abhi {symbol} ({timeframe}) me **LONG (BUY)** trade lena chahta hai.
-
-LIVE NEWS:
-{news_block}
-
-TELEMETRY:
-{json.dumps(engine_data, separators=(",", ":"))}
-
-Sirf HINGLISH me in 5 points me Long trade ka kachcha-chittha khol:
-1. 🚨 LONG RISK VERDICT (SAAF FAISLA): Dynamic Score ({scalp_score} | {scalp_bias}) aur [{active_regime}] dekh kar seedha Hinglish me bata ki abhi Long lena **🟢 SAFE & ALIGNED** hai, **🟡 RUK KAR PULLBACK PAR LENA HAI**, ya **🔴 KHATARNAK TRAP HAI (MAT LE)**?
-2. ⚠️ TERE LONG KE KHILAF KHADE KHATRE (AGAINST PARAMETERS): Upar ke BEARISH PARAMETERS me se ek-ek karke bata ki kaun-kaun se factors (jaise CDH/PDH/Swing High resistance, Ask-Cap, 10s Bid Pull, negative msΔ, ya OIΔ) tere Long ka SL kha sakte hain aur unka dynamic weight kitna bhari hai.
-3. ✅ TERE LONG KE SUPPORT WALE FACTORS: Kaunse Bullish parameters tere sath hain, aur kya unka weight virodhi (Bearish) khatro ko harane ke liye kaafi hai ya nahi?
-4. 📰 LIVE NEWS AUR OPEN INTEREST (OIΔ) KA ASAR: News, Fear & Greed, aur Live OI ({oi_obj.get('oi_verdict')}) Long ke bare me kya bol rahe hain?
-5. 🎯 AB KYA KARNA HAI (EXACT PLAN): Agar Long sahi hai toh exact Entry, SL (active Bid-Hold/Swing ke niche), aur TP (UB/nPOC/CDH) bata. Agar abhi Long galat/risky hai toh saaf mana kar aur bata ki kis exact price level par aane ke baad Long dekhna chahiye."""
-
+        task_instr = f"Trader {symbol} ({timeframe}) me LONG dekh raha hai. 5 sharp Hinglish points me bata: (1) Long Verdict (Safe / Retest Trap / Sideways), (2) Bearish Wave Density aur khatre, (3) Bullish support aur Counter-Flow %, (4) OI & News impact, (5) Exact Entry, SL, TP ya wait level."
     elif "main short trade dekh raha hu" in q_low:
-        prompt = f"""Tu ek pakka Desi Institutional Risk Auditor aur Orderflow Mentor hai. Jawab 100% HINGLISH me de.
-{context_truth}
-
-TRADER KA SAWAL: Trader abhi {symbol} ({timeframe}) me **SHORT (SELL)** trade lena chahta hai.
-
-LIVE NEWS:
-{news_block}
-
-TELEMETRY:
-{json.dumps(engine_data, separators=(",", ":"))}
-
-Sirf HINGLISH me in 5 points me Short trade ka kachcha-chittha khol:
-1. 🚨 SHORT RISK VERDICT (SAAF FAISLA): Dynamic Score ({scalp_score} | {scalp_bias}) aur [{active_regime}] dekh kar seedha Hinglish me bata ki abhi Short lena **🔴 SAFE & ALIGNED** hai, **🟠 RUK KAR BOUNCE/BREAK PAR LENA HAI**, ya **🚫 SQUEEZE TRAP HAI (SHORT MAT KAR)**?
-2. ⚠️ TERE SHORT KE KHILAF KHADE KHATRE (AGAINST PARAMETERS): Upar ke BULLISH PARAMETERS me se ek-ek karke bata ki kaun-kaun se factors (jaise CDL/PDL/Swing Low support, zinda Bid-Hold, Iceberg Bids, 10s Ask Pull, positive msΔ, ya OIΔ) tujhe squeeze karke tera SL uda sakte hain aur unka weight kitna hai.
-3. ✅ TERE SHORT KE SUPPORT WALE FACTORS: Kaunse Bearish parameters tere sath hain, aur kya unka dynamic weight Bullish factors ko daba pa raha hai ya nahi?
-4. 📰 LIVE NEWS AUR OPEN INTEREST (OIΔ) KA ASAR: News, Fear & Greed, aur Live OI ({oi_obj.get('oi_verdict')}) Short ke bare me kya bol rahe hain?
-5. 🎯 AB KYA KARNA HAI (EXACT PLAN): Agar Short sahi hai toh exact Entry, SL (active Ask-Cap/Swing ke upar), aur TP (UB/nPOC/CDL) bata. Agar abhi Short trap hai toh saaf mana kar aur bata ki kis exact level ke tutne ya reject hone par Short banta hai."""
-
+        task_instr = f"Trader {symbol} ({timeframe}) me SHORT dekh raha hai. 5 sharp Hinglish points me bata: (1) Short Verdict (Safe / Retest Trap / Sideways), (2) Bullish Wave Density aur khatre, (3) Bearish support aur Counter-Flow %, (4) OI & News impact, (5) Exact Entry, SL, TP ya wait level."
     elif (not q_low) or ("abhi live sa engine data ke hisab se" in q_low):
-        prompt = f"""Tu ek decisive Desi Institutional Crypto Quant Mentor hai. Jawab 100% HINGLISH me de (pure English sentences mat likhna!).
-{context_truth}
-
-Asset: {symbol} ({timeframe})
-
-LIVE NEWS:
-{news_block}
-
-TELEMETRY:
-{json.dumps(engine_data, separators=(",", ":"))}
-
-Sirf HINGLISH me 5 sharp points me apna ek-tarfa faisla suna:
-1. ⚖️ SAAF FAISLA (NO DIPLOMACY): Active regime [{active_regime}], Scalp Verdict ({scalp_bias} | Score: {scalp_score}), aur Intraday Campaign ({intra_bias} | Score: {intra_score}) bata. Bina gol-mol baat kiye saaf bol ki abhi kis side (BULLS ya BEARS) ka palda bhari hai!
-2. 🔥 DYNAMIC WEIGHT KI TAKKAR (KAUN KYU JEETA): Hinglish me samjha ki abhi ke level par kin parameters ko sabse bada multiplier mila (jaise High/Low par Absorption + 10sPΔ + msΔ + OIΔ ya POC par Surviving Walls) aur unhone dusri side ke signals ko kaise hara diya.
-3. 🏛️ DAY HIGH/LOW AUR SWING LIQUIDITY X-RAY: CDH ({key_lvls.get('current_day_high')}), CDL ({key_lvls.get('current_day_low')}), PDH ({key_lvls.get('prev_day_high')}), PDL ({key_lvls.get('prev_day_low')}), aur 30c/6c Swing ke hisab se bata ki market fake sweep reversal bana raha hai ya real vacuum breakout.
-4. 📰 LIVE NEWS AUR OPEN INTEREST (OIΔ): Breaking news, Fear & Greed, aur Live OI ({oi_obj.get('oi_verdict')}) kya ishara kar rahe hain?
-5. 🎯 EK-TARFA TRADE PLAN: Jeetne wali disha ke liye exact Entry, SL (defending wall ke piche), aur TP (nearest UB/nPOC/Day level) bata."""
-
+        task_instr = f"Asset: {symbol} ({timeframe}). 5 sharp Hinglish points me ek-tarfa faisla de: (1) Saaf Faisla (Scalp + Macro), (2) Orderflow Density & Counter-Flow % (Retest hai, Sideways Accumulation hai ya Real Reversal?), (3) Absorption / Broken Walls / 10sPΔ / msΔ X-ray, (4) OI & News, (5) Exact Trade Plan (Entry, SL, TP)."
     else:
-        prompt = f"""Tu ek pakka Desi Institutional Crypto Orderflow Mentor hai. Jawab 100% HINGLISH (Roman Hindi) me hi dena, English me mat likhna!
-{context_truth}
+        task_instr = f'Asset: {symbol} ({timeframe}). Trader ka sawal: "{question}". Seedha is sawal ka 100% Hinglish me orderflow density, counter-flow %, absorption, 10sPΔ, msΔ, OI aur exact price levels ke sath saaf jawab de.'
 
-Asset: {symbol} ({timeframe})
-TRADER KA KHUD KA LIKHA SAWAL / OBSERVATION: "{question}"
+    prompt = f"""Tu ek pakka Desi Institutional Crypto Orderflow Mentor hai.
+{context_truth}
 
 LIVE NEWS:
 {news_block}
 
-TELEMETRY:
-{json.dumps(engine_data, separators=(",", ":"))}
+SLIM TELEMETRY:
+{json.dumps(slim_telemetry, separators=(",", ":"))}
 
-JAWAB DENE KE NIYAM (100% HINGLISH ME):
-- Trader ne jo likha hai ("{question}"), seedha uski baat ka jawab de.
-- Uske view ko Active Regime [{active_regime}], Day/Swing High-Low (CDH/CDL, PDH/PDL), Dynamic Weights, >=10s Wall Pulls vs Millisecond msΔ, Live OI ({oi_obj.get('oi_verdict')}), aur Live News se mila kar bata ki kaunse parameters uske sath hain aur kaunse uske khilaf khatra ban kar khade hain.
-- Bina diplomatic huye ek-tarfa saaf faisla aur exact price levels (Entry, SL, TP) Hinglish me bata."""
+TASK:
+{task_instr}"""
 
     try:
         g_headers = {"x-goog-api-key": gemini_key, "Content-Type": "application/json"}
@@ -6375,37 +6334,51 @@ JAWAB DENE KE NIYAM (100% HINGLISH ME):
         if now_t - _gemini_models_cache["time"] < 600 and _gemini_models_cache["models"]:
             available_models = _gemini_models_cache["models"]
         else:
-            list_url = "https://generativelanguage.googleapis.com/v1beta/models"
-            list_resp = requests.get(list_url, headers=g_headers, timeout=5)
-            if list_resp.status_code == 200:
-                models_json = list_resp.json()
-                available_models = []
-                for m in models_json.get("models", []):
-                    name = m.get("name", "")
-                    methods = m.get("supportedGenerationMethods", [])
-                    if "generateContent" in methods and "2.5" not in name and "omni" not in name.lower() and "tts" not in name.lower() and "image" not in name.lower():
-                        available_models.append(name)
+            available_models = []
+            try:
+                list_resp = requests.get("https://generativelanguage.googleapis.com/v1beta/models", headers=g_headers, timeout=6)
+                if list_resp.status_code == 200:
+                    banned = ("tts", "image", "audio", "veo", "embedding", "gemma", "robotics", "computer-use", "aqa", "omni", "live", "thinking")
+                    for m in list_resp.json().get("models", []):
+                        name = m.get("name", "")
+                        nl = name.lower()
+                        methods = m.get("supportedGenerationMethods", [])
+                        if "generateContent" in methods and "flash" in nl and not any(b in nl for b in banned):
+                            available_models.append(name)
 
-                def orig_priority(x):
-                    xl = x.lower()
-                    if "gemini-2.0-flash" in xl and "lite" not in xl and "exp" not in xl and "preview" not in xl:
-                        return 0
-                    if "gemini-flash-lite-latest" in xl:
-                        return 1
-                    if "flash" in xl and "preview" not in xl:
-                        return 2
-                    return 3
+                    def model_rank(x):
+                        xl = x.lower()
+                        if "gemini-2.5-flash-lite" in xl and "preview" not in xl:
+                            return 0
+                        if "gemini-2.5-flash" in xl and "preview" not in xl:
+                            return 1
+                        if "gemini-2.0-flash-lite" in xl:
+                            return 2
+                        if "gemini-2.0-flash" in xl and "exp" not in xl:
+                            return 3
+                        if "flash-latest" in xl or "flash-lite-latest" in xl:
+                            return 4
+                        return 5
 
-                available_models.sort(key=orig_priority)
-                if available_models:
-                    _gemini_models_cache["time"] = now_t
-                    _gemini_models_cache["models"] = available_models
-            else:
-                available_models = ["models/gemini-2.0-flash", "models/gemini-flash-lite-latest", "models/gemini-1.5-flash"]
+                    available_models.sort(key=model_rank)
+            except Exception:
+                pass
+
+            if not available_models:
+                available_models = [
+                    "models/gemini-2.5-flash-lite",
+                    "models/gemini-2.5-flash",
+                    "models/gemini-2.0-flash",
+                    "models/gemini-flash-latest",
+                ]
+            _gemini_models_cache["time"] = now_t
+            _gemini_models_cache["models"] = available_models
 
         reply_text = None
         used_model = ""
-        for model_path in available_models[:3]:
+        last_err = "Unknown error"
+
+        for model_path in available_models[:4]:
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent"
                 resp = requests.post(
@@ -6413,26 +6386,37 @@ JAWAB DENE KE NIYAM (100% HINGLISH ME):
                     headers=g_headers,
                     json={
                         "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {"temperature": 0.0}
+                        "generationConfig": {"temperature": 0.1}
                     },
-                    timeout=(3.5, 9.5)
+                    timeout=(5.0, 22.0)
                 )
                 if resp.status_code == 200:
                     rjson = resp.json()
-                    if "candidates" in rjson and rjson["candidates"]:
-                        parts = rjson["candidates"][0].get("content", {}).get("parts", [])
+                    cands = rjson.get("candidates") or []
+                    if cands:
+                        parts = cands[0].get("content", {}).get("parts") or []
                         if parts and "text" in parts[0]:
                             used_model = model_path.replace("models/", "")
                             reply_text = parts[0]["text"]
                             break
-            except Exception:
+                    last_err = f"{model_path}: Empty candidates"
+                else:
+                    err_msg = ""
+                    try:
+                        err_msg = resp.json().get("error", {}).get("message", "")[:140]
+                    except Exception:
+                        err_msg = resp.text[:140]
+                    last_err = f"{model_path} -> HTTP {resp.status_code}: {err_msg}"
+            except Exception as ex:
+                last_err = f"{model_path} -> {str(ex)[:120]}"
                 continue
 
         if not reply_text:
-            return jsonify({"status": "error", "message": "Gemini server busy tha, ek baar phir ASK AI dabayein."}), 500
+            _gemini_models_cache["time"] = 0
+            return jsonify({"status": "error", "message": f"Gemini fail hua ({last_err}). Agar 429 hai toh 30 sec ruk kar try kar."}), 500
 
         news_header = "📰 === LIVE CRYPTO NEWS & SENTIMENT DESK ===\n" + "\n".join(f"• {h}" for h in live_news[:4])
-        final_output = f"{news_header}\n\n" + "="*55 + f"\n\n🧠 === GEMINI MENTOR AI ({used_model} | DESI HINGLISH AUDIT) ===\n{reply_text}"
+        final_output = f"{news_header}\n\n" + "="*55 + f"\n\n🧠 === GEMINI MENTOR AI ({used_model} | DENSITY ORDERFLOW AUDIT) ===\n{reply_text}"
         return jsonify({"status": "ok", "reply": final_output})
 
     except Exception as e:
